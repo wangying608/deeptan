@@ -1,0 +1,5 @@
+https://docs.scvi-tools.org/en/stable/user_guide/models/multivi.html
+https://docs.scvi-tools.org/en/stable/api/reference/scvi.model.MULTIVI.html#scvi.model.MULTIVI
+
+https://www.nature.com/articles/s41592-023-01909-9
+# MultiVI: deep generative model for the integration of multimodal data

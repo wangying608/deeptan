@@ -1,0 +1,289 @@
+use chrono::Local;
+use ndarray::prelude::*;
+use ndarray_npy::{read_npy, NpzReader, NpzWriter};
+use ndarray_rand::rand;
+use rand::Rng;
+use rayon::prelude::*;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fs::File;
+use std::path::Path;
+
+mod mutualinfo;
+mod processing;
+mod slidingwindow;
+mod sortf64;
+
+use mutualinfo::iter_feat_pairs_mi;
+use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remove_feat_similar};
+
+/// Generate a mutual information matrix with dynamic data filtering for the next graph initialization.
+///
+/// **Steps**:
+/// 1. Scale features to `[0,1]`.
+/// 2. Remove features with low standard deviation (using dynamic sliding windows).
+/// 3. Detect similar features pairs (using dynamic 2D sliding windows for optimal PCC(`abs=true`) calculation) then remove redundant features.
+/// 4. Calculate mutual information for each feature pair.
+/// 5. Filter mutual information values and feature pairs.
+/// 6. Save sorted MI values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
+///
+/// **Input**:
+/// + `path_output_npz`: path to save the output NPZ files
+/// + `data`: input data with shape (n_feat, n_samp)
+/// + `thre_sd`: threshold for removing features with low standard deviation
+/// + `thre_pcc`: threshold for removing redundant features
+/// + `thre_mi`: threshold for removing feature pairs with low mutual information
+/// + `ratio_max_window`: maximum (window_size / num_samples)
+/// + `ratio_min_window`: minimum (window_size / num_samples)
+/// + `ratio_step_window`: window_size_step_len / num_samples
+/// + `ratio_step_sliding`: sliding_step_len / num_samples
+///
+/// **Output**:
+/// + NPZ file
+///     + `mi_values`: sorted mutual information values
+///     + `feat_pairs`: corresponding feature pairs (edges)
+///     + `processed_mat`: The processed input matrix after *Step 3*
+///     + `mat_feat_indices`: The feature indices of the processed matrix
+///     + `mat_simi_feat_pairs`: Similar feature pairs given by *Step 3*
+///     + input_args: The input arguments
+pub fn mi_mat_with_data_filter(
+    path_output_npz: &str,
+    data: &Array2<f64>,
+    thre_sd: f64,
+    thre_pcc: f64,
+    thre_mi: f64,
+    ratio_max_window: f64,
+    ratio_min_window: f64,
+    ratio_step_window: f64,
+    ratio_step_sliding: f64,
+) -> Result<(), Box<dyn Error>> {
+    // Print start time
+    println!("\nStart time: {:?}\n", Local::now());
+
+    // 1. Scale features to [0,1]
+    let data_scaled = normalize_2d_array(data);
+
+    // 2. Remove features with low standard deviation
+    let (data_0, feat_indices_0) = remove_feat_low_sd(
+        &data_scaled,
+        thre_sd,
+        ratio_max_window,
+        ratio_min_window,
+        ratio_step_window,
+        ratio_step_sliding,
+    );
+    println!(
+        "Shape of data after removing features with low standard deviation: {:?}",
+        data_0.shape()
+    );
+
+    // 3. Detect similar features pairs and remove redundant features
+    let (data_1, mut feat_indices_1, mut simi_feat_pairs) = remove_feat_similar(
+        &data_0,
+        thre_pcc,
+        ratio_max_window,
+        ratio_min_window,
+        ratio_step_window,
+        ratio_step_sliding,
+    );
+    println!(
+        "Shape of data after removing similar features: {:?}",
+        data_1.shape()
+    );
+
+    // Print time
+    println!("\nStart calculating mutual information: {:?}", Local::now());
+
+    // 4. Calculate mutual information for each feature pair
+    let (mi_values, feat_pairs) = iter_feat_pairs_mi(
+        &data_1,
+        ratio_max_window,
+        ratio_min_window,
+        ratio_step_window,
+        ratio_step_sliding,
+        true,
+    );
+
+    // 5. Remove feature pairs with low mutual information.
+    // mi_values and feat_pairs have been sorted. We check elements from the end.
+    let last2keep = check_sorted_vals(&mi_values, thre_mi);
+    // Keep pairs that idx >= last2keep
+    let mi_values_o: Array1<f64> = mi_values.slice(s![..last2keep]).to_owned();
+    let mut feat_pairs_o: Array2<i64> = feat_pairs.slice(s![..last2keep, ..]).to_owned();
+    println!(
+        "Number of feature pairs after removing low mutual information: {}",
+        last2keep + 1
+    );
+
+    // Convert feature indices to original indices.
+    // Create a map from new indices (feat_indices_1) to original indices (feat_indices_0).
+    let mut map_new2orig: HashMap<usize, usize> = HashMap::new();
+    feat_indices_1.iter().for_each(|&i| {
+        map_new2orig.insert(i, *feat_indices_0.get(i).unwrap());
+    });
+
+    // Update indices
+    feat_pairs_o.outer_iter_mut().for_each(|mut row| {
+        row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
+        row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
+    });
+    simi_feat_pairs.outer_iter_mut().for_each(|mut row| {
+        row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
+        row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
+    });
+    feat_indices_1.par_iter_mut().for_each(|i| {
+        *i = *map_new2orig.get(i).unwrap();
+    });
+    let data_1_feat_indices_o: Array1<i64> =
+        Array1::from_vec(feat_indices_1.par_iter().map(|&i| i as i64).collect());
+
+    // 6. Save data to NPZ file
+    save_npz(
+        path_output_npz,
+        &mi_values_o,
+        &feat_pairs_o,
+        &data_1,
+        &data_1_feat_indices_o,
+        &simi_feat_pairs,
+        thre_sd,
+        thre_pcc,
+        thre_mi,
+        ratio_max_window,
+        ratio_min_window,
+        ratio_step_window,
+        ratio_step_sliding,
+    )?;
+
+    // Print end time
+    println!("\nEnd time:   {:?}\n", Local::now());
+
+    Ok(())
+}
+
+/// Save all data to a NPZ file
+fn save_npz(
+    path_output_npz: &str,
+    mi_values: &Array1<f64>,
+    feat_pairs: &Array2<i64>,
+    processed_mat: &Array2<f64>,
+    feat_indices: &Array1<i64>,
+    simi_feat_pairs: &Array2<i64>,
+    thre_sd: f64,
+    thre_pcc: f64,
+    thre_mi: f64,
+    ratio_max_window: f64,
+    ratio_min_window: f64,
+    ratio_step_window: f64,
+    ratio_step_sliding: f64,
+) -> Result<(), Box<dyn Error>> {
+    let mut path_npz = format!("{}.npz", path_output_npz);
+    // Check if path_output_npz ends with .npz
+    if path_output_npz.ends_with(".npz") {
+        path_npz = path_output_npz.to_string();
+    }
+    // Check if the file exists. If it does, add timestamp to the file name.
+    if Path::new(&path_npz).exists() {
+        let timestamp = Local::now().format("%Y%m%d%H%M%S");
+        if path_output_npz.ends_with(".npz") {
+            path_npz = path_output_npz.replace(".npz", &format!("_{}.npz", timestamp));
+        } else {
+            path_npz = format!("{}_{}.npz", path_output_npz, timestamp);
+        }
+    }
+    let path_npz_c = &path_npz.clone();
+
+    let file_npz = File::create(path_npz_c)?;
+    let mut npz = NpzWriter::new_compressed(file_npz);
+    npz.add_array("mi_values", mi_values)?;
+    npz.add_array("feat_pairs", feat_pairs)?;
+    npz.add_array("processed_mat", &processed_mat)?;
+    npz.add_array("mat_feat_indices", &feat_indices)?;
+    npz.add_array("mat_simi_feat_pairs", &simi_feat_pairs)?;
+    // Save input parameters as length 1 ndarray
+    npz.add_array("thre_sd", &Array1::from_vec(vec![thre_sd]))?;
+    npz.add_array("thre_pcc", &Array1::from_vec(vec![thre_pcc]))?;
+    npz.add_array("thre_mi", &Array1::from_vec(vec![thre_mi]))?;
+    npz.add_array(
+        "ratio_max_window",
+        &Array1::from_vec(vec![ratio_max_window]),
+    )?;
+    npz.add_array(
+        "ratio_min_window",
+        &Array1::from_vec(vec![ratio_min_window]),
+    )?;
+    npz.add_array(
+        "ratio_step_window",
+        &Array1::from_vec(vec![ratio_step_window]),
+    )?;
+    npz.add_array(
+        "ratio_step_sliding",
+        &Array1::from_vec(vec![ratio_step_sliding]),
+    )?;
+    // Finish writing
+    npz.finish()?;
+
+    println!("Results have been saved to \"{}\"", path_npz_c);
+
+    Ok(())
+}
+
+/// Random 2D ndarray generator
+pub fn random_2d_array(n_feat: usize, n_samp: usize) -> Array2<f64> {
+    let mut rng = rand::thread_rng();
+    let data: Vec<f64> = (0..n_feat * n_samp).map(|_| rng.gen()).collect();
+    Array2::from_shape_vec((n_feat, n_samp), data).unwrap()
+}
+
+/// Random 1D ndarray generator
+pub fn random_two_simi_vectors(vlen: usize) -> (Array1<f64>, Array1<f64>) {
+    // Generate two random 1d arrays with the same length <veclen>, containing f64 values
+    let mut v1 = Array::<f64, _>::zeros(vlen);
+    let mut v2 = Array::<f64, _>::zeros(vlen);
+    let mut rng = rand::thread_rng();
+    for x in v1.iter_mut() {
+        *x = rng.gen();
+    }
+    for x in v2.iter_mut() {
+        *x = rng.gen();
+    }
+
+    // Use v2 as noise, generate new v2 = v1 + 0.1 * v2
+    let noise = 0.001;
+    for (x, y) in v1.iter().zip(v2.iter_mut()) {
+        *y = x + noise * *y;
+    }
+
+    // Min-max normalization
+    v1 = Array1::from_vec(normalize_vecf64(&v1.to_vec()));
+    v2 = Array1::from_vec(normalize_vecf64(&v2.to_vec()));
+
+    println!("normed v1: {:?}", v1);
+    println!("normed v2: {:?}", v2);
+    (v1, v2)
+}
+
+/// Read NPZ file into ndarray (n_feat x n_samp)
+pub fn read_npz_to_array2d(path_npz: &str) -> Result<Array2<f64>, Box<dyn Error>> {
+    let mut npz = NpzReader::new(File::open(path_npz)?)?;
+    let mat: Array2<f64> = npz.by_name("mat")?;
+    Ok(mat)
+}
+pub fn read_npy_to_array2d(path_npy: &str) -> Result<Array2<f64>, Box<dyn Error>> {
+    let mat: Array2<f64> = read_npy(path_npy)?;
+    Ok(mat)
+}
+
+/// mi_values and feat_pairs have been sorted. We can check elements from the end.
+fn check_sorted_vals(vals: &Array1<f64>, threshold: f64) -> usize {
+    let num_pairs = vals.len();
+    // Start from the end
+    let mut chk_i = num_pairs - 1;
+    while chk_i > 0 {
+        // Stop if the current pair has a higher MI than the threshold
+        if vals[chk_i] > threshold {
+            break;
+        }
+        chk_i -= 1;
+    }
+    chk_i
+}
