@@ -3,6 +3,7 @@ from multiprocessing import cpu_count
 import numpy as np
 import pandas as pd
 from litdata import optimize, StreamingDataLoader, StreamingDataset, CombinedStreamingDataset
+from lightning import LightningDataModule
 
 
 class MyDataset4Trn:
@@ -163,25 +164,80 @@ def read_litdata_to_ncv(
     return dataloader_trn, dataloader_val, dataloader_test
 
 
-if __name__ == "__main__":
-    k_outer = 10
-    k_inner = 5
-    seed_split = 42
-    optimized_data_dir = "/mnt/hdd2/homext/wuch/xn2p/test/data/zma"
-    paths_omics = [
-        "/mnt/bank/CropGS-Hub/maize_1404/foruse/tpm_385_f.csv"
-    ]
-    path_label = "/mnt/bank/CropGS-Hub/maize_1404/foruse/maize_385_4_traits_fullnames.csv"
-    out_dim = 1
-    traits_name = ["DTT", "PH", "KNPE", "KWPE"]
+class MyDataModule4Train(LightningDataModule):
+    """
+    LightningDataModule for training models with LitData.
 
-    # data_ini = MyDataset4Trn(paths_omics, path_label, out_dim, traits_name, False, True)
-    # print(data_ini.__len__())
-    # print(data_ini.__getitem__(0)["index"])
-    # print(data_ini.__getitem__(0)["label"])
-    # print(data_ini.__getitem__(0)["omics"])
-    # print(data_ini.__getitem__(0)["id"])
+    Args:
+    - `litdata_dir` (str): Directory containing the LitData fragments.
+    - `k_outer` (int): Number of outer folds.
+    - `k_inner` (int): Number of inner folds.
+    - `which_outer_testset` (int): Index of the outer test set fold.
+    - `which_inner_valset` (int): Index of the inner validation set fold.
+    - `batch_size` (int): Batch size for training and evaluation.
+    """
+    def __init__(
+            self,
+            litdata_dir: str,
+            k_outer: int,
+            k_inner: int,
+            which_outer_testset: int,
+            which_inner_valset: int,
+            batch_size: int,
+        ):
+        super().__init__()
+        self.litdata_dir = litdata_dir
+        self.k_outer = k_outer
+        self.k_inner = k_inner
+        self.which_outer_testset = which_outer_testset
+        self.which_inner_valset = which_inner_valset
+        self.batch_size = batch_size
 
-    # data_opt_trn(optimized_data_dir, paths_omics, path_label, out_dim, traits_name, k_outer, k_inner, seed_split, True, True)
+    def setup(self, stage=None):
+        self.dataloder_trn, self.dataloader_val, self.dataloader_test = read_litdata_to_ncv(
+            self.litdata_dir,
+            self.k_outer,
+            self.k_inner,
+            self.which_outer_testset,
+            self.which_inner_valset,
+            self.batch_size,
+        )
+    
+    def train_dataloader(self):
+        return self.dataloder_trn
+    def val_dataloader(self):
+        return self.dataloader_val
+    def test_dataloader(self):
+        return self.dataloader_test
 
-    read_litdata_to_ncv(optimized_data_dir, k_outer, k_inner, 0, 0, 16)
+
+def read_litdata_ncv_for_mi(
+        litdata_dir: str,
+        output_dir: str,
+        k_outer: int,
+        k_inner: int,
+        which_outer_test: int,
+        which_inner_val: int,
+    ):
+    """
+    Read specific NCV litdata from directories and calculate MI for each inner training set.
+    """
+    # Init fragment indices for test dataset
+    n_fragments = int(k_outer * k_inner)
+    n_f_test = int(n_fragments / k_outer)
+    indices_test_dataset = [i for i in range(int(which_outer_test * n_f_test), int((which_outer_test + 1) * n_f_test))]
+    # Indices excluding test dataset
+    indices_train_dataset = [i for i in range(n_fragments) if i not in indices_test_dataset]
+    # Indices for validation dataset
+    parts = np.array_split(indices_train_dataset, k_inner)
+    indices_val_dataset = parts[which_inner_val]
+    indices_trn_dataset = [i for i in indices_train_dataset if i not in indices_val_dataset]
+
+    # Read litdata from directories
+    dataset_train = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_trn_dataset]
+    combined_dataset_trn = CombinedStreamingDataset(dataset_train)
+
+    # Run the compiled MI-based proccessing procedure on training data
+    
+
+    return None
