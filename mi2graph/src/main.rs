@@ -58,7 +58,7 @@ fn cli() -> Command {
             Arg::new("in")
                 .short('i')
                 .long("input")
-                .help("Input NumPy NPY file path")
+                .help("Input NumPy NPY file path (A matrix with a shape of n_feat x n_samp)")
                 .required(true)
                 .action(ArgAction::Set),
             Arg::new("out")

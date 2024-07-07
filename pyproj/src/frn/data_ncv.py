@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from litdata import optimize, StreamingDataLoader, StreamingDataset, CombinedStreamingDataset
 from lightning import LightningDataModule
+from torch import Tensor
 
 
 class MyDataset4Trn:
@@ -64,10 +65,10 @@ class MyDataset4Trn:
     
     def __getitem__(self, index):
         if self.transpose_omics:
-            omics = [df.iloc[:, index].astype(np.float32) for df in self.omics_dfs]
+            omics = [df.iloc[:, index].to_numpy(np.float32) for df in self.omics_dfs]
         else:
-            omics = [df.iloc[index, :].astype(np.float32) for df in self.omics_dfs]
-        label = self.label_df.iloc[index].astype(np.float32)
+            omics = [df.iloc[index, :].to_numpy(np.float32) for df in self.omics_dfs]
+        label = self.label_df.iloc[index].to_numpy(np.float32)
         id_index = self.label_df.index[index]
         data_o = {"index": index, "label": label, "omics": omics, "id": id_index}
         return data_o
@@ -86,6 +87,7 @@ def data_opt_trn(
         transpose_omics: bool = False,
     ):
     """
+    Optimize the data for training using litdata.
     """
     # Find the sample number that is divisible by k_outer and k_inner
     n_samples = len(pd.read_csv(path_label, index_col=0).index)
@@ -112,16 +114,39 @@ def data_opt_trn(
     fragments = np.array_split(indices, n_fragments)
 
     # # Optimize the data for each fragment
-    n_threads = round(cpu_count() * 0.9)
+    # n_threads = round(cpu_count() * 0.9)
     for i in range(n_fragments):
         optimize(
             fn = data_init.__getitem__,
             inputs = fragments[i].tolist(),
             output_dir = os.path.join(output_dir, f"fragment_{i}"),
             chunk_bytes = "64MB",
-            num_workers = n_threads,
+            # num_workers = n_threads,
             # compression = "zstd",
         )
+
+
+def get_indices_ncv(
+        k_outer: int,
+        k_inner: int,
+        which_outer_test: int,
+        which_inner_val: int,
+    ):
+    """
+    Get indices of fragments for NCV.
+    """
+    # Init fragment indices for test dataset
+    n_fragments = int(k_outer * k_inner)
+    n_f_test = int(n_fragments / k_outer)
+    indices_test_dataset = [i for i in range(int(which_outer_test * n_f_test), int((which_outer_test + 1) * n_f_test))]
+    # Indices excluding test dataset
+    indices_train_dataset = [i for i in range(n_fragments) if i not in indices_test_dataset]
+    # Indices for validation dataset
+    parts = np.array_split(indices_train_dataset, k_inner)
+    indices_val_dataset = parts[which_inner_val]
+    indices_trn_dataset = [i for i in indices_train_dataset if i not in indices_val_dataset]
+    
+    return indices_trn_dataset, indices_val_dataset, indices_test_dataset
 
 
 def read_litdata_to_ncv(
@@ -135,19 +160,8 @@ def read_litdata_to_ncv(
     """
     Read litdata from directories and return dataloader for NCV.
     """
-    # Init fragment indices for test dataset
-    n_fragments = int(k_outer * k_inner)
-    n_f_test = int(n_fragments / k_outer)
-    indices_test_dataset = [i for i in range(int(which_outer_test * n_f_test), int((which_outer_test + 1) * n_f_test))]
-    # Indices excluding test dataset
-    indices_train_dataset = [i for i in range(n_fragments) if i not in indices_test_dataset]
-    # Indices for validation dataset
-    parts = np.array_split(indices_train_dataset, k_inner)
-    indices_val_dataset = parts[which_inner_val]
-    indices_trn_dataset = [i for i in indices_train_dataset if i not in indices_val_dataset]
-    # print(f"Indices for test dataset: {indices_test_dataset}")
-    # print(f"Indices for validation dataset: {indices_val_dataset}")
-    # print(f"Indices for training dataset: {indices_trn_dataset}")
+    # Get indices for NCV
+    indices_trn_dataset, indices_val_dataset, indices_test_dataset = get_indices_ncv(k_outer, k_inner, which_outer_test, which_inner_val)
 
     # Read litdata from directories
     dataset_train = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_trn_dataset]
@@ -161,6 +175,7 @@ def read_litdata_to_ncv(
     dataloader_trn = StreamingDataLoader(combined_dataset_trn, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
     dataloader_val = StreamingDataLoader(combined_dataset_val, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
     dataloader_test = StreamingDataLoader(combined_dataset_test, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
+    
     return dataloader_trn, dataloader_val, dataloader_test
 
 
@@ -211,6 +226,45 @@ class MyDataModule4Train(LightningDataModule):
         return self.dataloader_test
 
 
+def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
+    """
+    Steps:
+    1. Remove feature if its range is similar to zero.
+    2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
+    
+    Args:
+    - `array` (np.ndarray): Input array with shape (n_features, n_samples).
+    - `threshold_ptp` (float): Threshold for the range.
+    """
+    values_min = np.min(in_array, axis=1)
+    values_max = np.max(in_array, axis=1)
+    values_ptp = values_max - values_min
+
+    out_array = np.copy(in_array) + 1e-4
+    feat2rm = np.where(values_ptp < 1e-3)[0]
+    
+    for i in range(in_array.shape[0]):
+        if i in feat2rm:
+            continue
+        if values_ptp[i] > threshold_ptp:
+            # Apply log2 transformation
+            out_array[i, :] = np.log2(out_array[i, :])
+    
+    out_array = np.delete(out_array, feat2rm, axis=0)
+
+    values_min = np.min(out_array, axis=1)
+    values_max = np.max(out_array, axis=1)
+    # out_array = (out_array - values_min) / (values_max - values_min)
+    out_array = (out_array - values_min[:, None]) / (values_max[:, None] - values_min[:, None])
+    return out_array, values_min, values_max, feat2rm
+
+def omics_tensor_list_to_np(batch: list[Tensor]):
+    cated = np.concatenate([ts.numpy() for ts in batch], axis=None)
+    return cated
+    # omics = [ts.numpy() for ts in batch]
+    # return omics
+
+
 def read_litdata_ncv_for_mi(
         litdata_dir: str,
         output_dir: str,
@@ -218,26 +272,53 @@ def read_litdata_ncv_for_mi(
         k_inner: int,
         which_outer_test: int,
         which_inner_val: int,
-    ):
+        threshold_ptp: float=100.0,
+        path_excutable: str = "mi2graph",
+        thre_sd: float = 0.05,
+        thre_pcc: float = 0.9,
+        thre_mi: float = 0.2,
+    ) -> None:
     """
     Read specific NCV litdata from directories and calculate MI for each inner training set.
     """
-    # Init fragment indices for test dataset
-    n_fragments = int(k_outer * k_inner)
-    n_f_test = int(n_fragments / k_outer)
-    indices_test_dataset = [i for i in range(int(which_outer_test * n_f_test), int((which_outer_test + 1) * n_f_test))]
-    # Indices excluding test dataset
-    indices_train_dataset = [i for i in range(n_fragments) if i not in indices_test_dataset]
-    # Indices for validation dataset
-    parts = np.array_split(indices_train_dataset, k_inner)
-    indices_val_dataset = parts[which_inner_val]
-    indices_trn_dataset = [i for i in indices_train_dataset if i not in indices_val_dataset]
+    # Get indices for NCV
+    indices_trn_dataset, indices_val_dataset, indices_test_dataset = get_indices_ncv(k_outer, k_inner, which_outer_test, which_inner_val)
 
     # Read litdata from directories
     dataset_train = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_trn_dataset]
     combined_dataset_trn = CombinedStreamingDataset(dataset_train)
+    dataloader_trn = StreamingDataLoader(combined_dataset_trn)
 
     # Run the compiled MI-based proccessing procedure on training data
+    trnset_npy_dir = os.path.join(output_dir, "tmp_trnset")
+    os.makedirs(trnset_npy_dir, exist_ok=True)
+    mi_net_dir = os.path.join(output_dir, "mi_net_for_traindataset")
+    os.makedirs(mi_net_dir, exist_ok=True)
     
+    # Read (multiple) omics' data from dataloader_trn and save it to a matrix, then save the matrix to a NPY file.
+    trn_data_matrix = [omics_tensor_list_to_np(batch['omics']) for batch in dataloader_trn]
+    trn_data_matrix = np.array(trn_data_matrix).astype(np.float64).transpose()
+    
+    # Scale and log2 transformation for each feature
+    trn_data_matrix, values_min, values_max, feat2rm = auto_proc_feat4trn(trn_data_matrix, threshold_ptp)
 
+    # Check if the matrix contains 'None' value
+    if np.any(np.isnan(trn_data_matrix)):
+        raise ValueError("The matrix contains 'None' value.")
+    
+    # Save the matrix to a NPY file
+    path_npy = os.path.join(trnset_npy_dir, f"trn_{which_outer_test}_{which_inner_val}.npy")
+    np.save(path_npy, trn_data_matrix)
+    
+    # Save the min and max values for scaling back & scaling validation and testing dataset
+    path_range = os.path.join(mi_net_dir, f"trn_{which_outer_test}_{which_inner_val}_range.npz")
+    np.savez(path_range, values_min=values_min, values_max=values_max, feat2rm=feat2rm)
+    
+    # Run
+    path_npz = os.path.join(mi_net_dir, f"trn_{which_outer_test}_{which_inner_val}.npz")
+    cmd_mi = f"{path_excutable} -i {path_npy} -o {path_npz} --thresd {thre_sd} --threpcc {thre_pcc} --thremi {thre_mi}"
+    print("\nRUNNING: ", cmd_mi, "\n")
+    os.system(cmd_mi)
+
+    os.remove(path_npy)
     return None
