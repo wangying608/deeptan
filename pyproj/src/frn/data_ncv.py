@@ -273,7 +273,7 @@ def read_litdata_ncv_for_mi(
         which_outer_test: int,
         which_inner_val: int,
         threshold_ptp: float=100.0,
-        path_excutable: str = "mi2graph",
+        path_excutable: str | None = None,
         thre_sd: float = 0.05,
         thre_pcc: float = 0.9,
         thre_mi: float = 0.2,
@@ -281,6 +281,12 @@ def read_litdata_ncv_for_mi(
     """
     Read specific NCV litdata from directories and calculate MI for each inner training set.
     """
+    # Check if path_excutable is None
+    if path_excutable is None:
+        path_excutable = os.path.join(os.path.dirname(__file__), "mi2graph")
+    if not os.path.exists(path_excutable):
+        raise FileNotFoundError(f"Executable file not found: {path_excutable}")
+
     # Get indices for NCV
     indices_trn_dataset, indices_val_dataset, indices_test_dataset = get_indices_ncv(k_outer, k_inner, which_outer_test, which_inner_val)
 
