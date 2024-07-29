@@ -151,9 +151,10 @@ fn write_encoded_vcf2pkl(
 fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dyn Error>> {
     // Read gff dict
     let decompressed_data = read_gz(path_gff_dict)?;
-    let gff_dict: GffDict = bincode::deserialize(&decompressed_data)?;
+    let gff_dict_dec: GffDict = bincode::deserialize(&decompressed_data)?;
+    let gff_dict = gff_dict_dec.data;
 
-    let block_ids: Vec<String> = gff_dict.data.keys().map(|k| k.to_string()).collect();
+    let block_ids: Vec<String> = gff_dict.keys().map(|k| k.to_string()).collect();
 
     let mut reader_vcf = vcf::io::reader::Builder::default().build_from_path(path_vcf)?;
     let header = reader_vcf.read_header()?;
@@ -163,24 +164,34 @@ fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dy
         .map(|s| s.to_string())
         .collect::<Vec<String>>();
     let n_samples = sample_ids.len();
-    println!("\n🌾 There are {} samples in the VCF file.\n", n_samples);
+    println!("\n🌾 Found {} samples in the VCF file.\n", n_samples);
     println!("🔎 Checking for SNPs in the VCF file...\n");
 
     let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
     for result in reader_vcf.records() {
-        let detect_ok = result.is_ok();
-        if !detect_ok {
+        if !result.is_ok() {
             continue;
-        }
-        let record = result.unwrap();
-        // if record.samples().is_empty() {
-        //     continue;
-        // }
-        let (snp_idx, snp_info) = check_snp(&record, &gff_dict, &block_ids);
-        if !snp_idx.is_empty() {
-            snp_dict.insert(snp_idx, snp_info);
+        } else {
+            let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids);
+            if !snp_check_kv.snp_id.is_empty() {
+                snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+            }
         }
     }
+
+    // // Read whole VCF file into memory
+    // let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
+    // // Multi-threading:
+    // let snp_dict_vec: Vec<SnpCheckKV> = records
+    //     .into_iter()
+    //     .filter_map(|r| check_snp(&r, &gff_dict, &block_ids).into())
+    //     .collect();
+    // let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
+    // for snp_check_kv in snp_dict_vec {
+    //     if !snp_check_kv.snp_id.is_empty() {
+    //         snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+    //     }
+    // }
 
     // Get SNP ids
     let mut snp_ids: Vec<String> = snp_dict.keys().map(|k| k.to_string()).collect();
@@ -212,9 +223,9 @@ fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dy
 
 fn check_snp(
     record_x: &vcf::Record,
-    gff_dict: &GffDict,
+    gff_dict: &HashMap<String, GeneInfo>,
     block_ids: &Vec<String>,
-) -> (String, SnpInfo) {
+) -> SnpCheckKV {
     let mut snp_idx = String::new();
     let mut snp_info = SnpInfo {
         chrom: String::new(),
@@ -231,7 +242,7 @@ fn check_snp(
         let seqid = record_x.reference_sequence_name().to_string();
 
         // Check position in gff dict
-        let snp_found = check_pos(&gff_dict, &block_ids, &seqid, pos_x);
+        let snp_found = check_pos(gff_dict, &block_ids, &seqid, pos_x);
 
         if snp_found.found {
             let ref_base = record_x.reference_bases().to_string();
@@ -256,10 +267,18 @@ fn check_snp(
             };
         }
     }
-    return (snp_idx, snp_info);
+    return SnpCheckKV {
+        snp_id: snp_idx,
+        snp_info: snp_info,
+    };
 }
 
-fn check_pos(gff_dict: &GffDict, block_ids: &Vec<String>, seq_name: &str, pos: usize) -> SnpFound {
+fn check_pos(
+    gff_dict: &HashMap<String, GeneInfo>,
+    block_ids: &Vec<String>,
+    seq_name: &str,
+    pos: usize,
+) -> SnpFound {
     let mut snp_found = SnpFound {
         found: false,
         block_ids: vec![],
@@ -267,7 +286,7 @@ fn check_pos(gff_dict: &GffDict, block_ids: &Vec<String>, seq_name: &str, pos: u
     let n_genome_block = block_ids.len();
     let mut isfound: Vec<bool> = vec![false; n_genome_block];
     isfound.par_iter_mut().enumerate().for_each(|(i, isf)| {
-        let gene_info = gff_dict.data.get(&block_ids[i]).unwrap();
+        let gene_info = gff_dict.get(&block_ids[i]).unwrap();
         *isf = check_pos_single(gene_info, seq_name, pos);
     });
     // Check if any `true` exists in isfound
@@ -501,7 +520,7 @@ struct SnpFound {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct VcfInfo {
+struct VcfInfo {
     snp_dict: HashMap<String, SnpInfo>,
     snp_ids: Vec<String>,
     sample_ids: Vec<String>,
@@ -509,8 +528,14 @@ pub struct VcfInfo {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct VcfMat {
+struct VcfMat {
     mat: Vec<i8>,
     snp_ids: Vec<String>,
     sample_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SnpCheckKV {
+    snp_id: String,
+    snp_info: SnpInfo,
 }
