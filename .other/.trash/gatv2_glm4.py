@@ -35,7 +35,7 @@ class GATv2Layer(nn.Module):
 
         # Concatenation of all attention heads
         if concat:
-            self.concat_linear = nn.Linear(out_features * n_heads, out_features)
+            self.concat_heads = nn.Linear(out_features * n_heads, out_features)
 
         self.leakyrelu = nn.LeakyReLU(negative_slope)
 
@@ -78,6 +78,23 @@ class GATv2Layer(nn.Module):
             N = Wh.size(0)
             a_input = torch.cat([Wh.repeat(1, N).view(N * N, -1), Wh.repeat(N, 1)], dim=1).view(N, -1, 2 * self.out_features)
             e = self.leakyrelu(torch.matmul(a_input, self.a).squeeze(2))
+            #
+            print("\n")
+            print(f"shape of e: {e.shape}")
+            print(f"shape of adj: {adj.shape}")
+            print(f"shape of h: {Wh.shape}")
+            print(f"shape of a_input: {a_input.shape}")
+            print(f"shape of a: {self.a.shape}")
+            print("\n")
+            """
+            shape of e: torch.Size([53, 53])
+            shape of adj: torch.Size([53, 53])
+            shape of h: torch.Size([53, 1])
+            shape of a_input: torch.Size([53, 53, 2])
+            shape of a: torch.Size([2, 1])
+            """
+            #
+
             zero_vec = -9e15 * torch.ones_like(e)
             attention = torch.where(adj > 0, e, zero_vec)
             attention = F.softmax(attention, dim=1)
@@ -86,7 +103,7 @@ class GATv2Layer(nn.Module):
             head_outputs.append(h_prime.squeeze(0))
         
         if self.concat:
-            output = self.concat_linear(torch.cat(head_outputs, dim=1))
+            output = self.concat_heads(torch.cat(head_outputs, dim=1))
         else:
             output = torch.mean(torch.stack(head_outputs), dim=0)
         
@@ -114,7 +131,7 @@ class GATv2(L.LightningModule):
         self.gat_2 = GATv2Layer(nhid, nclass, nheads, concat, dropout, negative_slope)
 
         # Aggregate graph representation
-
+        # self.graph_aggregator = 
 
     def forward(self, x, adj):
         x = F.dropout(x, self.dropout, training=self.training)
@@ -122,17 +139,22 @@ class GATv2(L.LightningModule):
         x = F.dropout(x, self.dropout, training=self.training)
         x = self.gat_2(x, adj)
         # x = F.log_softmax(x, dim=1)
-        x = torch.sum(x, dim=0)
+        # x = torch.sum(x, dim=0)
         return x
 
     def training_step(self, batch, batch_idx):
         x, adj, labels = batch
         # output = self(x, adj).unsqueeze(0)
-        # Run foreach sample in batch
+        # Run for each sample in batch
         sample_outputs = []
         for x_i, adj_i in zip(x, adj):
+            print(x_i.shape)
             sample_outputs.append(self(x_i, adj_i))
         output = torch.cat(sample_outputs, dim=0)
+        print(x.shape)#torch.Size([8, 53, 16])
+        print(sample_outputs[0].shape)#torch.Size([53, 1])
+        print(output.shape)#torch.Size([424, 1])
+        print(labels.shape)#torch.Size([8, 1])
         loss = F.nll_loss(output, labels.squeeze(-1))
         self.log('train_loss', loss)
         return loss

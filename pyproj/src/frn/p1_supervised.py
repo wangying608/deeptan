@@ -10,7 +10,6 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall
 from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
-from torch_geometric.nn import GATv2Conv, GatedGraphConv
 
 
 seed_everything(2024)
@@ -28,22 +27,7 @@ class PooledGAT(LightningModule):
             dropout: float,
         ):
         super().__init__()
-        # self.conv1 = GCNConv(dataset.num_node_features, 16)
-        # self.conv2 = GCNConv(16, dataset.num_classes)
-
-        self.gat_features = GATv2Conv(
-            in_channels=1,
-            out_channels=node_dim,
-            heads=heads,
-            dropout=dropout,
-            edge_dim=1,
-        )
-        # self.gat_output = GATv2Conv(
-        #     in_channels=node_dim,
-        #     out_channels=1,
-        #     heads=heads,
-        #     dropout=dropout,
-        # )
+        
 
         self.loss_fn = nn.MSELoss()
 

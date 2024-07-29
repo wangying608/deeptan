@@ -1,10 +1,11 @@
 import os
-from multiprocessing import cpu_count
 import numpy as np
 import pandas as pd
-from litdata import optimize, StreamingDataLoader, StreamingDataset, CombinedStreamingDataset
+from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
+from multiprocessing import cpu_count
+n_threads = np.ceil(cpu_count() * 0.8).astype(int)
 
 
 class MyDataset4Trn:
@@ -57,8 +58,8 @@ class MyDataset4Trn:
         # If output_dim > 1, apply one-hot encoding to the label
         if output_dim > 1:
             if round_before_onehot:
-                self.label_df = self.label_df.round()
-            self.label_df = pd.get_dummies(self.label_df, columns=traits_name)
+                self.label_df = self.label_df.round().astype(int)
+            self.label_df = pd.get_dummies(self.label_df)
             
     def __len__(self):
         return len(self.label_df.index)
@@ -72,58 +73,6 @@ class MyDataset4Trn:
         id_index = self.label_df.index[index]
         data_o = {"index": index, "label": label, "omics": omics, "id": id_index}
         return data_o
-
-
-def data_opt_trn(
-        output_dir: str,
-        paths_omics: list[str],
-        path_label: str,
-        output_dim: int,
-        traits_name: str | list[str],
-        k_outer: int,
-        k_inner: int,
-        seed: int = 42,
-        round_before_onehot: bool = False,
-        transpose_omics: bool = False,
-    ):
-    """
-    Optimize the data for training using litdata.
-    """
-    # Find the sample number that is divisible by k_outer and k_inner
-    n_samples = len(pd.read_csv(path_label, index_col=0).index)
-    
-    if n_samples % (k_outer * k_inner) == 0:
-        num2add = 0
-        goal_num = n_samples
-    else:
-        num2add = k_outer * k_inner - (n_samples % (k_outer * k_inner))
-        goal_num = n_samples + num2add
-
-    if num2add > 0:
-        data_init = MyDataset4Trn(paths_omics, path_label, output_dim, traits_name, round_before_onehot, transpose_omics, goal_num, seed)
-    else:
-        data_init = MyDataset4Trn(paths_omics, path_label, output_dim, traits_name, round_before_onehot, transpose_omics, None, seed)
-    
-    n_fragments = int(k_outer * k_inner)
-
-    # Set the random seed
-    np.random.seed(seed)
-    # Generate a random permutation of the indices
-    indices = np.random.permutation(goal_num)
-    # Split the indices into fragments
-    fragments = np.array_split(indices, n_fragments)
-
-    # # Optimize the data for each fragment
-    # n_threads = round(cpu_count() * 0.9)
-    for i in range(n_fragments):
-        optimize(
-            fn = data_init.__getitem__,
-            inputs = fragments[i].tolist(),
-            output_dir = os.path.join(output_dir, f"fragment_{i}"),
-            chunk_bytes = "64MB",
-            # num_workers = n_threads,
-            # compression = "zstd",
-        )
 
 
 def get_indices_ncv(
@@ -143,40 +92,26 @@ def get_indices_ncv(
     indices_train_dataset = [i for i in range(n_fragments) if i not in indices_test_dataset]
     # Indices for validation dataset
     parts = np.array_split(indices_train_dataset, k_inner)
-    indices_val_dataset = parts[which_inner_val]
+    indices_val_dataset = parts[which_inner_val].tolist()
     indices_trn_dataset = [i for i in indices_train_dataset if i not in indices_val_dataset]
     
     return indices_trn_dataset, indices_val_dataset, indices_test_dataset
 
 
-def read_litdata_to_ncv(
+def read_litdata_ncv(
         litdata_dir: str,
-        k_outer: int,
-        k_inner: int,
         which_outer_test: int,
         which_inner_val: int,
         batch_size: int = 16,
     ):
     """
-    Read litdata from directories and return dataloader for NCV.
+    Read litdata from directories and return dataloaders for NCV.
     """
-    # Get indices for NCV
-    indices_trn_dataset, indices_val_dataset, indices_test_dataset = get_indices_ncv(k_outer, k_inner, which_outer_test, which_inner_val)
-
-    # Read litdata from directories
-    dataset_train = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_trn_dataset]
-    dataset_val = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_val_dataset]
-    dataset_test = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_test_dataset]
-    combined_dataset_trn = CombinedStreamingDataset(dataset_train)
-    combined_dataset_val = CombinedStreamingDataset(dataset_val)
-    combined_dataset_test = CombinedStreamingDataset(dataset_test)
-
-    n_threads = round(cpu_count() * 0.9)
-    dataloader_trn = StreamingDataLoader(combined_dataset_trn, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
-    dataloader_val = StreamingDataLoader(combined_dataset_val, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
-    dataloader_test = StreamingDataLoader(combined_dataset_test, batch_size=batch_size, pin_memory=True, num_workers=n_threads)
-    
-    return dataloader_trn, dataloader_val, dataloader_test
+    dir_xoi = os.path.join(litdata_dir, f"ncv_test_{which_outer_test}_val_{which_inner_val}")
+    dataloader_train = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, "train")), batch_size=batch_size, num_workers=n_threads)
+    dataloader_valid = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, "valid")), batch_size=batch_size, num_workers=n_threads)
+    dataloader_test = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, "test")), batch_size=batch_size, num_workers=n_threads)
+    return dataloader_train, dataloader_valid, dataloader_test
 
 
 class MyDataModule4Train(LightningDataModule):
@@ -185,8 +120,6 @@ class MyDataModule4Train(LightningDataModule):
 
     Args:
     - `litdata_dir` (str): Directory containing the LitData fragments.
-    - `k_outer` (int): Number of outer folds.
-    - `k_inner` (int): Number of inner folds.
     - `which_outer_testset` (int): Index of the outer test set fold.
     - `which_inner_valset` (int): Index of the inner validation set fold.
     - `batch_size` (int): Batch size for training and evaluation.
@@ -194,25 +127,19 @@ class MyDataModule4Train(LightningDataModule):
     def __init__(
             self,
             litdata_dir: str,
-            k_outer: int,
-            k_inner: int,
             which_outer_testset: int,
             which_inner_valset: int,
             batch_size: int,
         ):
         super().__init__()
         self.litdata_dir = litdata_dir
-        self.k_outer = k_outer
-        self.k_inner = k_inner
         self.which_outer_testset = which_outer_testset
         self.which_inner_valset = which_inner_valset
         self.batch_size = batch_size
 
     def setup(self, stage=None):
-        self.dataloder_trn, self.dataloader_val, self.dataloader_test = read_litdata_to_ncv(
+        self.dataloder_trn, self.dataloader_val, self.dataloader_test = read_litdata_ncv(
             self.litdata_dir,
-            self.k_outer,
-            self.k_inner,
             self.which_outer_testset,
             self.which_inner_valset,
             self.batch_size,
@@ -268,8 +195,6 @@ def omics_tensor_list_to_np(batch: list[Tensor]):
 def read_litdata_ncv_for_mi(
         litdata_dir: str,
         output_dir: str,
-        k_outer: int,
-        k_inner: int,
         which_outer_test: int,
         which_inner_val: int,
         threshold_ptp: float=100.0,
@@ -287,13 +212,9 @@ def read_litdata_ncv_for_mi(
     if not os.path.exists(path_excutable):
         raise FileNotFoundError(f"Executable file not found: {path_excutable}")
 
-    # Get indices for NCV
-    indices_trn_dataset, indices_val_dataset, indices_test_dataset = get_indices_ncv(k_outer, k_inner, which_outer_test, which_inner_val)
-
-    # Read litdata from directories
-    dataset_train = [StreamingDataset(os.path.join(litdata_dir, f"fragment_{i}")) for i in indices_trn_dataset]
-    combined_dataset_trn = CombinedStreamingDataset(dataset_train)
-    dataloader_trn = StreamingDataLoader(combined_dataset_trn)
+    # Read litdata
+    dir_xoi = os.path.join(litdata_dir, f"ncv_test_{which_outer_test}_val_{which_inner_val}")
+    dataloader_trn = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, "train")))
 
     # Run the compiled MI-based proccessing procedure on training data
     trnset_npy_dir = os.path.join(output_dir, "tmp_trnset")
