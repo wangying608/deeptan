@@ -1,4 +1,3 @@
-use bincode;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -17,7 +16,7 @@ pub fn build_gff_dict(path_gff: &str, path_output: &str) -> Result<(), Box<dyn E
     let mut reader = std::fs::File::open(path_gff)
         .map(std::io::BufReader::new)
         .map(gff::io::Reader::new)?;
-    println!("\n🔍  Reading GFF file: {}\n... ...\n", path_gff);
+    println!("\n🔍  Reading GFF file: {}\n", path_gff);
     let mut gff_dict: HashMap<String, GeneInfo> = HashMap::new();
     for result in reader.records() {
         // If result is an error, skip the record
@@ -36,7 +35,7 @@ pub fn build_gff_dict(path_gff: &str, path_output: &str) -> Result<(), Box<dyn E
                 let block_len = pos_end - pos_sta + 1;
 
                 let gene_info = GeneInfo {
-                    seqid: record.reference_sequence_name().to_string(),
+                    seqid: proc_seq_name(record.reference_sequence_name()),
                     start: pos_sta,
                     end: pos_end,
                     strand: record.strand().to_string(),
@@ -167,31 +166,54 @@ fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dy
     println!("\n🌾 Found {} samples in the VCF file.\n", n_samples);
     println!("🔎 Checking for SNPs in the VCF file...\n");
 
-    let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
-    for result in reader_vcf.records() {
-        if !result.is_ok() {
-            continue;
-        } else {
-            let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids);
-            if !snp_check_kv.snp_id.is_empty() {
-                snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
-            }
-        }
-    }
+    // let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
+    // for result in reader_vcf.records() {
+    //     if !result.is_ok() {
+    //         continue;
+    //     } else {
+    //         let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids);
+    //         if !snp_check_kv.snp_id.is_empty() {
+    //             snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+    //         }
+    //     }
+    // }
 
-    // // Read whole VCF file into memory
-    // let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
-    // // Multi-threading:
+    // Read whole VCF file into memory
+    let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
+
+    // Available threads
+    let num_threads = std::thread::available_parallelism().unwrap().get();
+    // Chunk size
+    let n_records = records.len();
+    let chunk_size = n_records / num_threads;
+    // println!(
+    //     "🔥 Using {} threads to process {} VCF records.\n",
+    //     num_threads, n_records,
+    // );
+
+    // Multi-threading for chunks
+    let par_chunks = records.par_chunks(chunk_size).map(|chunk| {
+        chunk
+            .iter()
+            .map(|r| check_snp(r, &gff_dict, &block_ids))
+            .collect::<Vec<SnpCheckKV>>()
+    });
+    let snp_dict_vec: Vec<SnpCheckKV> = par_chunks
+        .collect::<Vec<Vec<SnpCheckKV>>>()
+        .into_iter()
+        .flatten()
+        .collect();
+
     // let snp_dict_vec: Vec<SnpCheckKV> = records
     //     .into_iter()
     //     .filter_map(|r| check_snp(&r, &gff_dict, &block_ids).into())
     //     .collect();
-    // let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
-    // for snp_check_kv in snp_dict_vec {
-    //     if !snp_check_kv.snp_id.is_empty() {
-    //         snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
-    //     }
-    // }
+    let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
+    for snp_check_kv in snp_dict_vec {
+        if !snp_check_kv.snp_id.is_empty() {
+            snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+        }
+    }
 
     // Get SNP ids
     let mut snp_ids: Vec<String> = snp_dict.keys().map(|k| k.to_string()).collect();
@@ -224,7 +246,7 @@ fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dy
 fn check_snp(
     record_x: &vcf::Record,
     gff_dict: &HashMap<String, GeneInfo>,
-    block_ids: &Vec<String>,
+    block_ids: &[String],
 ) -> SnpCheckKV {
     let mut snp_idx = String::new();
     let mut snp_info = SnpInfo {
@@ -242,7 +264,7 @@ fn check_snp(
         let seqid = record_x.reference_sequence_name().to_string();
 
         // Check position in gff dict
-        let snp_found = check_pos(gff_dict, &block_ids, &seqid, pos_x);
+        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x);
 
         if snp_found.found {
             let ref_base = record_x.reference_bases().to_string();
@@ -267,15 +289,15 @@ fn check_snp(
             };
         }
     }
-    return SnpCheckKV {
+    SnpCheckKV {
         snp_id: snp_idx,
         snp_info: snp_info,
-    };
+    }
 }
 
 fn check_pos(
     gff_dict: &HashMap<String, GeneInfo>,
-    block_ids: &Vec<String>,
+    block_ids: &[String],
     seq_name: &str,
     pos: usize,
 ) -> SnpFound {
@@ -285,10 +307,16 @@ fn check_pos(
     };
     let n_genome_block = block_ids.len();
     let mut isfound: Vec<bool> = vec![false; n_genome_block];
-    isfound.par_iter_mut().enumerate().for_each(|(i, isf)| {
+    isfound.iter_mut().enumerate().for_each(|(i, isf)| {
         let gene_info = gff_dict.get(&block_ids[i]).unwrap();
         *isf = check_pos_single(gene_info, seq_name, pos);
     });
+    // isfound.par_chunks_mut(32).for_each(|chunk| {
+    //     for (i, isf) in chunk.iter_mut().enumerate() {
+    //         let gene_info = gff_dict.get(&block_ids[i]).unwrap();
+    //         *isf = check_pos_single(gene_info, seq_name, pos);
+    //     }
+    // });
     // Check if any `true` exists in isfound
     if isfound.contains(&true) {
         let mut block_ids_found: Vec<String> = Vec::new();
@@ -304,18 +332,20 @@ fn check_pos(
             block_ids: block_ids_found,
         };
     }
-    return snp_found;
+    snp_found
 }
 
 fn check_pos_single(gene_info: &GeneInfo, seq_name: &str, pos: usize) -> bool {
-    if proc_seq_name(&gene_info.seqid) == proc_seq_name(seq_name) {
-        if pos >= gene_info.start && pos <= gene_info.end {
-            if gene_info.strand == "+" {
-                return true;
-            }
-        }
+    let mut is_found = false;
+    // if proc_seq_name(&gene_info.seqid) == proc_seq_name(seq_name)
+    if gene_info.seqid == seq_name
+        && pos >= gene_info.start
+        && pos <= gene_info.end
+        && gene_info.strand == "+"
+    {
+        is_found = true;
     }
-    false
+    is_found
 }
 
 /// For sparse layer initialization.
@@ -338,7 +368,7 @@ fn block2gtype_for_s2g_sparse(vcf_dict: &VcfInfo) -> Vec<Vec<i64>> {
         }
         block2gt.push(i_block_gt);
     }
-    return block2gt;
+    block2gt
 }
 
 fn encode_vcf(vcf_info: &VcfInfo) -> VcfMat {
@@ -377,18 +407,18 @@ fn encode_vcf(vcf_info: &VcfInfo) -> VcfMat {
         });
 
     let mat_vec = encoded_mat.into_raw_vec();
-    return VcfMat {
+    VcfMat {
         mat: mat_vec,
         snp_ids: snp_ids.to_owned(),
         sample_ids: sample_ids.to_owned(),
-    };
+    }
 }
 
 fn encode_snp_genotype(
-    genotypes: &Vec<String>,
+    genotypes: &[String],
     ref_allele: &str,
-    alt_alleles: &Vec<String>,
-    base_combn: &Vec<String>,
+    alt_alleles: &[String],
+    base_combn: &[String],
 ) -> Vec<i8> {
     // Init encoded_genotypes: Vec<u8> with length genotypes.len()
     let mut encoded_genotypes: Vec<i8> = vec![0; genotypes.len()];
@@ -403,67 +433,56 @@ fn encode_snp_genotype(
                 base_combn,
             );
         });
-    return encoded_genotypes;
+    encoded_genotypes
 }
 
-fn encode_snp_gt(
-    gt: &String,
-    ref_allele: &str,
-    alt_alleles: &Vec<String>,
-    base_combn: &Vec<String>,
-) -> i8 {
-    let hot_code: i8 = 0;
+fn encode_snp_gt(gt: &str, ref_allele: &str, alt_alleles: &[String], base_combn: &[String]) -> i8 {
+    let mut which_hot: i8 = 0;
 
     // Define the map of GT -> base
-    let mut gtype_map: HashMap<String, String> = HashMap::new();
-    gtype_map.insert(".".to_string(), "N".to_string());
-    gtype_map.insert("0".to_string(), ref_allele.to_string());
-    for alt_x in 0..alt_alleles.len() {
-        gtype_map.insert((alt_x + 1).to_string(), alt_alleles[alt_x].to_string());
-    }
+    let mut gtype_map: HashMap<char, char> = HashMap::new();
+    gtype_map.insert('.', 'N');
+    gtype_map.insert('0', ref_allele.chars().next().unwrap());
+    alt_alleles.iter().enumerate().for_each(|(i, x)| {
+        gtype_map.insert(
+            (i + 1).to_string().chars().next().unwrap(),
+            x.chars().next().unwrap(),
+        );
+    });
 
     //
     let gt_x = gt
-        .split(":")
+        .split(':')
         .collect::<Vec<&str>>()
-        .get(0)
+        .first()
         .to_owned()
         .unwrap()
         .to_string();
 
-    let mut gt_split: Vec<&str> = vec![];
-    if gt.contains("/") {
-        gt_split = gt_x.split("/").collect();
-    } else {
-        gt_split = gt_x.split("|").collect();
+    let mut gt_split: Vec<&str> = gt_x.split('|').collect();
+    if gt.contains('/') {
+        gt_split = gt_x.split('/').collect();
     }
 
-    let a_1 = gtype_map
-        .get(&gt_split.get(0).unwrap().to_string())
-        .unwrap();
-    let a_2 = gtype_map
-        .get(&gt_split.get(1).unwrap().to_string())
-        .unwrap();
-    let mut allele_sorted = "   ".to_string();
-    if a_1 > a_2 {
-        allele_sorted = format!("{}/{}", a_2, a_1);
-    } else {
-        allele_sorted = format!("{}/{}", a_1, a_2);
-    }
+    let c_1 = gt_split.first().unwrap().to_owned().chars().next().unwrap();
+    let c_2 = gt_split.get(1).unwrap().to_owned().chars().next().unwrap();
+
+    let a_1 = gtype_map.get(&c_1).unwrap().to_owned();
+    let a_2 = gtype_map.get(&c_2).unwrap().to_owned();
 
     // Find allele_sorted in ten_combn
-    let idx = base_combn.iter().position(|x| x == &allele_sorted);
-    if idx.is_none() {
-        return hot_code;
-    } else {
-        let which_hot = (idx.unwrap() + 1) as i8;
-        return which_hot;
+    let idx = base_combn
+        .iter()
+        .position(|x| x.contains(a_1) && x.contains(a_2));
+    if idx.is_some() {
+        which_hot = (idx.unwrap() + 1) as i8;
     }
+    which_hot
 }
 
-fn write_gz(data: &Vec<u8>, path_output: &str) -> Result<(), Box<dyn Error>> {
+fn write_gz(data: &[u8], path_output: &str) -> Result<(), Box<dyn Error>> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
-    encoder.write_all(&data)?;
+    encoder.write_all(data)?;
     let compressed_data = encoder.finish()?;
 
     let mut file_o = std::fs::File::create(path_output)?;
@@ -480,12 +499,11 @@ fn read_gz(path_gz: &str) -> Result<Vec<u8>, Box<dyn Error>> {
 }
 
 fn proc_seq_name(seq_name: &str) -> String {
-    let seq_name_lowcase = seq_name.to_lowercase();
+    let mut seq_name_lowcase = seq_name.to_lowercase();
     if seq_name_lowcase.contains("chr") {
-        return seq_name_lowcase.replace("chr", "");
-    } else {
-        return seq_name_lowcase;
+        seq_name_lowcase = seq_name_lowcase.replace("chr", "");
     }
+    seq_name_lowcase
 }
 
 #[derive(Debug, Serialize, Deserialize)]
