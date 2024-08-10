@@ -79,8 +79,9 @@ pub fn vcf2encoded(
     path_vcf: &str,
     path_gff_dict: &str,
     path_output: &str,
+    use_more_mem: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict)?;
+    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict, use_more_mem)?;
 
     let vcf_mat = encode_vcf(&vcf_dict);
 
@@ -127,13 +128,6 @@ fn write_encoded_vcf2pkl(
     let serialized_block_ids = serde_pickle::to_vec(block_ids, SerOptions::default())?;
     let serialized_block2gtype = serde_pickle::to_vec(block2gtype, SerOptions::default())?;
 
-    // let mut file_new = File::create(path_pkl)?;
-    // file_new.write_all(&serialized_sample_ids)?;
-    // file_new.write_all(&serialized_snp_ids)?;
-    // file_new.write_all(&serialized_block_ids)?;
-    // file_new.write_all(&serialized_block2gtype)?;
-    // file_new.write_all(&serialized_mat)?;
-
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&serialized_sample_ids)?;
     encoder.write_all(&serialized_snp_ids)?;
@@ -147,7 +141,11 @@ fn write_encoded_vcf2pkl(
     Ok(path_pkl.to_owned())
 }
 
-fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dyn Error>> {
+fn build_vcf_dict(
+    path_vcf: &str,
+    path_gff_dict: &str,
+    use_more_mem: bool,
+) -> Result<VcfInfo, Box<dyn Error>> {
     // Read gff dict
     let decompressed_data = read_gz(path_gff_dict)?;
     let gff_dict_dec: GffDict = bincode::deserialize(&decompressed_data)?;
@@ -166,52 +164,55 @@ fn build_vcf_dict(path_vcf: &str, path_gff_dict: &str) -> Result<VcfInfo, Box<dy
     println!("\n🌾 Found {} samples in the VCF file.\n", n_samples);
     println!("🔎 Checking for SNPs in the VCF file...\n");
 
-    // let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
-    // for result in reader_vcf.records() {
-    //     if !result.is_ok() {
-    //         continue;
-    //     } else {
-    //         let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids);
-    //         if !snp_check_kv.snp_id.is_empty() {
-    //             snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
-    //         }
-    //     }
-    // }
-
-    // Read whole VCF file into memory
-    let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
-
-    // Available threads
-    let num_threads = std::thread::available_parallelism().unwrap().get();
-    // Chunk size
-    let n_records = records.len();
-    let chunk_size = n_records / num_threads;
-    // println!(
-    //     "🔥 Using {} threads to process {} VCF records.\n",
-    //     num_threads, n_records,
-    // );
-
-    // Multi-threading for chunks
-    let par_chunks = records.par_chunks(chunk_size).map(|chunk| {
-        chunk
-            .iter()
-            .map(|r| check_snp(r, &gff_dict, &block_ids))
-            .collect::<Vec<SnpCheckKV>>()
-    });
-    let snp_dict_vec: Vec<SnpCheckKV> = par_chunks
-        .collect::<Vec<Vec<SnpCheckKV>>>()
-        .into_iter()
-        .flatten()
-        .collect();
-
-    // let snp_dict_vec: Vec<SnpCheckKV> = records
-    //     .into_iter()
-    //     .filter_map(|r| check_snp(&r, &gff_dict, &block_ids).into())
-    //     .collect();
     let mut snp_dict: HashMap<String, SnpInfo> = HashMap::new();
-    for snp_check_kv in snp_dict_vec {
-        if !snp_check_kv.snp_id.is_empty() {
-            snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+
+    if use_more_mem {
+        // Read whole VCF file into memory
+        let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
+
+        // Available threads
+        let num_threads = std::thread::available_parallelism().unwrap().get();
+        // Chunk size
+        let n_records = records.len();
+        let chunk_size = n_records / num_threads;
+        println!(
+            "🔥 Using {} threads to process {} VCF records.\n",
+            num_threads, n_records,
+        );
+
+        // Multi-threading for chunks
+        let par_chunks = records.par_chunks(chunk_size).map(|chunk| {
+            chunk
+                .iter()
+                .map(|r| check_snp(r, &gff_dict, &block_ids, false))
+                .collect::<Vec<SnpCheckKV>>()
+        });
+        let snp_dict_vec: Vec<SnpCheckKV> = par_chunks
+            .collect::<Vec<Vec<SnpCheckKV>>>()
+            .into_iter()
+            .flatten()
+            .collect();
+
+        // let snp_dict_vec: Vec<SnpCheckKV> = records
+        //     .into_iter()
+        //     .filter_map(|r| check_snp(&r, &gff_dict, &block_ids, true).into())
+        //     .collect();
+
+        for snp_check_kv in snp_dict_vec {
+            if !snp_check_kv.snp_id.is_empty() {
+                snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+            }
+        }
+    } else {
+        for result in reader_vcf.records() {
+            if !result.is_ok() {
+                continue;
+            } else {
+                let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids, true);
+                if !snp_check_kv.snp_id.is_empty() {
+                    snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
+                }
+            }
         }
     }
 
@@ -247,6 +248,7 @@ fn check_snp(
     record_x: &vcf::Record,
     gff_dict: &HashMap<String, GeneInfo>,
     block_ids: &[String],
+    para: bool,
 ) -> SnpCheckKV {
     let mut snp_idx = String::new();
     let mut snp_info = SnpInfo {
@@ -264,7 +266,7 @@ fn check_snp(
         let seqid = record_x.reference_sequence_name().to_string();
 
         // Check position in gff dict
-        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x);
+        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x, para);
 
         if snp_found.found {
             let ref_base = record_x.reference_bases().to_string();
@@ -300,6 +302,7 @@ fn check_pos(
     block_ids: &[String],
     seq_name: &str,
     pos: usize,
+    para: bool,
 ) -> SnpFound {
     let mut snp_found = SnpFound {
         found: false,
@@ -307,16 +310,30 @@ fn check_pos(
     };
     let n_genome_block = block_ids.len();
     let mut isfound: Vec<bool> = vec![false; n_genome_block];
-    isfound.iter_mut().enumerate().for_each(|(i, isf)| {
-        let gene_info = gff_dict.get(&block_ids[i]).unwrap();
-        *isf = check_pos_single(gene_info, seq_name, pos);
-    });
-    // isfound.par_chunks_mut(32).for_each(|chunk| {
-    //     for (i, isf) in chunk.iter_mut().enumerate() {
-    //         let gene_info = gff_dict.get(&block_ids[i]).unwrap();
-    //         *isf = check_pos_single(gene_info, seq_name, pos);
-    //     }
-    // });
+    if para {
+        // isfound.par_iter_mut().enumerate().for_each(|(i, isf)| {
+        //     let gene_info = gff_dict.get(&block_ids[i]).unwrap();
+        //     *isf = check_pos_single(gene_info, seq_name, pos);
+        // });
+        let num_threads = std::thread::available_parallelism().unwrap().get();
+        let chunk_size = n_genome_block / num_threads;
+        println!(
+            "🔥 Using {} threads to process {} genome blocks.\n",
+            num_threads, n_genome_block,
+        );
+        isfound.par_chunks_mut(chunk_size).for_each(|chunk| {
+            for (i, isf) in chunk.iter_mut().enumerate() {
+                let gene_info = gff_dict.get(&block_ids[i]).unwrap();
+                *isf = check_pos_single(gene_info, seq_name, pos);
+            }
+        });
+    } else {
+        isfound.iter_mut().enumerate().for_each(|(i, isf)| {
+            let gene_info = gff_dict.get(&block_ids[i]).unwrap();
+            *isf = check_pos_single(gene_info, seq_name, pos);
+        });
+    }
+
     // Check if any `true` exists in isfound
     if isfound.contains(&true) {
         let mut block_ids_found: Vec<String> = Vec::new();

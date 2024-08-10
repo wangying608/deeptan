@@ -30,6 +30,7 @@ fn main() {
                 .get_one::<String>("output")
                 .map(|s| s.as_str())
                 .unwrap(),
+            sub_matches.get_one::<bool>("moremem").unwrap().to_owned(),
         )
         .expect("Failed to encode genotypes"),
         _ => unreachable!("Please use available subcommands"),
@@ -83,6 +84,12 @@ fn cli() -> Command {
                         .help("Output pickle file.")
                         .required(true)
                         .action(ArgAction::Set),
+                    Arg::new("moremem")
+                        .long("more-mem")
+                        .short('m')
+                        .help("Use more RAM.")
+                        .required(false)
+                        .action(ArgAction::SetTrue),
                 ]),
         )
 }
