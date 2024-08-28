@@ -13,7 +13,7 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from multiprocessing import cpu_count
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
-from core_pgat import GATLayer
+from .core_pgat import GATLayer
 
 torch.set_float32_matmul_precision('high')
 
