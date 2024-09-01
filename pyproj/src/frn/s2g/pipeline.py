@@ -7,9 +7,9 @@ from typing import Optional, Tuple, Union, List, Dict, Any
 import time
 import optuna
 import pandas as pd
-from .model import train_snp2gb, execute_s2g, SNPReductionNet
-from ..utils.uni import CollectFitLog, random_string, read_pkl_gv
-from ..utils.data_ncv import MyDataModule4Train
+from frn.s2g.model import execute_s2g, SNPReductionNet
+from frn.utils.uni import train_model, CollectFitLog, random_string, read_pkl_gv, time_string
+from frn.utils.data_ncv import MyDataModule4Train
 
 
 class SNP2GBTrain:
@@ -91,7 +91,7 @@ class SNP2GBTrain:
         """
         Train SNP2GB model with given hyperparameters.
         """
-        model_init = SNPReductionNet(
+        _model = SNPReductionNet(
             output_dim=self.model_out_dim,
             blocks_gt=self.blocks_gt,
             len_one_hot_vec=self.len_one_hot_vec,
@@ -102,9 +102,10 @@ class SNP2GBTrain:
         # Unique tag for the experiment
         log_dir_uniq_model = os.path.join(self.log_dir, self.log_name, random_string())
 
-        val_loss_min = train_snp2gb(
-            data_module=self.datamodule,
-            model_init=model_init,
+        val_loss_min = train_model(
+            model=_model,
+            dataloader_train=self.datamodule.train_dataloader(),
+            dataloader_val=self.datamodule.val_dataloader(),
             es_patience=hparams['patience'],
             max_epochs=hparams['max_epochs'],
             min_epochs=hparams['min_epochs'],
@@ -157,7 +158,7 @@ class SNP2GBTrain:
         """
         Hyperparameters optimization for SNP2GB model.
         """
-        time_str = time.strftime('%Y%m%d%H%M%S', time.localtime())
+        time_str = time_string()
 
         study = optuna.create_study(
             storage = storage,
@@ -197,7 +198,7 @@ class SNP2GBTrainPipe:
         """
         # Unique tag for the train
         rand_str = random_string()
-        time_str = time.strftime('%Y%m%d%H%M%S', time.localtime())
+        time_str = time_string()
         tag_str = time_str + '_' + rand_str
         self.uniq_logdir = os.path.join(log_dir, 'train_' + tag_str)
         self.regression = regression

@@ -18,8 +18,8 @@ from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall
 from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
-from ..utils.data_ncv import MyDataModule4Train, MyDataModule4Uni
-from ..utils.uni import idx_convert, read_pkl_gv
+from frn.utils.data_ncv import MyDataModule4Train, MyDataModule4Uni
+from frn.utils.uni import idx_convert, read_pkl_gv
 
 
 torch.set_float32_matmul_precision('high')
@@ -278,62 +278,6 @@ class SNP2GB(ltn.LightningModule):
     
     def predict_step(self, batch, batch_idx) -> torch.Tensor:
         return self(batch['snp'])
-
-
-def train_snp2gb(
-        data_module: MyDataModule4Train,
-        model_init: SNPReductionNet,
-        es_patience: int,
-        max_epochs: int,
-        min_epochs: int,
-        log_dir: str,
-        devices: Union[list[int], str, int] = 'auto',
-        accelerator: str = 'auto',
-    ):
-    """
-    Train a SNP-genome-block relation-based sparse neural network for SNP2GB transformation.
-    """
-    if type(devices) == int and device_count() > 0:
-        avail_dev = find_usable_cuda_devices(devices)
-    elif devices == 'auto' and device_count() > 0:
-        avail_dev = find_usable_cuda_devices()
-    else:
-        avail_dev = devices
-
-    callback_es = EarlyStopping(
-        monitor='val_loss',
-        patience=es_patience,
-        mode='min',
-        verbose=True,
-    )
-    callback_ckpt = ModelCheckpoint(
-        dirpath=log_dir,
-        filename='best-model-{epoch:03d}-{val_loss:.3f}',
-        monitor='val_loss',
-    )
-
-    logger_tr = TensorBoardLogger(
-        save_dir=log_dir,
-        name='',
-    )
-
-    trainer = ltn.Trainer(
-        fast_dev_run=False,
-        logger=logger_tr,
-        log_every_n_steps=1,
-        precision='16-mixed',
-        devices=avail_dev,
-        accelerator=accelerator,
-        max_epochs=max_epochs,
-        min_epochs=min_epochs,
-        callbacks=[callback_es, callback_ckpt],
-        num_sanity_val_steps=0,
-        default_root_dir=log_dir,
-    )
-
-    trainer.fit(model=model_init, datamodule=data_module)
-
-    return callback_ckpt.best_model_score.item()
 
 
 def execute_s2g(

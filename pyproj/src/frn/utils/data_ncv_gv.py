@@ -4,7 +4,7 @@ from typing import Optional, Tuple, Union, List
 import numpy as np
 import pandas as pd
 from litdata import optimize
-from .uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, zscore_labels, get_indices_ncv
+from frn.utils.uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, zscore_labels, get_indices_ncv
 from multiprocessing import cpu_count
 # n_threads = np.ceil(cpu_count() * 0.33).astype(int)
 n_threads = 2

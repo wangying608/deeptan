@@ -22,7 +22,7 @@ import pandas as pd
 from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
-from .uni import intersect_lists, read_labels, zscore_labels, get_indices_ncv
+from frn.utils.uni import intersect_lists, read_labels, zscore_labels, get_indices_ncv
 from multiprocessing import cpu_count
 n_threads = np.ceil(cpu_count() * 0.8).astype(int)
 

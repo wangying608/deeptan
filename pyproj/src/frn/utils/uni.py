@@ -1,16 +1,26 @@
 r"""
 Some universal functions.
 """
-import numpy as np
-import pandas as pd
+import os
+import time
 import random
 import string
-import os
+import numpy as np
+import pandas as pd
 import pickle
 import gzip
 import optuna
 from typing import Any, List, Dict, Optional, Union
+from lightning import Trainer
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.loggers import TensorBoardLogger
+from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
+from torch.cuda import device_count
 
+
+def time_string():
+    _time_str = time.strftime('%Y%m%d%H%M%S', time.localtime())
+    return _time_str
 
 def random_string(length: int = 7):
     letters = string.ascii_letters + string.digits
@@ -168,6 +178,64 @@ def read_pkl_gv(path_pkl: str) -> Dict[str, Any]:
         'snp_ids': _snp_ids,
         'block_ids': _block_ids,
     }
+
+
+def train_model(
+        model,
+        dataloader_train,
+        dataloader_val,
+        es_patience: int,
+        max_epochs: int,
+        min_epochs: int,
+        log_dir: str,
+        devices: Union[list[int], str, int] = 'auto',
+        accelerator: str = 'auto',
+        in_dev: bool = False,
+    ):
+    """
+    Fit the model.
+    """
+    if type(devices) == int and device_count() > 0:
+        avail_dev = find_usable_cuda_devices(devices)
+    elif devices == 'auto' and device_count() > 0:
+        avail_dev = find_usable_cuda_devices()
+    else:
+        avail_dev = devices
+
+    callback_es = EarlyStopping(
+        monitor='val_loss',
+        patience=es_patience,
+        mode='min',
+        verbose=True,
+    )
+    callback_ckpt = ModelCheckpoint(
+        dirpath=log_dir,
+        filename='best-model-{epoch:04d}-{val_loss:.4f}',
+        monitor='val_loss',
+    )
+
+    logger_tr = TensorBoardLogger(
+        save_dir=log_dir,
+        name='',
+    )
+
+    trainer = Trainer(
+        fast_dev_run=in_dev,
+        logger=logger_tr,
+        log_every_n_steps=1,
+        # precision='16-mixed',
+        devices=avail_dev,
+        accelerator=accelerator,
+        max_epochs=max_epochs,
+        min_epochs=min_epochs,
+        callbacks=[callback_es, callback_ckpt],
+        num_sanity_val_steps=0,
+        default_root_dir=log_dir,
+    )
+    
+    trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
+
+    return callback_ckpt.best_model_score.item()
 
 
 class CollectFitLog:

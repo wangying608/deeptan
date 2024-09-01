@@ -2,24 +2,15 @@ r"""
 The pipeline for training the model.
 """
 import os
-from typing import Any, List, Dict, Optional, Union
+# from typing import Any, List, Dict, Optional, Union
 import torch
 import torch.nn as nn
 import lightning as ltn
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
-import numpy as np
-import pandas as pd
-from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
-from torch.cuda import device_count
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall
 from torchmetrics.regression import MeanAbsoluteError, R2Score, PearsonCorrCoef
-# from torch_geometric.data import Data as PyG_Data
-import torch_geometric.loader as geom_loader
-# from torch_geometric.data import Data, Dataset
-from torch_geometric.datasets import FakeDataset, TUDataset
-from torch_geometric.data.lightning import LightningDataset as PyG_LightningDataset
-from .core_gat_pyg import MyGATModel
+# Choose a version:
+from frn.graph.core_gat_pyg import Backbone
+# from frn.graph.core_pgat import Backbone
 
 
 class MyGAT(ltn.LightningModule):
@@ -28,23 +19,36 @@ class MyGAT(ltn.LightningModule):
             in_channels: int,
             graph_label_dim: int,
             regression: bool,
-            edge_dim: int,
+            # edge_dim: int,
+            hidden_dim: int = 16,
             heads: int = 4,
             lr: float = 0.001,
             dropout: float = 0.6,
             negative_slope: float = 0.2,
         ):
         super().__init__()
-        # self.save_hyperparameters()
-        self.regression = regression
+        self.save_hyperparameters()
         self.lr = lr
+        self.regression = regression
         self.output_dim = graph_label_dim
-        self.model = MyGATModel(in_channels, graph_label_dim, edge_dim, heads, dropout, negative_slope)
+        self.backbone_output_dim = graph_label_dim * 8
+        self.hidden_dim = hidden_dim
+
+        # self.model = Backbone(in_channels, self.backbone_output_dim, edge_dim, heads, dropout, negative_slope)
+        self.model = Backbone(in_channels, self.backbone_output_dim, hidden_dim, heads, dropout, negative_slope)
+        
+        # Define the output layer for graph label prediction
+        self.fc_1 = nn.Linear(self.backbone_output_dim, graph_label_dim)
+        
+        # Define the metrics
         self._define_metrics(graph_label_dim, self.regression)
 
     def forward(self, data_batch):
         x = self.model(data_batch)
+        x = self.fc_1(x)
         # x = x.squeeze(-1)
+        # if self.output_dim > 1 and not self.regression:
+        #     x = nn.functional.log_softmax(x, dim=1)
         return x
     
     def training_step(self, batch, batch_idx):
@@ -111,8 +115,9 @@ class MyGAT(ltn.LightningModule):
     
     def _my_loss(self, y_hat: torch.Tensor, y: torch.Tensor, which_step: str, regression: bool):
         #!!!!!!!!!!!!!!!!!!!!!!!!!
-        if self.output_dim > 1 and not regression:
-            y = y.argmax(dim=-1)
+        # if self.output_dim > 1 and not regression:
+        #     y = y.argmax(dim=-1)
+        # print("\n", y_hat, "\n", y, "\n")
         
         loss = self.loss_fn(y_hat, y)
         self.log(f"{which_step}_loss", loss, sync_dist=True)
@@ -152,106 +157,3 @@ class MyGAT(ltn.LightningModule):
         
         return loss
 
-
-def train_graph(
-        model,
-        dataloader_train,
-        dataloader_val,
-        es_patience: int,
-        max_epochs: int,
-        min_epochs: int,
-        log_dir: str,
-        devices: Union[list[int], str, int] = 'auto',
-        accelerator: str = 'auto',
-        in_dev: bool = False,
-    ):
-    """
-    Fit the graph model on a PyTorch Geometric dataset.
-    """
-    if type(devices) == int and device_count() > 0:
-        avail_dev = find_usable_cuda_devices(devices)
-    elif devices == 'auto' and device_count() > 0:
-        avail_dev = find_usable_cuda_devices()
-    else:
-        avail_dev = devices
-
-    callback_es = EarlyStopping(
-        monitor='val_loss',
-        patience=es_patience,
-        mode='min',
-        verbose=True,
-    )
-    callback_ckpt = ModelCheckpoint(
-        dirpath=log_dir,
-        filename='best-model-{epoch:03d}-{val_loss:.3f}',
-        monitor='val_loss',
-    )
-
-    logger_tr = TensorBoardLogger(
-        save_dir=log_dir,
-        name='',
-    )
-
-    trainer = ltn.Trainer(
-        fast_dev_run=in_dev,
-        logger=logger_tr,
-        log_every_n_steps=1,
-        # precision='16-mixed',
-        devices=avail_dev,
-        accelerator=accelerator,
-        max_epochs=max_epochs,
-        min_epochs=min_epochs,
-        callbacks=[callback_es, callback_ckpt],
-        num_sanity_val_steps=0,
-        default_root_dir=log_dir,
-    )
-    
-    trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
-
-    return callback_ckpt.best_model_score.item()
-
-
-# n_channels=64
-# edge_dim=16
-# graph_label_dim=1
-
-# datamodule = PyG_LightningDataset(
-#     train_dataset=FakeDataset(num_graphs=300, num_channels=n_channels, edge_dim=edge_dim, task="graph"),
-#     val_dataset=FakeDataset(num_graphs=100, num_channels=n_channels, edge_dim=edge_dim, task="graph"),
-#     # test_dataset=FakeDataset(num_graphs=100, num_channels=64, edge_dim=16, task="graph"),
-# )
-DATASET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tmp_datasets")
-BATCH_SIZE = 16
-
-if __name__ == "__main__":
-    tu_dataset = TUDataset(root=DATASET_PATH, name="MUTAG")
-    torch.manual_seed(42)
-    tu_dataset.shuffle()
-    train_dataset = tu_dataset[:200]
-    val_dataset = tu_dataset[200:]
-    graph_train_loader = geom_loader.DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
-    graph_val_loader = geom_loader.DataLoader(val_dataset, batch_size=BATCH_SIZE)
-
-    dim_node_feat = tu_dataset.num_node_features
-    n_graph_label_class = tu_dataset.num_classes
-    dim_edge_feat = tu_dataset.num_edge_features
-    print("\n", dim_node_feat, n_graph_label_class, dim_edge_feat, "\n")
-
-    loss_min = train_graph(
-        model=MyGAT(
-            in_channels=dim_node_feat,
-            graph_label_dim=n_graph_label_class,
-            regression=False,
-            edge_dim=dim_edge_feat,
-            heads=4,
-            lr=0.001,
-            dropout=0.2,
-            negative_slope=0.2,
-        ),
-        dataloader_train=graph_train_loader,
-        dataloader_val=graph_val_loader,
-        es_patience=15,
-        max_epochs=1000,
-        min_epochs=10,
-        log_dir="/home/wuch/Downloads/.tmp/runs/00",
-    )
