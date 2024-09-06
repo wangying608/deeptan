@@ -93,7 +93,7 @@ class SNPReductionNet(ltn.LightningModule):
             regression: bool,
         ):
         super().__init__()
-        # self.save_hyperparameters()
+        self.save_hyperparameters()
         self.output_dim = output_dim
         self.learning_rate = learning_rate
         self.regression = regression

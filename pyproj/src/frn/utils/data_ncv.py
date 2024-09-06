@@ -23,8 +23,6 @@ from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
 from frn.utils.uni import intersect_lists, read_labels, zscore_labels, get_indices_ncv
-from multiprocessing import cpu_count
-n_threads = np.ceil(cpu_count() * 0.8).astype(int)
 
 
 class MyDataset:
@@ -136,6 +134,8 @@ def optimize_data_ncv(
         std_labels: bool = True,
         seed_permut: int = 42,
         seed_resample: int = 42,
+        compression: Optional[str] = "zstd",
+        n_workers: int = 2,
     ):
     """
     Args:
@@ -180,24 +180,24 @@ def optimize_data_ncv(
                 inputs = indices_trn_samples,
                 output_dir = os.path.join(dir_xoxi, "train"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
             optimize(
                 fn = dataset_xoxi.__getitem__,
                 inputs = indices_val_samples,
                 output_dir = os.path.join(dir_xoxi, "valid"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
             optimize(
                 fn = dataset_xoxi.__getitem__,
                 inputs = indices_tst_samples,
                 output_dir = os.path.join(dir_xoxi, "test"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
     
     if path_label is not None:
@@ -212,6 +212,8 @@ def optimize_data_external(
         path_label: Optional[str] = None,
         col2use: Optional[Union[List[str], List[int]]] = None,
         # standardize_labels: bool = True,
+        compression: Optional[str] = "zstd",
+        n_workers: int = 2,
     ):
     """
     Optimize data for external use.
@@ -222,38 +224,15 @@ def optimize_data_external(
         inputs = range(len(dataset_ext)),
         output_dir = output_dir,
         chunk_bytes = "256MB",
-        compression = "zstd",
-        num_workers = n_threads,
+        compression = compression,
+        num_workers = n_workers,
     )
-
-
-# def get_dir_ncv_litdata(litdata_dir: str, which_outer_test: int, which_inner_val: int):
-#     dir_xoi = os.path.join(litdata_dir, f"ncv_test_{which_outer_test}_val_{which_inner_val}")
-#     dir_trn = os.path.join(dir_xoi, "train")
-#     dir_val = os.path.join(dir_xoi, "valid")
-#     dir_tst = os.path.join(dir_xoi, "test")
-#     return dir_trn, dir_val, dir_tst
-
-# def read_litdata_ncv(
-#         litdata_dir: str,
-#         which_outer_test: int,
-#         which_inner_val: int,
-#         batch_size: int = 16,
-#     ):
-#     """
-#     Read litdata from directories and return dataloaders for NCV.
-#     """
-#     dir_train, dir_valid, dir_test = get_dir_ncv_litdata(litdata_dir, which_outer_test, which_inner_val)
-#     dataloader_train = StreamingDataLoader(StreamingDataset(dir_train), batch_size=batch_size, num_workers=n_threads)
-#     dataloader_valid = StreamingDataLoader(StreamingDataset(dir_valid), batch_size=batch_size, num_workers=n_threads)
-#     dataloader_test = StreamingDataLoader(StreamingDataset(dir_test), batch_size=batch_size, num_workers=n_threads)
-#     return dataloader_train, dataloader_valid, dataloader_test
 
 
 class MyDataModule4Train(LightningDataModule):
     """
     LightningDataModule for training models with LitData.
-
+    
     Args:
     - `litdata_dir` (str): Directory containing the LitData fragments.
     - `which_outer_testset` (int): Index of the outer test set fold.
@@ -266,12 +245,14 @@ class MyDataModule4Train(LightningDataModule):
             which_outer_testset: int,
             which_inner_valset: int,
             batch_size: int,
+            n_workers: int = 2,
         ):
         super().__init__()
         self.litdata_dir = litdata_dir
         self.which_outer_testset = which_outer_testset
         self.which_inner_valset = which_inner_valset
         self.batch_size = batch_size
+        self.n_workers = n_workers
 
     def setup(self, stage=None):
         self.dataloder_trn, self.dataloader_val, self.dataloader_test = self.read_litdata_ncv()
@@ -288,9 +269,9 @@ class MyDataModule4Train(LightningDataModule):
         Read litdata from directories and return dataloaders for NCV.
         """
         dir_train, dir_valid, dir_test = self.get_dir_ncv_litdata()
-        dataloader_train = StreamingDataLoader(StreamingDataset(dir_train), batch_size=self.batch_size, num_workers=n_threads)
-        dataloader_valid = StreamingDataLoader(StreamingDataset(dir_valid), batch_size=self.batch_size, num_workers=n_threads)
-        dataloader_test = StreamingDataLoader(StreamingDataset(dir_test), batch_size=self.batch_size, num_workers=n_threads)
+        dataloader_train = StreamingDataLoader(StreamingDataset(dir_train), batch_size=self.batch_size, num_workers=self.n_workers)
+        dataloader_valid = StreamingDataLoader(StreamingDataset(dir_valid), batch_size=self.batch_size, num_workers=self.n_workers)
+        dataloader_test = StreamingDataLoader(StreamingDataset(dir_test), batch_size=self.batch_size, num_workers=self.n_workers)
         return dataloader_train, dataloader_valid, dataloader_test
     
     def get_dir_ncv_litdata(self):
@@ -313,13 +294,15 @@ class MyDataModule4Uni(LightningDataModule):
             self,
             litdata_dir: str,
             batch_size: int,
+            n_workers: int = 2,
         ):
         super().__init__()
         self.litdata_dir = litdata_dir
         self.batch_size = batch_size
+        self.n_workers = n_workers
     
     def setup(self, stage=None):
-        self.dataloader_x = StreamingDataLoader(StreamingDataset(self.litdata_dir), batch_size=self.batch_size, num_workers=n_threads)
+        self.dataloader_x = StreamingDataLoader(StreamingDataset(self.litdata_dir), batch_size=self.batch_size, num_workers=self.n_workers)
     
     def predict_dataloader(self):
         return self.dataloader_x
@@ -330,13 +313,14 @@ class MyDataModule4Uni(LightningDataModule):
 
 def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
     """
+    Args:
+    - `in_array` (np.ndarray): Input array with shape (n_features, n_samples).
+    - `threshold_ptp` (float): Threshold for the range.
+
     Steps:
     1. Remove feature if its range is similar to zero.
     2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
     
-    Args:
-    - `array` (np.ndarray): Input array with shape (n_features, n_samples).
-    - `threshold_ptp` (float): Threshold for the range.
     """
     values_min = np.min(in_array, axis=1)
     values_max = np.max(in_array, axis=1)
@@ -361,10 +345,8 @@ def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
     return out_array, values_min, values_max, feat2rm
 
 def omics_tensor_list_to_np(batch: List[Tensor]):
-    cated = np.concatenate([ts.numpy() for ts in batch], axis=None)
-    return cated
-    # omics = [ts.numpy() for ts in batch]
-    # return omics
+    concatenated = np.concatenate([ts.numpy() for ts in batch], axis=None)
+    return concatenated
 
 
 def read_litdata_ncv_for_mi(

@@ -16,13 +16,24 @@ from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
+from multiprocessing import cpu_count
 
 
-def time_string():
+def get_avail_cpu_count(target_n: int) -> int:
+    total_n = cpu_count()
+    n_cpu = target_n
+    if target_n <= 0:
+        n_cpu = total_n
+    else:
+        n_cpu = min(target_n, total_n)
+    return n_cpu
+
+
+def time_string() -> str:
     _time_str = time.strftime('%Y%m%d%H%M%S', time.localtime())
     return _time_str
 
-def random_string(length: int = 7):
+def random_string(length: int = 7) -> str:
     letters = string.ascii_letters + string.digits
     result = ''.join(random.choice(letters) for _ in range(length))
     return result
@@ -251,7 +262,7 @@ class CollectFitLog:
         """
         Collect training logs from optuna db files and ckpt files.
         """
-        best_trials_df = self.collect_ckpt()
+        best_trials_df, all_ckpt = self.collect_ckpt()
         optuna_best_inners_df = self.collect_optuna_db()
 
         # Merge the two dataframes on the 'x_outer' and 'x_inner' columns
@@ -274,12 +285,7 @@ class CollectFitLog:
         """
         Collect info of ckpt files.
         """
-        # Find all checkpoints in the directory and its subdirectories
-        paths_ckpt = [os.path.join(dirpath, f)
-                    for dirpath, dirnames, files in os.walk(self.dir_log)
-                    for f in files if f.endswith('.ckpt')]
-        paths_ckpt.sort()
-        print(f'Found {len(paths_ckpt)} checkpoints.\n')
+        paths_ckpt = self.search_ckpt()
 
         # Pick ids of outer and inner folds, val_loss and version from ckpt file paths
         val_loss_values = [float(os.path.basename(path_x).split('-')[3].split('=')[1].split('.ckpt')[0]) for path_x in paths_ckpt]
@@ -294,7 +300,7 @@ class CollectFitLog:
         # Pick the best model based on val_loss between the trials of the same outer and inner fold
         best_trials_df = ckpt_df.loc[ckpt_df.groupby(['x_outer', 'x_inner'])['val_loss'].idxmin()]
 
-        return best_trials_df
+        return best_trials_df, ckpt_df
 
     def collect_optuna_db(self):
         """
@@ -326,9 +332,38 @@ class CollectFitLog:
         x_inner = int(frag_name[3])
         x_time = frag_name[4]
         return {'study_name': study_name, 'x_outer': x_outer, 'x_inner': x_inner, 'min_loss': min_loss, 'x_time': x_time}
+    
+    def search_ckpt(self):
+        """
+        Search checkpoints in the directory and its subdirectories.
+        """
+        paths_ckpt = [os.path.join(dirpath, f)
+                    for dirpath, dirnames, files in os.walk(self.dir_log)
+                    for f in files if f.endswith('.ckpt')]
+        paths_ckpt.sort()
+        print(f'Found {len(paths_ckpt)} checkpoints.\n')
+        return paths_ckpt
+    
+    def remove_inferior_models(self):
+        """
+        Remove inferior models based on the collected result table.
+        """
+        best_trials, all_trials = self.collect_ckpt()
+        n_all_ckpt = len(all_trials)
+        n_removed_models = 0
+        for _x in range(n_all_ckpt):
+            # Check if all_trials['trial_tag'][_x] is in best_trials['trial_tag']
+            if best_trials['trial_tag'].str.contains(all_trials['trial_tag'][_x]).any():
+                continue
+            else:
+                os.remove(all_trials['path_ckpt'][_x])
+                print(f"Removed {all_trials['path_ckpt'][_x]}")
+                n_removed_models += 1
+        print(f"Removed {n_removed_models} inferior models.")
+        return None
 
 
-def rm_ckpt(ckpt_dir: str, rmALL: bool = False):
+def rm_old_ckpt(ckpt_dir: str, rmALL: bool = False):
     """
     Remove checkpoints from a versions directory.
     """

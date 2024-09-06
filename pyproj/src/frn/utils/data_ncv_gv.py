@@ -5,11 +5,6 @@ import numpy as np
 import pandas as pd
 from litdata import optimize
 from frn.utils.uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, zscore_labels, get_indices_ncv
-from multiprocessing import cpu_count
-# n_threads = np.ceil(cpu_count() * 0.33).astype(int)
-n_threads = 2
-if cpu_count() < n_threads:
-    n_threads = cpu_count()
 
 
 class SNPDataset:
@@ -28,13 +23,13 @@ class SNPDataset:
         + If you have MULTIPLE traits, please concatenate one-hot encoded matrix along the horizontal axis before input.
 
     Input:
-    - `col2use`: column names or indices to be used.
-    - `sample_inds_for_zsc_label`: indices of samples to be used for standardization of labels.
+    - `col2use`: column names or indices of label dataframe to be used.
+    - `sample_ind_for_zsc_label`: indices of samples to be used for standardization of all labels.
     - `len_one_hot_vec`: the length of the one-hot vector for each SNP.
         - Default is 10, which means 10 genotypes.
-        - If all elements of the vector are 0, the SNP is missing.
+        - If some SNPs are missing, all elements of their vectors are 0.
     - `resample`: the goal number of samples.
-    - `seed`: random seed for reproducibility.
+    - `seed_resample`: the seed for random sampling.
     """
     def __init__(
             self,
@@ -150,6 +145,8 @@ def snp_data_opt_ncv(
         len_one_hot_vec: int = 10,
         seed_permut: int = 42,
         seed_resample: int = 42,
+        compression: Optional[str] = "zstd",
+        n_workers: int = 2,
     ):
     """
     Generate SNP (and label) data for litdata optimization.
@@ -188,24 +185,24 @@ def snp_data_opt_ncv(
                 inputs = indices_trn_samples,
                 output_dir = os.path.join(dir_xoxi, "train"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
             optimize(
                 fn = snp_dataset_xoxi.__getitem__,
                 inputs = indices_val_samples,
                 output_dir = os.path.join(dir_xoxi, "valid"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
             optimize(
                 fn = snp_dataset_xoxi.__getitem__,
                 inputs = indices_tst_samples,
                 output_dir = os.path.join(dir_xoxi, "test"),
                 chunk_bytes = "256MB",
-                compression = "zstd",
-                num_workers = n_threads,
+                compression = compression,
+                num_workers = n_workers,
             )
     
     shutil.copy(path_gtype_pkl, os.path.join(output_dir, "genotypes.pkl.gz"))
@@ -221,6 +218,8 @@ def snp_data_opt_external(
         path_label: Optional[str] = None,
         col2use: Optional[Union[list[int], list[str]]] = None,
         len_one_hot_vec: int = 10,
+        compression: Optional[str] = "zstd",
+        n_workers: int = 2,
     ):
     """
     Generate SNP (and label) data for litdata optimization.
@@ -239,6 +238,6 @@ def snp_data_opt_external(
         inputs = list(range(data_init.__len__())),
         output_dir = output_dir,
         chunk_bytes = "256MB",
-        compression = "zstd",
-        num_workers = n_threads,
+        compression = compression,
+        num_workers = n_workers,
     )
