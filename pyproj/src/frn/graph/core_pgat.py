@@ -4,6 +4,7 @@ Self-defined improved GAT Layer.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch_sparse
 
 
 class GAT1H(nn.Module):

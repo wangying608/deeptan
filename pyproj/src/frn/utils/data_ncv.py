@@ -18,7 +18,7 @@ The processed data will be stored in litdata's format.
 import os
 from typing import Optional, Union, List
 import numpy as np
-import pandas as pd
+import polars as pl
 from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
@@ -48,10 +48,10 @@ class MyDataset:
         # if len(traits_name) > 1 and output_dim > 1:
         #     raise ValueError("output_dim must be 1 when traits_name has more than one element")
         
-        omics_dfs = [pd.read_csv(pathx, index_col=0) for pathx in paths_omics]
-        intersect_ids_in_omics, _indices = intersect_lists([df.index.astype(str).tolist() for df in omics_dfs])
-        for n_df in range(len(_indices)):
-            omics_dfs[n_df] = omics_dfs[n_df].loc[_indices[n_df], :]
+        omics_dfs = [pl.read_csv(pathx, schema_overrides={"ID": pl.Utf8}) for pathx in paths_omics]
+        intersect_ids_in_omics, _indices = intersect_lists([df.select("ID").to_series().to_list() for df in omics_dfs])
+        for i_df in range(len(_indices)):
+            omics_dfs[i_df] = omics_dfs[i_df][_indices[i_df],:].sort("ID")
         
         sample_ids = []
         labels_df = None
@@ -60,8 +60,8 @@ class MyDataset:
             labels_df, dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use)
             intersect_ids, _indices = intersect_lists([intersect_ids_in_omics, sample_ids_in_labels])
             sample_ids = intersect_ids
-            omics_dfs = [df.loc[_indices[0], :] for df in omics_dfs]
-            labels_df = labels_df.loc[_indices[1], :]
+            omics_dfs = [df[_indices[0],:].sort("ID") for df in omics_dfs]
+            labels_df = labels_df[_indices[1],:].sort("ID")
         else:
             sample_ids = intersect_ids_in_omics
         n_samples = len(sample_ids)
@@ -75,7 +75,6 @@ class MyDataset:
             case x if x > n_samples:
                 n_samples_to_add = x - n_samples
             case _:
-                # n_samples_to_add = 0
                 raise Warning("target_n_samples must be larger than the number of samples")
         
         n_samples_target = n_samples + n_samples_to_add
@@ -88,25 +87,19 @@ class MyDataset:
             sample_ids = sample_ids + [sample_ids[i] for i in new_indices]
             
             if labels_df is not None:
-                labels_df = pd.concat([labels_df, labels_df.iloc[new_indices]])
+                labels_df = labels_df.vstack(labels_df[new_indices,:])
 
-            omics_dfs = [pd.concat([df, df.iloc[new_indices, :]], axis=0) for df in omics_dfs]
+            omics_dfs = [df.vstack(df[new_indices,:]) for df in omics_dfs]
         
-        # # If output_dim > 1, apply one-hot encoding to the label
-        # if output_dim > 1:
-        #     if round_before_onehot:
-        #         self.label_df = self.label_df.round().astype(int)
-        #     self.label_df = pd.get_dummies(self.label_df)
-
         self.sample_ids = sample_ids
         self.n_samples = n_samples
-        self.omics_data = [df.to_numpy(np.float32) for df in omics_dfs]
+        self.omics_data = [df.drop("ID").to_numpy().astype(np.float32) for df in omics_dfs]
         self.omics_features = [df.columns for df in omics_dfs]
         if labels_df is not None:
             labels_df, z_mean, z_sd = zscore_labels(labels_df, sample_ind_for_zsc_label)
             self.z_mean = z_mean
             self.z_sd = z_sd
-            self.label_data = labels_df.to_numpy(np.float32)
+            self.label_data = labels_df.drop("ID").to_numpy().astype(np.float32)
             self.label_features = labels_df.columns
             self.model_output_dim = dim_model_output
         
@@ -169,8 +162,10 @@ def optimize_data_ncv(
             # IF STANDARDIZE labels, calc mean & std of training set and apply to validation & test data.
             if std_labels:
                 dataset_xoxi = MyDataset(paths_omics, path_label, col2use, indices_trn_samples, None, seed_resample, n_fragments)
-                dataset_xoxi.z_mean.to_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
-                dataset_xoxi.z_sd.to_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
+                if dataset_xoxi.z_mean is not None:
+                    dataset_xoxi.z_mean.write_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
+                if dataset_xoxi.z_sd is not None:
+                    dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
             else:
                 dataset_xoxi = tmp_data_init
             
@@ -201,8 +196,8 @@ def optimize_data_ncv(
             )
     
     if path_label is not None:
-        df_output_dim = pd.DataFrame(data={"model_output_dim": [tmp_data_init.model_output_dim]})
-        df_output_dim.to_csv(os.path.join(output_dir, "model_output_dim.csv"), index=False)
+        df_output_dim = pl.DataFrame(data={"model_output_dim": [tmp_data_init.model_output_dim]})
+        df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
     return None
 
 
@@ -211,7 +206,6 @@ def optimize_data_external(
         paths_omics: list[str],
         path_label: Optional[str] = None,
         col2use: Optional[Union[List[str], List[int]]] = None,
-        # standardize_labels: bool = True,
         compression: Optional[str] = "zstd",
         n_workers: int = 2,
     ):
@@ -302,10 +296,10 @@ class MyDataModule4Uni(LightningDataModule):
         self.n_workers = n_workers
     
     def setup(self, stage=None):
-        self.dataloader_x = StreamingDataLoader(StreamingDataset(self.litdata_dir), batch_size=self.batch_size, num_workers=self.n_workers)
+        self.dataloader_xxx = StreamingDataLoader(StreamingDataset(self.litdata_dir), batch_size=self.batch_size, num_workers=self.n_workers)
     
     def predict_dataloader(self):
-        return self.dataloader_x
+        return self.dataloader_xxx
 
     # def test_dataloader(self):
     #     return self.dataloader_x

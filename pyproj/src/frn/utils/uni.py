@@ -6,14 +6,14 @@ import time
 import random
 import string
 import numpy as np
-import pandas as pd
+import polars as pl
 import pickle
 import gzip
 import optuna
-from typing import Any, List, Dict, Optional, Union
+from typing import Any, List, Dict, Optional, Sequence, Union
 from lightning import Trainer
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from pytorch_lightning.loggers import TensorBoardLogger
+from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
 from multiprocessing import cpu_count
@@ -27,6 +27,28 @@ def get_avail_cpu_count(target_n: int) -> int:
     else:
         n_cpu = min(target_n, total_n)
     return n_cpu
+
+def get_avail_nvgpu(devices: Union[list[int], str, int] = 'auto'):
+    if type(devices) == int and device_count() > 0:
+        avail_dev = find_usable_cuda_devices(devices)
+    elif devices == 'auto' and device_count() > 0:
+        avail_dev = find_usable_cuda_devices()
+    else:
+        avail_dev = devices
+    return avail_dev
+
+def get_map_location(map_loc: Optional[str] = None):
+    if map_loc is None:
+        if device_count() > 0:
+            which_dev = find_usable_cuda_devices(1)
+            if len(which_dev) == 0:
+                return 'cpu'
+            else:
+                return f'cuda:{which_dev[0]}'
+        else:
+            return 'cpu'
+    else:
+        return map_loc
 
 
 def time_string() -> str:
@@ -80,26 +102,48 @@ def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted:
     else:
         return shared
 
-def read_labels(path_label: str, col2use: Optional[Union[List[str], List[int]]] = None):
-    label_df = pd.read_csv(path_label, index_col=0)
+def read_labels(path_label: str, col2use: Optional[List[Any]] = None):
+    """
+    Read labels from a csv file.
+    
+    If `col2use` is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+    """
+    label_df = pl.read_csv(path_label, schema_overrides={"ID": pl.Utf8})
+    sample_ids = label_df.select("ID").to_series().to_list()
+
     if col2use is not None:
-        label_df = label_df.loc[:, col2use]
-    dim_model_output = len(label_df.columns)
-    sample_ids = label_df.index.astype(str).tolist()
+        if type(col2use[0]) == str:
+            label_df = label_df.select(["ID"] + col2use)
+        elif type(col2use[0]) == int:
+            label_df = label_df[[0]+col2use,:]
+        else:
+            raise ValueError("col2use must be either a list of strings or a list of integers.")
+    dim_model_output = len(label_df.columns) - 1
     return label_df, dim_model_output, sample_ids
 
-def zscore_labels(labels: pd.DataFrame, sample_ind_for_zsc_label: Optional[List] = None):
+def zscore_labels(labels: pl.DataFrame, sample_ind_for_zsc_label: Optional[List] = None):
     z_mean = None
     z_sd = None
-    df_o = labels
+    
     if sample_ind_for_zsc_label is not None:
+        df_o = labels.drop("ID").to_numpy()
+
         # Calculate mean and std for each column for the samples in sample_ind_for_zsc_label
-        z_mean = labels.iloc[sample_ind_for_zsc_label].mean()
-        z_sd = labels.iloc[sample_ind_for_zsc_label].std()
+        df_part = labels[sample_ind_for_zsc_label,:].drop("ID").to_numpy()
+        z_mean = df_part.mean(axis=0)
+        z_sd = df_part.std(axis=0)
         # And then z-score the whole labels
-        df_o = (labels - z_mean) / z_sd
-    print(f"z-score mean: {z_mean}, z-score std: {z_sd}")
-    return df_o, z_mean, z_sd
+        df_o = (df_o - z_mean) / z_sd
+        z_mean = pl.DataFrame(z_mean, schema=labels.columns[1:])
+        z_sd = pl.DataFrame(z_sd, schema=labels.columns[1:])
+    
+        df_o = pl.DataFrame(df_o, schema=labels.columns[1:])
+        df_o = pl.DataFrame({"ID": labels["ID"]}).hstack(df_o)
+        print(f"z-score mean: {z_mean}, z-score std: {z_sd}")
+    
+        return df_o, z_mean, z_sd
+    else:
+        return labels, z_mean, z_sd
 
 def get_indices_ncv(
         k_outer: int,
@@ -206,12 +250,7 @@ def train_model(
     """
     Fit the model.
     """
-    if type(devices) == int and device_count() > 0:
-        avail_dev = find_usable_cuda_devices(devices)
-    elif devices == 'auto' and device_count() > 0:
-        avail_dev = find_usable_cuda_devices()
-    else:
-        avail_dev = devices
+    avail_dev = get_avail_nvgpu(devices)
 
     callback_es = EarlyStopping(
         monitor='val_loss',
@@ -246,7 +285,11 @@ def train_model(
     
     trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
 
-    return callback_ckpt.best_model_score.item()
+    if callback_ckpt.best_model_score is not None:
+        best_score = callback_ckpt.best_model_score.item()
+    else:
+        best_score = None
+    return best_score
 
 
 class CollectFitLog:
@@ -258,7 +301,7 @@ class CollectFitLog:
         if os.path.exists(self.dir_log) == False:
             raise ValueError(f'Directory {self.dir_log} does not exist.')
     
-    def collect(self) -> Dict[str, pd.DataFrame]:
+    def collect(self) -> Dict[str, pl.DataFrame]:
         """
         Collect training logs from optuna db files and ckpt files.
         """
@@ -266,13 +309,13 @@ class CollectFitLog:
         optuna_best_inners_df = self.collect_optuna_db()
 
         # Merge the two dataframes on the 'x_outer' and 'x_inner' columns
-        logs_df = pd.merge(optuna_best_inners_df, best_trials_df, on=['x_outer', 'x_inner'], how='left')
+        logs_df = optuna_best_inners_df.join(best_trials_df, on=['x_outer', 'x_inner'], how='left')
         # Remove the 'val_loss' column from the merged dataframe
-        logs_df = logs_df.drop(columns=['val_loss'])
+        logs_df = logs_df.drop('val_loss')
         # Rename 'min_loss' column to 'val_loss'
-        logs_df = logs_df.rename(columns={'min_loss': 'val_loss'})
+        logs_df = logs_df.rename({'min_loss': 'val_loss'})
 
-        best_inners_df = logs_df.loc[logs_df.groupby(['x_outer'])['val_loss'].idxmin()]
+        best_inners_df = logs_df.group_by('x_outer').agg(pl.col('val_loss').min()).join(logs_df, on=['x_outer', 'val_loss'], how='left')
 
         print("\nFound model logs:")
         print(logs_df)
@@ -295,10 +338,10 @@ class CollectFitLog:
         ncv_outer_x = [int(path_x.split('/')[-3].split('_')[-2]) for path_x in paths_ckpt]
 
         # Create a dataframe with the above values
-        ckpt_df = pd.DataFrame({'x_outer': ncv_outer_x, 'x_inner': ncv_inner_x, 'val_loss': val_loss_values, 'trial_tag': trial_tags, 'study_tag': study_tags, 'path_ckpt': paths_ckpt})
+        ckpt_df = pl.DataFrame({'x_outer': ncv_outer_x, 'x_inner': ncv_inner_x, 'val_loss': val_loss_values, 'trial_tag': trial_tags, 'study_tag': study_tags, 'path_ckpt': paths_ckpt})
 
         # Pick the best model based on val_loss between the trials of the same outer and inner fold
-        best_trials_df = ckpt_df.loc[ckpt_df.groupby(['x_outer', 'x_inner'])['val_loss'].idxmin()]
+        best_trials_df = ckpt_df.group_by(['x_outer', 'x_inner']).agg([pl.col('val_loss').min()]).join(ckpt_df, on=['x_outer', 'x_inner', 'val_loss'], how='left')
 
         return best_trials_df, ckpt_df
 
@@ -316,7 +359,7 @@ class CollectFitLog:
         
         # Read optuna db files and store the results in a dataframe
         studies_dicts = [self.read_optuna_db(path_optuna_db) for path_optuna_db in paths_optuna_db]
-        studies_df = pd.DataFrame(studies_dicts)
+        studies_df = pl.DataFrame(studies_dicts)
         
         return studies_df
 

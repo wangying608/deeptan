@@ -19,7 +19,7 @@ if __name__ == '__main__':
         path_gtype_pkl = path_gt,
         path_label = path_label,
         col2use = [traits_name],
-        standardize_labels = True,
+        std_labels = True,
         compression="zstd",
         n_workers=3,
     )

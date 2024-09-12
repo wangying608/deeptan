@@ -7,6 +7,7 @@ import time
 import numpy as np
 import polars as pl
 import optuna
+import torch
 from lightning import Trainer
 from frn.s2g.model import SNPReductionNet, SNP2GB
 from frn.utils.uni import get_avail_nvgpu, train_model, CollectFitLog, random_string, read_pkl_gv, time_string
@@ -100,11 +101,13 @@ class SNP2GBTrain:
             learning_rate=hparams['learning_rate'],
             regression=self.regression,
         )
+        _model_compiled = torch.compile(_model, mode='reduce-overhead')
+
         # Unique tag for the experiment
         log_dir_uniq_model = os.path.join(self.log_dir, self.log_name, random_string())
 
         val_loss_min = train_model(
-            model=_model,
+            model=_model_compiled,
             dataloader_train=self.datamodule.train_dataloader(),
             dataloader_val=self.datamodule.val_dataloader(),
             es_patience=hparams['patience'],

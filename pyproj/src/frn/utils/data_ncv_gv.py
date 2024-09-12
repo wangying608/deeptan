@@ -2,7 +2,7 @@ import os
 import shutil
 from typing import Optional, Tuple, Union, List
 import numpy as np
-import pandas as pd
+import polars as pl
 from litdata import optimize
 from frn.utils.uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, zscore_labels, get_indices_ncv
 
@@ -50,11 +50,10 @@ class SNPDataset:
         if path_label is not None:
             self.labels_df, self.dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use)
             
-            # intersect_ids, indices_in_labels, indices_in_snp = intersect_two_str_list(sample_ids_in_labels, sample_ids_in_mat)
             intersect_ids, _indices = intersect_lists([sample_ids_in_labels, sample_ids_in_mat])
             indices_in_labels, indices_in_snp = _indices
             self.snp_mat = snp_matrix[indices_in_snp]
-            self.labels_df = self.labels_df.iloc[indices_in_labels]
+            self.labels_df = self.labels_df[indices_in_labels,:]
             self.sample_ids = intersect_ids
         else:
             self.snp_mat = snp_matrix
@@ -73,7 +72,7 @@ class SNPDataset:
                 self.num_samples = resample
 
                 if hasattr(self, 'labels_df'):
-                    self.labels_df = pd.concat([self.labels_df, self.labels_df.iloc[new_indices]], axis=0)
+                    self.labels_df = self.labels_df.vstack(self.labels_df[new_indices,:])
                 
                 tmp_snp2add = [self.snp_data[i] for i in new_indices]
                 self.snp_data = self.snp_data + tmp_snp2add
@@ -86,7 +85,7 @@ class SNPDataset:
         
         if hasattr(self, 'labels_df'):
             self.labels_df, self.z_mean, self.z_sd = zscore_labels(self.labels_df, sample_ind_for_zsc_label)
-            self.label_data = self.labels_df.to_numpy(np.float32)
+            self.label_data = self.labels_df.drop("ID").to_numpy().astype(np.float32)
 
     def __len__(self):
         return self.num_samples
@@ -113,7 +112,7 @@ def init_snp_dataset(
     ):
     n_samples = 0
     if path_label is not None:
-        n_samples = len(pd.read_csv(path_label, index_col=0).index)
+        n_samples = len(pl.read_csv(path_label, columns=[0]))
     else:
         n_samples = len(read_pkl_gv(path_gtype_pkl)['sample_ids'])
     
@@ -141,7 +140,7 @@ def snp_data_opt_ncv(
         path_gtype_pkl: str,
         path_label: Optional[str] = None,
         col2use: Optional[Union[List[str], List[int]]] = None,
-        standardize_labels: bool = True,
+        std_labels: bool = True,
         len_one_hot_vec: int = 10,
         seed_permut: int = 42,
         seed_resample: int = 42,
@@ -172,11 +171,13 @@ def snp_data_opt_ncv(
             os.makedirs(dir_xoxi, exist_ok=True)
             
             # IF STANDARDIZE labels, calc mean & std of training set and apply to validation & test data.
-            if standardize_labels:
+            if std_labels:
                 snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, indices_trn_samples, len_one_hot_vec, seed_resample)
                 # Save mean & std of training set
-                snp_dataset_xoxi.z_mean.to_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
-                snp_dataset_xoxi.z_sd.to_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
+                if snp_dataset_xoxi.z_mean is not None:
+                    snp_dataset_xoxi.z_mean.write_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
+                if snp_dataset_xoxi.z_sd is not None:
+                    snp_dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
             else:
                 snp_dataset_xoxi = tmp_data_init
             #
@@ -207,8 +208,8 @@ def snp_data_opt_ncv(
     
     shutil.copy(path_gtype_pkl, os.path.join(output_dir, "genotypes.pkl.gz"))
     if path_label is not None:
-        df_output_dim = pd.DataFrame(data={"model_output_dim": [tmp_data_init.dim_model_output]})
-        df_output_dim.to_csv(os.path.join(output_dir, "model_output_dim.csv"), index=False)
+        df_output_dim = pl.DataFrame(data={"model_output_dim": [tmp_data_init.dim_model_output]})
+        df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
     return None
 
 

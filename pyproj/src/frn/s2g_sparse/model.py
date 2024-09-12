@@ -7,6 +7,7 @@ The following layers are dense layers, that could be trained to predict phenotyp
 
 from typing import Optional, Union, List
 import torch
+import torch_sparse
 import torch.nn as nn
 from torch.optim.adam import Adam
 import lightning as ltn
