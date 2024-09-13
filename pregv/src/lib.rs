@@ -79,9 +79,10 @@ pub fn vcf2encoded(
     path_vcf: &str,
     path_gff_dict: &str,
     path_output: &str,
+    strandx: &str,
     use_more_mem: bool,
 ) -> Result<(), Box<dyn Error>> {
-    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict, use_more_mem)?;
+    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict, strandx, use_more_mem)?;
 
     let vcf_mat = encode_vcf(&vcf_dict);
 
@@ -144,6 +145,7 @@ fn write_encoded_vcf2pkl(
 fn build_vcf_dict(
     path_vcf: &str,
     path_gff_dict: &str,
+    strandx: &str,
     use_more_mem: bool,
 ) -> Result<VcfInfo, Box<dyn Error>> {
     // Read gff dict
@@ -184,7 +186,7 @@ fn build_vcf_dict(
         let par_chunks = records.par_chunks(chunk_size).map(|chunk| {
             chunk
                 .iter()
-                .map(|r| check_snp(r, &gff_dict, &block_ids, false))
+                .map(|r| check_snp(r, &gff_dict, &block_ids, false, strandx))
                 .collect::<Vec<SnpCheckKV>>()
         });
         let snp_dict_vec: Vec<SnpCheckKV> = par_chunks
@@ -208,7 +210,8 @@ fn build_vcf_dict(
             if !result.is_ok() {
                 continue;
             } else {
-                let snp_check_kv = check_snp(&result.unwrap(), &gff_dict, &block_ids, true);
+                let snp_check_kv =
+                    check_snp(&result.unwrap(), &gff_dict, &block_ids, true, strandx);
                 if !snp_check_kv.snp_id.is_empty() {
                     snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
                 }
@@ -228,6 +231,14 @@ fn build_vcf_dict(
     blocks_ids.sort();
     blocks_ids.dedup();
 
+    if snp_ids.is_empty() || blocks_ids.is_empty() {
+        println!("❌  No SNPs found in any genome blocks.\n");
+        println!(
+            "🌰  A sample from GFF dict:\n    {:?}\n",
+            gff_dict.get(&block_ids[0]).unwrap()
+        );
+        return Err("No SNPs found in any genome blocks.".to_string().into());
+    }
     println!(
         "\n✅  Found {} SNPs in {} genome blocks.\n",
         snp_ids.len(),
@@ -249,6 +260,7 @@ fn check_snp(
     gff_dict: &HashMap<String, GeneInfo>,
     block_ids: &[String],
     para: bool,
+    strandx: &str,
 ) -> SnpCheckKV {
     let mut snp_idx = String::new();
     let mut snp_info = SnpInfo {
@@ -266,7 +278,7 @@ fn check_snp(
         let seqid = record_x.reference_sequence_name().to_string();
 
         // Check position in gff dict
-        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x, para);
+        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x, para, strandx);
 
         if snp_found.found {
             let ref_base = record_x.reference_bases().to_string();
@@ -303,6 +315,7 @@ fn check_pos(
     seq_name: &str,
     pos: usize,
     para: bool,
+    strandx: &str,
 ) -> SnpFound {
     let mut snp_found = SnpFound {
         found: false,
@@ -317,20 +330,20 @@ fn check_pos(
         // });
         let num_threads = std::thread::available_parallelism().unwrap().get();
         let chunk_size = n_genome_block / num_threads;
-        println!(
-            "🔥 Using {} threads to process {} genome blocks.\n",
-            num_threads, n_genome_block,
-        );
+        // println!(
+        //     "🔥 Using {} threads to process {} genome blocks.\n",
+        //     num_threads, n_genome_block,
+        // );
         isfound.par_chunks_mut(chunk_size).for_each(|chunk| {
             for (i, isf) in chunk.iter_mut().enumerate() {
                 let gene_info = gff_dict.get(&block_ids[i]).unwrap();
-                *isf = check_pos_single(gene_info, seq_name, pos);
+                *isf = check_pos_single(gene_info, seq_name, pos, strandx);
             }
         });
     } else {
         isfound.iter_mut().enumerate().for_each(|(i, isf)| {
             let gene_info = gff_dict.get(&block_ids[i]).unwrap();
-            *isf = check_pos_single(gene_info, seq_name, pos);
+            *isf = check_pos_single(gene_info, seq_name, pos, strandx);
         });
     }
 
@@ -352,15 +365,19 @@ fn check_pos(
     snp_found
 }
 
-fn check_pos_single(gene_info: &GeneInfo, seq_name: &str, pos: usize) -> bool {
+fn check_pos_single(gene_info: &GeneInfo, seq_name: &str, pos: usize, strandx: &str) -> bool {
     let mut is_found = false;
     // if proc_seq_name(&gene_info.seqid) == proc_seq_name(seq_name)
-    if gene_info.seqid == seq_name
-        && pos >= gene_info.start
-        && pos <= gene_info.end
-        && gene_info.strand == "+"
+    if gene_info.seqid == seq_name && pos >= gene_info.start && pos <= gene_info.end
+    // && gene_info.strand == "+"
     {
-        is_found = true;
+        if strandx == "+" && gene_info.strand == "+" {
+            is_found = true;
+        } else if strandx == "-" && gene_info.strand == "-" {
+            is_found = true;
+        } else if strandx == "." {
+            is_found = true;
+        }
     }
     is_found
 }
@@ -519,6 +536,8 @@ fn proc_seq_name(seq_name: &str) -> String {
     let mut seq_name_lowcase = seq_name.to_lowercase();
     if seq_name_lowcase.contains("chr") {
         seq_name_lowcase = seq_name_lowcase.replace("chr", "");
+    } else {
+        seq_name_lowcase = seq_name.to_string();
     }
     seq_name_lowcase
 }

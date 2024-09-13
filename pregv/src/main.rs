@@ -30,6 +30,10 @@ fn main() {
                 .get_one::<String>("output")
                 .map(|s| s.as_str())
                 .unwrap(),
+            sub_matches
+                .get_one::<String>("strand")
+                .map(|s| s.as_str())
+                .unwrap(),
             sub_matches.get_one::<bool>("moremem").unwrap().to_owned(),
         )
         .expect("Failed to encode genotypes"),
@@ -83,6 +87,13 @@ fn cli() -> Command {
                         .short('o')
                         .help("Output pickle file.")
                         .required(true)
+                        .action(ArgAction::Set),
+                    Arg::new("strand")
+                        .long("strand")
+                        .short('s')
+                        .help("Use \"+\", \"-\" or \".\"(both) to specify strand.")
+                        .required(false)
+                        .default_value(".")
                         .action(ArgAction::Set),
                     Arg::new("moremem")
                         .long("more-mem")
