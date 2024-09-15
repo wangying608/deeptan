@@ -40,14 +40,6 @@ class MyDataset:
             n_fragments: int = 1,
         ):
         super().__init__()
-        # self.transpose_omics = transpose_omics
-        # if output_dim < 1:
-        #     raise ValueError("output_dim must be greater than or equal to 1")
-        # if isinstance(traits_name, str):
-        #     traits_name = [traits_name]
-        # if len(traits_name) > 1 and output_dim > 1:
-        #     raise ValueError("output_dim must be 1 when traits_name has more than one element")
-        
         omics_dfs = [pl.read_csv(pathx, schema_overrides={"ID": pl.Utf8}) for pathx in paths_omics]
         intersect_ids_in_omics, _indices = intersect_lists([df.select("ID").to_series().to_list() for df in omics_dfs])
         for i_df in range(len(_indices)):
@@ -125,6 +117,7 @@ def optimize_data_ncv(
         path_label: Optional[str] = None,
         col2use: Optional[Union[List[str], List[int]]] = None,
         std_labels: bool = True,
+        fragment_elem_ids: Optional[List[List[int]]] = None,
         seed_permut: int = 42,
         seed_resample: int = 42,
         compression: Optional[str] = "zstd",
@@ -142,20 +135,26 @@ def optimize_data_ncv(
         `seed_permut`: Seed for permutation.
         `seed_resample`: Seed for resampling.
     """
-    n_fragments = int(k_outer * k_inner)
-    tmp_data_init = MyDataset(paths_omics, path_label, col2use, None, None, seed_resample, n_fragments)
+    if fragment_elem_ids is None:
+        n_fragments = int(k_outer * k_inner)
+        tmp_data_init = MyDataset(paths_omics, path_label, col2use, None, None, seed_resample, n_fragments)
 
-    # Permutate samples
-    np.random.seed(seed_permut)
-    _indices = np.random.permutation(len(tmp_data_init))
-    fragments = np.array_split(_indices, n_fragments)
+        # Permutate samples
+        np.random.seed(seed_permut)
+        _indices = np.random.permutation(len(tmp_data_init))
+        fragments = np.array_split(_indices, n_fragments)
+        fragments = [i.tolist() for i in fragments]
+    else:
+        fragments = fragment_elem_ids
+        n_fragments = len(fragment_elem_ids)
+        assert k_outer * k_inner == n_fragments
 
     for xo in range(k_outer):
         for xi in range(k_inner):
             fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(k_outer, k_inner, xo, xi)
-            indices_trn_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_trn]).tolist()
-            indices_val_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_val]).tolist()
-            indices_tst_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_test]).tolist()
+            indices_trn_samples = np.concatenate([fragments[i] for i in fr_indices_trn]).tolist()
+            indices_val_samples = np.concatenate([fragments[i] for i in fr_indices_val]).tolist()
+            indices_tst_samples = np.concatenate([fragments[i] for i in fr_indices_test]).tolist()
             dir_xoxi = os.path.join(output_dir, f"ncv_test_{xo}_val_{xi}")
             os.makedirs(dir_xoxi, exist_ok=True)
             
@@ -167,7 +166,7 @@ def optimize_data_ncv(
                 if dataset_xoxi.z_sd is not None:
                     dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
             else:
-                dataset_xoxi = tmp_data_init
+                dataset_xoxi = MyDataset(paths_omics, path_label, col2use, None, None, seed_resample, n_fragments)
             
             # Start optimizing
             optimize(
@@ -196,8 +195,10 @@ def optimize_data_ncv(
             )
     
     if path_label is not None:
-        df_output_dim = pl.DataFrame(data={"model_output_dim": [tmp_data_init.model_output_dim]})
+        _, dim_model_output, _ = read_labels(path_label, col2use)
+        df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
         df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
+    
     return None
 
 

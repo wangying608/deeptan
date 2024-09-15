@@ -20,6 +20,7 @@ if __name__ == '__main__':
         path_label = path_label,
         col2use = [traits_name],
         std_labels = True,
+        fragment_elem_ids=None,
         compression="zstd",
         n_workers=3,
     )

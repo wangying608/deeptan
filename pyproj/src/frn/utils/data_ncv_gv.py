@@ -1,6 +1,6 @@
 import os
 import shutil
-from typing import Optional, Tuple, Union, List
+from typing import Optional, Union, List
 import numpy as np
 import polars as pl
 from litdata import optimize
@@ -141,6 +141,7 @@ def snp_data_opt_ncv(
         path_label: Optional[str] = None,
         col2use: Optional[Union[List[str], List[int]]] = None,
         std_labels: bool = True,
+        fragment_elem_ids: Optional[List[List[int]]] = None,
         len_one_hot_vec: int = 10,
         seed_permut: int = 42,
         seed_resample: int = 42,
@@ -151,22 +152,28 @@ def snp_data_opt_ncv(
     Generate SNP (and label) data for litdata optimization.
     For nested cross-validation (NCV).
     """
-    n_fragments = int(k_outer * k_inner)
-    tmp_data_init = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, None, len_one_hot_vec, seed_resample)
+    if fragment_elem_ids is None:
+        n_fragments = int(k_outer * k_inner)
+        tmp_data_init = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, None, len_one_hot_vec, seed_resample)
 
-    # Set the random seed
-    np.random.seed(seed_permut)
-    # Generate a random permutation of the indices
-    _indices = np.random.permutation(len(tmp_data_init))
-    # Split the indices into fragments
-    fragments = np.array_split(_indices, n_fragments)
+        # Set the random seed
+        np.random.seed(seed_permut)
+        # Generate a random permutation of the indices
+        _indices = np.random.permutation(len(tmp_data_init))
+        # Split the indices into fragments
+        fragments = np.array_split(_indices, n_fragments)
+        fragments = [i.tolist() for i in fragments]
+    else:
+        fragments = fragment_elem_ids
+        n_fragments = len(fragment_elem_ids)
+        assert k_outer * k_inner == n_fragments
 
     for xo in range(k_outer):
         for xi in range(k_inner):
             fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(k_outer, k_inner, xo, xi)
-            indices_trn_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_trn]).tolist()
-            indices_val_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_val]).tolist()
-            indices_tst_samples = np.concatenate([fragments[i].tolist() for i in fr_indices_test]).tolist()
+            indices_trn_samples = np.concatenate([fragments[i] for i in fr_indices_trn]).tolist()
+            indices_val_samples = np.concatenate([fragments[i] for i in fr_indices_val]).tolist()
+            indices_tst_samples = np.concatenate([fragments[i] for i in fr_indices_test]).tolist()
             dir_xoxi = os.path.join(output_dir, f"ncv_test_{xo}_val_{xi}")
             os.makedirs(dir_xoxi, exist_ok=True)
             
@@ -179,7 +186,7 @@ def snp_data_opt_ncv(
                 if snp_dataset_xoxi.z_sd is not None:
                     snp_dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
             else:
-                snp_dataset_xoxi = tmp_data_init
+                snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, None, len_one_hot_vec, seed_resample)
             #
             optimize(
                 fn = snp_dataset_xoxi.__getitem__,
@@ -208,7 +215,8 @@ def snp_data_opt_ncv(
     
     shutil.copy(path_gtype_pkl, os.path.join(output_dir, "genotypes.pkl.gz"))
     if path_label is not None:
-        df_output_dim = pl.DataFrame(data={"model_output_dim": [tmp_data_init.dim_model_output]})
+        _, dim_model_output, _ = read_labels(path_label, col2use)
+        df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
         df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
     return None
 
