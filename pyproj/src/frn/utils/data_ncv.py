@@ -16,84 +16,70 @@ The processed data will be stored in litdata's format.
 
 """
 import os
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 import numpy as np
 import polars as pl
 from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
-from frn.utils.uni import intersect_lists, read_labels, zscore_labels, get_indices_ncv
+from frn.utils.uni import intersect_lists, read_labels, get_indices_ncv, ProcOnTrainSet
 
 
 class MyDataset:
     """
     Read data for litdata optimization.
+
+    - `reproduction_mode` is used to determine whether to use the processors fitted before. Please provide `dir_save_processors` if `reproduction_mode` is `True`.
+    - `sample_ind_for_proc` is used to select samples for preprocessors fitting. ***If it is `None`, all samples are used.***
+    - `dir_save_processors` is used to save data processors that fitted on training data. ***If it is `None`, preprocessing is not performed.***
+
     """
     def __init__(
             self,
-            paths_omics: list[str],
+            reproduction_mode: bool,
+            paths_omics: Dict[str, str],
             path_label: Optional[str] = None,
-            col2use: Optional[Union[List[str], List[int]]] = None,
-            sample_ind_for_zsc_label: Optional[List] = None,
+            col2use_in_label: Optional[Union[List[str], List[int]]] = None,
+            sample_ind_for_proc: Optional[List] = None,
+            dir_save_processors: Optional[str] = None,
             target_n_samples: Optional[int] = None,
             seed_resample: int = 42,
             n_fragments: int = 1,
+            process_labels: bool = True,
+            process_omics: bool = True,
         ):
         super().__init__()
-        omics_dfs = [pl.read_csv(pathx, schema_overrides={"ID": pl.Utf8}) for pathx in paths_omics]
-        intersect_ids_in_omics, _indices = intersect_lists([df.select("ID").to_series().to_list() for df in omics_dfs])
-        for i_df in range(len(_indices)):
-            omics_dfs[i_df] = omics_dfs[i_df][_indices[i_df],:].sort("ID")
+
+        self.omics_name = sorted(list(paths_omics.keys()))
+        self.n_omics = len(self.omics_name)
+        self.omics_dfs: Dict[str, pl.DataFrame] = {}
         
-        sample_ids = []
-        labels_df = None
-        dim_model_output = None
+        self._pick_shared_samples_in_omics(paths_omics)
+        
+        self.sample_ids = []
+        self.labels_df = None
+        self.dim_model_output = None
+
         if path_label is not None:
-            labels_df, dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use)
-            intersect_ids, _indices = intersect_lists([intersect_ids_in_omics, sample_ids_in_labels])
-            sample_ids = intersect_ids
-            omics_dfs = [df[_indices[0],:].sort("ID") for df in omics_dfs]
-            labels_df = labels_df[_indices[1],:].sort("ID")
+            self._pick_shared_samples_in_omics_and_labels(path_label, col2use_in_label)
         else:
-            sample_ids = intersect_ids_in_omics
-        n_samples = len(sample_ids)
+            self.sample_ids = self.intersect_ids_in_omics
         
-        n_samples_to_add = 0
-        match target_n_samples:
-            case None:
-                if n_fragments > 1:
-                    if n_samples % n_fragments != 0:
-                        n_samples_to_add = n_fragments - (n_samples % n_fragments)
-            case x if x > n_samples:
-                n_samples_to_add = x - n_samples
-            case _:
-                raise Warning("target_n_samples must be larger than the number of samples")
+        self.n_samples = len(self.sample_ids)
+        self._calc_n_samples2sample(target_n_samples, n_fragments)
         
-        n_samples_target = n_samples + n_samples_to_add
 
-        if n_samples_to_add > 0:
-            # Generate random indices to add
-            np.random.seed(seed_resample)
-            new_indices: list[int] = np.random.choice(n_samples, n_samples_to_add, replace=True).tolist()
-            n_samples = n_samples_target
-            sample_ids = sample_ids + [sample_ids[i] for i in new_indices]
-            
-            if labels_df is not None:
-                labels_df = labels_df.vstack(labels_df[new_indices,:])
+        if self.n_samples_to_add > 0:
+            self._sample_new2add(seed_resample)
 
-            omics_dfs = [df.vstack(df[new_indices,:]) for df in omics_dfs]
-        
-        self.sample_ids = sample_ids
-        self.n_samples = n_samples
-        self.omics_data = [df.drop("ID").to_numpy().astype(np.float32) for df in omics_dfs]
-        self.omics_features = [df.columns for df in omics_dfs]
-        if labels_df is not None:
-            labels_df, z_mean, z_sd = zscore_labels(labels_df, sample_ind_for_zsc_label)
-            self.z_mean = z_mean
-            self.z_sd = z_sd
-            self.label_data = labels_df.drop("ID").to_numpy().astype(np.float32)
-            self.label_features = labels_df.columns
-            self.model_output_dim = dim_model_output
+        self._proc_omics(process_omics, sample_ind_for_proc, dir_save_processors)
+        self._proc_labels(process_labels, sample_ind_for_proc, dir_save_processors)
+
+        self.omics_data = []
+        self.omics_features = []
+        for i in range(self.n_omics):
+            self.omics_data.append(self.omics_dfs[self.omics_name[i]].drop("ID").to_numpy().astype(np.float32))
+            self.omics_features.append(self.omics_dfs[self.omics_name[i]].columns)
         
     def __len__(self):
         return self.n_samples
@@ -107,21 +93,96 @@ class MyDataset:
         else:
             data_o = {"index": index, "omics": omics_data_i, "id": sample_id_i}
         return data_o
+    
+    def _pick_shared_samples_in_omics(self, paths_omics: Dict[str, str]):
+        original_omics_IDs = []
+        for i in range(self.n_omics):
+            self.omics_dfs[self.omics_name[i]] = pl.read_csv(paths_omics[self.omics_name[i]], schema_overrides={"ID": pl.Utf8})
+            original_omics_IDs.append(self.omics_dfs[self.omics_name[i]].select("ID").to_series().to_list())
+        
+        intersect_ids_in_omics, _indices = intersect_lists(original_omics_IDs)
+        for i in range(self.n_omics):
+            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]][_indices[i],:].sort("ID")
+        
+        self.intersect_ids_in_omics = intersect_ids_in_omics
+    
+    def _pick_shared_samples_in_omics_and_labels(self, path_label: str, col2use_in_label: Optional[Union[List[str], List[int]]]):
+        labels_df, dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use_in_label)
+        intersect_ids, _indices = intersect_lists([self.intersect_ids_in_omics, sample_ids_in_labels])
+        
+        for i in range(self.n_omics):
+            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]][_indices[0],:].sort("ID")
+        labels_df = labels_df[_indices[1],:].sort("ID")
+
+        self.sample_ids = intersect_ids
+        self.labels_df = labels_df
+        self.model_output_dim = dim_model_output
+    
+    def _calc_n_samples2sample(self, target_n_samples: Optional[int], n_fragments: int):
+        n_samples_to_add = 0
+        match target_n_samples:
+            case None:
+                if n_fragments > 1:
+                    if self.n_samples % n_fragments != 0:
+                        n_samples_to_add = n_fragments - (self.n_samples % n_fragments)
+            case x if x > self.n_samples:
+                n_samples_to_add = x - self.n_samples
+            case _:
+                raise Warning("target_n_samples must be larger than the number of samples")
+        self.n_samples_to_add = n_samples_to_add
+        self.n_samples_target = self.n_samples + n_samples_to_add
+    
+    def _sample_new2add(self, seed_resample: int):
+        # Generate random indices to add
+        np.random.seed(seed_resample)
+        new_indices: list[int] = np.random.choice(self.n_samples, self.n_samples_to_add, replace=True).tolist()
+        self.n_samples = self.n_samples_target
+        self.sample_ids = self.sample_ids + [self.sample_ids[i] for i in new_indices]
+        
+        if self.labels_df is not None:
+            self.labels_df = self.labels_df.vstack(self.labels_df[new_indices,:])
+
+        for i in range(self.n_omics):
+            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]].vstack(self.omics_dfs[self.omics_name[i]][new_indices,:])
+    
+    def _proc_omics(self, process_omics: bool, sample_ind_for_proc: Optional[List[int]] = None, dir_save_processors: Optional[str] = None):
+        if process_omics:
+            # print("Processing omics")
+            for i in range(self.n_omics):
+                _tmp_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], sample_ind_for_proc)
+                _tmp_proc.pr_impute(strategy="mean")
+                _tmp_proc.pr_minmax()
+                if dir_save_processors is not None:
+                    _tmp_proc.save_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
+                self.omics_dfs[self.omics_name[i]] = _tmp_proc._df
+    
+    def _proc_labels(self, process_labels: bool, sample_ind_for_proc: Optional[List[int]] = None, dir_save_processors: Optional[str] = None):
+        if self.labels_df is not None and process_labels:
+            # print("Processing labels")
+            labels_processor = ProcOnTrainSet(self.labels_df, sample_ind_for_proc)
+            labels_processor.pr_impute(strategy="mean")
+            labels_processor.pr_minmax()
+            if dir_save_processors is not None:
+                labels_processor.save_processors(dir_save_processors, 'data_processors_for_labels.pkl')
+            labels_df = labels_processor._df
+            self.label_data = labels_df.drop("ID").to_numpy().astype(np.float32)
+            self.label_features = labels_df.columns
 
 
 def optimize_data_ncv(
         output_dir: str,
         k_outer: int,
         k_inner: int,
-        paths_omics: List[str],
+        paths_omics: Dict[str, str],
         path_label: Optional[str] = None,
-        col2use: Optional[Union[List[str], List[int]]] = None,
-        std_labels: bool = True,
+        col2use_in_labels: Optional[Union[List[str], List[int]]] = None,
+        process_labels: bool = True,
+        process_omics: bool = True,
         fragment_elem_ids: Optional[List[List[int]]] = None,
         seed_permut: int = 42,
         seed_resample: int = 42,
         compression: Optional[str] = "zstd",
-        n_workers: int = 2,
+        n_workers: int = 1,
     ):
     """
     Args:
@@ -137,7 +198,7 @@ def optimize_data_ncv(
     """
     if fragment_elem_ids is None:
         n_fragments = int(k_outer * k_inner)
-        tmp_data_init = MyDataset(paths_omics, path_label, col2use, None, None, seed_resample, n_fragments)
+        tmp_data_init = MyDataset(paths_omics, path_label, col2use_in_labels, None, None, None, seed_resample, n_fragments)
 
         # Permutate samples
         np.random.seed(seed_permut)
@@ -158,15 +219,8 @@ def optimize_data_ncv(
             dir_xoxi = os.path.join(output_dir, f"ncv_test_{xo}_val_{xi}")
             os.makedirs(dir_xoxi, exist_ok=True)
             
-            # IF STANDARDIZE labels, calc mean & std of training set and apply to validation & test data.
-            if std_labels:
-                dataset_xoxi = MyDataset(paths_omics, path_label, col2use, indices_trn_samples, None, seed_resample, n_fragments)
-                if dataset_xoxi.z_mean is not None:
-                    dataset_xoxi.z_mean.write_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
-                if dataset_xoxi.z_sd is not None:
-                    dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
-            else:
-                dataset_xoxi = MyDataset(paths_omics, path_label, col2use, None, None, seed_resample, n_fragments)
+            #
+            dataset_xoxi = MyDataset(paths_omics, path_label, col2use_in_labels, indices_trn_samples, dir_xoxi, None, seed_resample, n_fragments, process_labels, process_omics)
             
             # Start optimizing
             optimize(
@@ -195,7 +249,7 @@ def optimize_data_ncv(
             )
     
     if path_label is not None:
-        _, dim_model_output, _ = read_labels(path_label, col2use)
+        _, dim_model_output, _ = read_labels(path_label, col2use_in_labels)
         df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
         df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
     
@@ -338,6 +392,7 @@ def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
     # out_array = (out_array - values_min) / (values_max - values_min)
     out_array = (out_array - values_min[:, None]) / (values_max[:, None] - values_min[:, None])
     return out_array, values_min, values_max, feat2rm
+
 
 def omics_tensor_list_to_np(batch: List[Tensor]):
     concatenated = np.concatenate([ts.numpy() for ts in batch], axis=None)

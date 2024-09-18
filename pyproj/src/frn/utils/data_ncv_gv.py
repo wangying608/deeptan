@@ -4,7 +4,7 @@ from typing import Optional, Union, List
 import numpy as np
 import polars as pl
 from litdata import optimize
-from frn.utils.uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, zscore_labels, get_indices_ncv
+from frn.utils.uni import one_hot_encode_snp_matrix, read_pkl_gv, intersect_lists, read_labels, get_indices_ncv, ProcOnTrainSet
 
 
 class SNPDataset:
