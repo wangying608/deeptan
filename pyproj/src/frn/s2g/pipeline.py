@@ -13,7 +13,7 @@ from frn.utils.uni import get_avail_nvgpu, train_model, CollectFitLog, random_st
 from frn.utils.data_ncv import MyDataModule4Train, MyDataModule4Uni
 
 
-class SNP2GBTrain:
+class SNP2GBFit:
     """
     SNP-to-genome-block model training with hyperparameter optimization.
     """
@@ -49,7 +49,7 @@ class SNP2GBTrain:
         self.blocks_gt = read_pkl_gv(os.path.join(litdata_dir, 'genotypes.pkl.gz'))['block2gtype']
         self.model_out_dim = pl.read_csv(os.path.join(litdata_dir, "model_output_dim.csv"), has_header=True)[0,0]
 
-        self.datamodule = MyDataModule4Train(litdata_dir, which_outer_testset, which_inner_valset, batch_size)
+        self.datamodule = MyDataModule4Train(litdata_dir, which_outer_testset, which_inner_valset, batch_size, n_jobs)
         self.datamodule.setup()
 
         self.hparams = self.hparams_fit(
@@ -172,7 +172,7 @@ class SNP2GBTrain:
         study.optimize(self.objective, n_jobs=self.n_jobs, n_trials=n_trials, gc_after_trial=True)
 
 
-class SNP2GBTrainPipe:
+class SNP2GBFitPipe:
     r"""
     SNP2GB model pipeline.
     Hyperparameters are optimized for each fold in nested cross-validation.
@@ -184,12 +184,12 @@ class SNP2GBTrainPipe:
             list_ncv: List[List[int]],
             log_dir: str,
             regression: bool,
-            dense_layers_hidden_dims: Optional[List[int]] = None,
-            len_onehot_snp: int = 10,
             devices: Union[List[int], str, int] = 'auto',
             accelerator: str = 'auto',
             n_jobs: int = 1,
             n_trials: Optional[int] = 10,
+            dense_layers_hidden_dims: Optional[List[int]] = None,
+            len_onehot_snp: int = 10,
         ):
         """
         Initialize SNP2GB pipeline.
@@ -199,13 +199,11 @@ class SNP2GBTrainPipe:
         - `len_onehot_snp`: Length of the one-hot vector for each SNP.
         - `dense_layers_hidden_dims`: List of hidden dimensions for the dense layers.
         """
-        # Unique tag for the train
+        # Unique tag for the training log directory
         rand_str = random_string()
         time_str = time_string()
         tag_str = time_str + '_' + rand_str
         self.uniq_logdir = os.path.join(log_dir, 'train_' + tag_str)
-        self.regression = regression
-
         if not os.path.exists(self.uniq_logdir):
             os.makedirs(self.uniq_logdir)
 
@@ -218,6 +216,7 @@ class SNP2GBTrainPipe:
         else:
             self.dense_layers_hidden_dims = dense_layers_hidden_dims
         
+        self.regression = regression
         self.len_onehot_snp = len_onehot_snp
         self.devices = devices
         self.accelerator = accelerator
@@ -238,7 +237,7 @@ class SNP2GBTrainPipe:
         
         # Train SNP2GB model for each fold in nested cross-validation
         if self.n_slice == 1:
-            snp2gb_train_x = SNP2GBTrain(
+            snp2gb_train_x = SNP2GBFit(
                 log_dir = self.uniq_logdir,
                 log_name = log_names[0],
                 litdata_dir = self.litdata_dir,
@@ -254,7 +253,7 @@ class SNP2GBTrainPipe:
             snp2gb_train_x.optimize(n_trials=self.n_trials, storage=path_storage)
         else:
             for xfold in range(self.n_slice):
-                snp2gb_train_x = SNP2GBTrain(
+                snp2gb_train_x = SNP2GBFit(
                     log_dir = self.uniq_logdir,
                     log_name = log_names[xfold],
                     litdata_dir = self.litdata_dir,
@@ -274,7 +273,7 @@ def execute_s2g(
         dir_litdata: str,
         path_gtype_pkl: str,
         path_pretrained_model: str,
-        dir4predictions: str = os.getcwd(),
+        dir_log_predict: str = os.getcwd(),
         len_one_hot_vec: int = 10,
         batch_size: int = 32,
         accelerator: str = 'auto',
@@ -294,7 +293,7 @@ def execute_s2g(
 
     avail_dev = get_avail_nvgpu()
 
-    trainer = Trainer(accelerator=accelerator, devices=avail_dev, default_root_dir=dir4predictions, logger=False)
+    trainer = Trainer(accelerator=accelerator, devices=avail_dev, default_root_dir=dir_log_predict, logger=False)
     
     predictions = trainer.predict(model=model4gene, datamodule=datamodule_s2g)
 
@@ -336,28 +335,14 @@ class SNP2GBTransPipe:
             os.makedirs(self.dir_output)
         self.overwrite_collected_log = overwrite_collected_log
 
-    def collect_trained_models(self):
+    def collect_models(self):
         """
         Collect trained models for each fold in nested cross-validation.
         """
         collector = CollectFitLog(self.dir_log)
-        collected_logs = collector.collect()
-
-        key_best_trials = 'logs'
-        self.models_bv = collected_logs[key_best_trials]
-        path_log_best_trials = os.path.join(self.dir_output, '_log_best_trials' + '.csv')
-        if os.path.exists(path_log_best_trials) and not self.overwrite_collected_log:
-            self.models_bv = pl.read_csv(path_log_best_trials)
-        else:
-            self.models_bv.write_csv(path_log_best_trials)
-
-        key_best_inner_folds = 'best_inners'
-        self.models_bi = collected_logs[key_best_inner_folds]
-        path_log_best_inners = os.path.join(self.dir_output, '_log_best_inners' + '.csv')
-        if os.path.exists(path_log_best_inners) and not self.overwrite_collected_log:
-            self.models_bi = pl.read_csv(path_log_best_inners)
-        else:
-            self.models_bi.write_csv(path_log_best_inners)
+        models_bv, models_bi = collector.get_df_csv(self.dir_output, self.overwrite_collected_log)
+        self.models_bv = models_bv
+        self.models_bi = models_bi
 
     def convert_snp(
             self,
@@ -366,6 +351,7 @@ class SNP2GBTransPipe:
             len_one_hot_vec: int = 10,
             accelerator: str = 'auto',
             batch_size: int = 32,
+            n_workers: int = 0,
         ):
         """
         Convert SNPs to genome blocks features using the best model for each fold in nested cross-validation.
@@ -374,12 +360,12 @@ class SNP2GBTransPipe:
         Otherwise, the best model for each fold in `list_ncv` is used.
         """
         if not hasattr(self,'models_bv'):
-            self.collect_trained_models()
+            self.collect_models()
         
         path_gtype_pkl = os.path.join(dir_litdata, 'genotypes.pkl.gz')
 
         if list_ncv is None:
-            # Take the best model's path overall by searching the line min `val_loss` in models_bi
+            # Take the best model's path overall by searching the line min `val_loss` in models_bi.
             path_best_model = self.models_bi.filter(pl.col('val_loss') == self.models_bi.select('val_loss').min()).select('path_ckpt')[0,0]
             output = execute_s2g(dir_litdata, path_gtype_pkl, path_best_model, self.dir_output, len_one_hot_vec, batch_size, accelerator)
             output.write_parquet(os.path.join(self.dir_output, 'snp2gb.parquet'))
@@ -397,15 +383,13 @@ class SNP2GBTransPipe:
             path_mdl = self.models_bv.filter((pl.col('x_outer') == x_outer) & (pl.col('x_inner') == x_inner)).select('path_ckpt')[0,0]
             print(f'\nUsing model {path_mdl}\n')
 
-            ncv_data = MyDataModule4Train(dir_litdata, x_outer, x_inner, 0)
+            ncv_data = MyDataModule4Train(dir_litdata, x_outer, x_inner, batch_size, n_workers)
             dir_train, dir_valid, dir_test = ncv_data.get_dir_ncv_litdata()
 
             pred_trn = execute_s2g(dir_train, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
             pred_trn.write_parquet(path_o_pred_trn)
-
             pred_val = execute_s2g(dir_valid, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
             pred_val.write_parquet(path_o_pred_val)
-
             pred_tst = execute_s2g(dir_test, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
             pred_tst.write_parquet(path_o_pred_tst)
 

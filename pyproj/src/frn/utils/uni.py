@@ -157,7 +157,19 @@ class ProcOnTrainSet:
             with open(path_save_processors, "wb") as f:
                 pickle.dump(self.data_processors, f)
             print(f"The data processors have been saved to: {path_save_processors}")
-
+    
+    def load_run_processors(self, dir_save_processors: str, file_name: str):
+        path_processors = os.path.join(dir_save_processors, file_name)
+        with open(path_processors, "rb") as f:
+            processors_dict = pickle.load(f)
+        # Run the processors
+        _tmp_df = self._df.drop("ID").to_numpy()
+        for i in range(len(processors_dict.keys())):
+            _tmp_df = processors_dict[i].transform(_tmp_df)
+        _tmp_df = pl.DataFrame(_tmp_df, schema=self._df.columns[1:])
+        _tmp_df = pl.DataFrame({"ID": self._df["ID"]}).hstack(_tmp_df)
+        self._df = _tmp_df
+    
     def general_processor(self, _processor):
         _processor.fit(self.df_part)
         df_o = _processor.transform(self._df.drop("ID").to_numpy())
@@ -166,25 +178,6 @@ class ProcOnTrainSet:
 
         self._df = df_o
         self.keep_processors(_processor)
-
-    # def zscore_(self):
-    #     z_mean = self.df_part.mean(axis=0)
-    #     z_sd = self.df_part.std(axis=0)
-    #     # z-score all samples
-    #     df_o = (self._df.drop("ID").to_numpy() - z_mean) / z_sd
-    #     z_mean = pl.DataFrame(z_mean, schema=self._df.columns[1:])
-    #     z_sd = pl.DataFrame(z_sd, schema=self._df.columns[1:])
-    #     param_ = pl.DataFrame({"param": ["z_mean", "z_sd"]}).hstack(z_mean.vstack(z_sd))
-    
-    #     df_o = pl.DataFrame(df_o, schema=self._df.columns[1:])
-    #     df_o = pl.DataFrame({"ID": self._df["ID"]}).hstack(df_o)
-    #     print(f"z-score parameters: {param_}")
-    #     _path_save = os.path.join(self.dir_save_param, f"{self.tag}_zscore_param.csv")
-    #     param_.write_csv(_path_save)
-    #     print(f"The z-score parameters are saved to: {_path_save}")
-    
-    #     self._df = df_o
-    #     self._zscore_param = param_
     
     def pr_minmax(self):
         _processor = MinMaxScaler()
@@ -354,6 +347,30 @@ class CollectFitLog:
         self.dir_log = dir_log
         if os.path.exists(self.dir_log) == False:
             raise ValueError(f'Directory {self.dir_log} does not exist.')
+    
+    def get_df_csv(self, dir_output: str, overwrite_collected_log: bool = False):
+        """
+        Collect trained models for each fold in nested cross-validation.
+        """
+        collected_logs = self.collect()
+
+        key_best_trials = 'logs'
+        models_bv = collected_logs[key_best_trials]
+        path_log_best_trials = os.path.join(dir_output, '_log_best_trials' + '.csv')
+        if os.path.exists(path_log_best_trials) and not overwrite_collected_log:
+            models_bv = pl.read_csv(path_log_best_trials)
+        else:
+            models_bv.write_csv(path_log_best_trials)
+
+        key_best_inner_folds = 'best_inners'
+        models_bi = collected_logs[key_best_inner_folds]
+        path_log_best_inners = os.path.join(dir_output, '_log_best_inners' + '.csv')
+        if os.path.exists(path_log_best_inners) and not overwrite_collected_log:
+            models_bi = pl.read_csv(path_log_best_inners)
+        else:
+            models_bi.write_csv(path_log_best_inners)
+        
+        return models_bv, models_bi
     
     def collect(self) -> Dict[str, pl.DataFrame]:
         """

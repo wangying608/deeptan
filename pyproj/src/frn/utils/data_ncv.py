@@ -72,14 +72,26 @@ class MyDataset:
         if self.n_samples_to_add > 0:
             self._sample_new2add(seed_resample)
 
-        self._proc_omics(process_omics, sample_ind_for_proc, dir_save_processors)
-        self._proc_labels(process_labels, sample_ind_for_proc, dir_save_processors)
+        self._proc_omics(process_omics, sample_ind_for_proc, dir_save_processors, reproduction_mode)
+        self._proc_labels(process_labels, sample_ind_for_proc, dir_save_processors, reproduction_mode)
 
         self.omics_data = []
         self.omics_features = []
+        self.omics_dims = []
         for i in range(self.n_omics):
             self.omics_data.append(self.omics_dfs[self.omics_name[i]].drop("ID").to_numpy().astype(np.float32))
             self.omics_features.append(self.omics_dfs[self.omics_name[i]].columns)
+            self.omics_dims.append(self.omics_data[i].shape[1])
+        
+        if dir_save_processors is not None:
+            # Write omics' dimensions for the initialization of the model
+            pl.DataFrame(data={"omics_dim": self.omics_dims}).write_csv(os.path.join(dir_save_processors, "omics_dims.csv"))
+            # Write omics' features
+            for i in range(self.n_omics):
+                pl.DataFrame(data={"omics_feature": self.omics_features[i]}).write_csv(os.path.join(dir_save_processors, f"omics_features_{self.omics_name[i]}.csv"))
+            # Write labels' names
+            if self.labels_df is not None:
+                pl.DataFrame(data={"label": self.labels_df.columns}).write_csv(os.path.join(dir_save_processors, "label_names.csv"))
         
     def __len__(self):
         return self.n_samples
@@ -145,28 +157,42 @@ class MyDataset:
         for i in range(self.n_omics):
             self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]].vstack(self.omics_dfs[self.omics_name[i]][new_indices,:])
     
-    def _proc_omics(self, process_omics: bool, sample_ind_for_proc: Optional[List[int]] = None, dir_save_processors: Optional[str] = None):
+    def _proc_omics(self, process_omics: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
         if process_omics:
-            # print("Processing omics")
-            for i in range(self.n_omics):
-                _tmp_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], sample_ind_for_proc)
-                _tmp_proc.pr_impute(strategy="mean")
-                _tmp_proc.pr_minmax()
-                if dir_save_processors is not None:
-                    _tmp_proc.save_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
-                self.omics_dfs[self.omics_name[i]] = _tmp_proc._df
+            if reproduction_mode and dir_save_processors is not None:
+                if os.path.exists(dir_save_processors):
+                    for i in range(self.n_omics):
+                        _loaded_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], None)
+                        _loaded_proc.load_run_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
+                        self.omics_dfs[self.omics_name[i]] = _loaded_proc._df
+                else:
+                    raise FileNotFoundError(f"Processor files for omics data are not found in {dir_save_processors}")
+            else:
+                for i in range(self.n_omics):
+                    _tmp_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], sample_ind_for_proc)
+                    _tmp_proc.pr_impute(strategy="mean")
+                    _tmp_proc.pr_minmax()
+                    if dir_save_processors is not None:
+                        _tmp_proc.save_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
+                    self.omics_dfs[self.omics_name[i]] = _tmp_proc._df
     
-    def _proc_labels(self, process_labels: bool, sample_ind_for_proc: Optional[List[int]] = None, dir_save_processors: Optional[str] = None):
+    def _proc_labels(self, process_labels: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
         if self.labels_df is not None and process_labels:
-            # print("Processing labels")
-            labels_processor = ProcOnTrainSet(self.labels_df, sample_ind_for_proc)
-            labels_processor.pr_impute(strategy="mean")
-            labels_processor.pr_minmax()
-            if dir_save_processors is not None:
-                labels_processor.save_processors(dir_save_processors, 'data_processors_for_labels.pkl')
-            labels_df = labels_processor._df
-            self.label_data = labels_df.drop("ID").to_numpy().astype(np.float32)
-            self.label_features = labels_df.columns
+            if reproduction_mode and dir_save_processors is not None:
+                if os.path.exists(dir_save_processors):
+                    labels_processor = ProcOnTrainSet(self.labels_df, None)
+                    labels_processor.load_run_processors(dir_save_processors, 'data_processors_for_labels.pkl')
+                    self.labels_df = labels_processor._df
+                else:
+                    raise FileNotFoundError(f"Processor files for labels are not found in {dir_save_processors}")
+            else:
+                labels_processor = ProcOnTrainSet(self.labels_df, sample_ind_for_proc)
+                labels_processor.pr_impute(strategy="mean")
+                labels_processor.pr_minmax()
+                if dir_save_processors is not None:
+                    labels_processor.save_processors(dir_save_processors, 'data_processors_for_labels.pkl')
+                self.labels_df = labels_processor._df
+                self.label_data = self.labels_df.drop("ID").to_numpy().astype(np.float32)
 
 
 def optimize_data_ncv(
@@ -191,14 +217,18 @@ def optimize_data_ncv(
         `k_inner`: Number of inner folds.
         `paths_omics`: List of paths to omics data.
         `path_label`: Path to label data.
-        `col2use`: List of columns (of label data) to use.
-        `std_labels`: Whether to standardize labels.
+        `col2use_in_labels`: List of columns (of label data) to use.
+        `process_labels`: Whether to preprocess labels.
+        `process_omics`: Whether to preprocess omics.
+        `fragment_elem_ids`: List of list of indices of elements in each fragment. For nested cross validation with 10 outer folds and 5 inner folds, this should be a list of 50 lists of indices.
         `seed_permut`: Seed for permutation.
         `seed_resample`: Seed for resampling.
+        `compression`: Compression algorithm.
+        `n_workers`: Number of workers.
     """
     if fragment_elem_ids is None:
         n_fragments = int(k_outer * k_inner)
-        tmp_data_init = MyDataset(paths_omics, path_label, col2use_in_labels, None, None, None, seed_resample, n_fragments)
+        tmp_data_init = MyDataset(False, paths_omics, path_label, col2use_in_labels, None, None, None, seed_resample, n_fragments, False, False)
 
         # Permutate samples
         np.random.seed(seed_permut)
@@ -220,7 +250,17 @@ def optimize_data_ncv(
             os.makedirs(dir_xoxi, exist_ok=True)
             
             #
-            dataset_xoxi = MyDataset(paths_omics, path_label, col2use_in_labels, indices_trn_samples, dir_xoxi, None, seed_resample, n_fragments, process_labels, process_omics)
+            dataset_xoxi = MyDataset(False, paths_omics, path_label, col2use_in_labels, indices_trn_samples, dir_xoxi, None, seed_resample, n_fragments, process_labels, process_omics)
+            sample_ids = dataset_xoxi.sample_ids
+            # Write sample IDs
+            _df_ids = pl.DataFrame(sample_ids, schema=["ID"])
+            _df_ids.write_csv(os.path.join(dir_xoxi, "sample_ids.csv"))
+            _df_ids_trn = pl.DataFrame(sample_ids[indices_trn_samples], schema=["ID"])
+            _df_ids_trn.write_csv(os.path.join(dir_xoxi, "sample_ids_trn.csv"))
+            _df_ids_val = pl.DataFrame(sample_ids[indices_val_samples], schema=["ID"])
+            _df_ids_val.write_csv(os.path.join(dir_xoxi, "sample_ids_val.csv"))
+            _df_ids_tst = pl.DataFrame(sample_ids[indices_tst_samples], schema=["ID"])
+            _df_ids_tst.write_csv(os.path.join(dir_xoxi, "sample_ids_tst.csv"))
             
             # Start optimizing
             optimize(
@@ -258,16 +298,28 @@ def optimize_data_ncv(
 
 def optimize_data_external(
         output_dir: str,
-        paths_omics: list[str],
+        paths_omics: Dict[str, str],
         path_label: Optional[str] = None,
-        col2use: Optional[Union[List[str], List[int]]] = None,
+        col2use_in_labels: Optional[Union[List[str], List[int]]] = None,
+        process_labels: bool = True,
+        process_omics: bool = True,
+        reproduction_mode: bool = False,
+        dir_processors: Optional[str] = None,
         compression: Optional[str] = "zstd",
-        n_workers: int = 2,
+        n_workers: int = 1,
     ):
     """
     Optimize data for external use.
     """
-    dataset_ext = MyDataset(paths_omics, path_label, col2use)
+    dataset_ext = MyDataset(
+        reproduction_mode=reproduction_mode,
+        paths_omics=paths_omics,
+        path_label=path_label,
+        col2use_in_label=col2use_in_labels,
+        dir_save_processors=dir_processors,
+        process_labels=process_labels,
+        process_omics=process_omics,
+    )
     optimize(
         fn = dataset_ext.__getitem__,
         inputs = range(len(dataset_ext)),
@@ -294,7 +346,7 @@ class MyDataModule4Train(LightningDataModule):
             which_outer_testset: int,
             which_inner_valset: int,
             batch_size: int,
-            n_workers: int = 2,
+            n_workers: int = 0,
         ):
         super().__init__()
         self.litdata_dir = litdata_dir
@@ -324,11 +376,14 @@ class MyDataModule4Train(LightningDataModule):
         return dataloader_train, dataloader_valid, dataloader_test
     
     def get_dir_ncv_litdata(self):
-        dir_xoi = os.path.join(self.litdata_dir, f"ncv_test_{self.which_outer_testset}_val_{self.which_inner_valset}")
-        dir_trn = os.path.join(dir_xoi, "train")
-        dir_val = os.path.join(dir_xoi, "valid")
-        dir_tst = os.path.join(dir_xoi, "test")
+        self.dir_xoi = os.path.join(self.litdata_dir, f"ncv_test_{self.which_outer_testset}_val_{self.which_inner_valset}")
+        dir_trn = os.path.join(self.dir_xoi, "train")
+        dir_val = os.path.join(self.dir_xoi, "valid")
+        dir_tst = os.path.join(self.dir_xoi, "test")
         return dir_trn, dir_val, dir_tst
+    
+    def read_omics_dims(self):
+        return pl.read_csv(os.path.join(self.dir_xoi, "omics_dims.csv")).select('omics_dim').to_series().to_list()
 
 
 class MyDataModule4Uni(LightningDataModule):
@@ -343,7 +398,7 @@ class MyDataModule4Uni(LightningDataModule):
             self,
             litdata_dir: str,
             batch_size: int,
-            n_workers: int = 2,
+            n_workers: int = 0,
         ):
         super().__init__()
         self.litdata_dir = litdata_dir
