@@ -1,6 +1,6 @@
 import os
 import sys
-from frn.s2g.pipeline import SNP2GBTrainPipe#, SNP2GBTransPipe
+from frn.s2g.pipeline import SNP2GBFitPipe, SNP2GBTransPipe
 from frn.utils.uni import CollectFitLog
 
 
@@ -11,11 +11,11 @@ is_regression = True
 # dense_layers_hidden_dims = [1024, 256]
 log_dir = os.path.join(work_dir_home, 's2g_models')
 n_jobs = 5
-n_trials = 15
+n_trials = 12
 
 
 if __name__ == '__main__':    
-    pipe_fit = SNP2GBTrainPipe(
+    pipe_fit = SNP2GBFitPipe(
         litdata_dir=litdata_dir,
         list_ncv=list_ncv,
         log_dir=log_dir,

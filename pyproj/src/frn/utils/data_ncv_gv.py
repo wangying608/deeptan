@@ -33,13 +33,16 @@ class SNPDataset:
     """
     def __init__(
             self,
+            reproduction_mode: bool,
             path_gtype_pkl: str,
             path_label: Optional[str] = None,
             col2use: Optional[Union[List[str], List[int]]] = None,
             sample_ind_for_zsc_label: Optional[List] = None,
+            dir_save_processors: Optional[str] = None,
             len_one_hot_vec: int = 10,
             resample: Optional[int] = None,
             seed_resample: int = 42,
+            process_labels: bool = True,
         ):
         super().__init__()
 
@@ -83,9 +86,7 @@ class SNPDataset:
             else:
                 raise ValueError("resample must be larger than the number of samples")
         
-        if hasattr(self, 'labels_df'):
-            self.labels_df, self.z_mean, self.z_sd = zscore_labels(self.labels_df, sample_ind_for_zsc_label)
-            self.label_data = self.labels_df.drop("ID").to_numpy().astype(np.float32)
+        self._proc_labels(process_labels, sample_ind_for_zsc_label, dir_save_processors, reproduction_mode)
 
     def __len__(self):
         return self.num_samples
@@ -100,6 +101,24 @@ class SNPDataset:
             data_o = {"index": idx, "snp": x, "id": idxx}
         return data_o
 
+    def _proc_labels(self, process_labels: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
+        if self.labels_df is not None and process_labels:
+            if reproduction_mode and dir_save_processors is not None:
+                if os.path.exists(dir_save_processors):
+                    labels_processor = ProcOnTrainSet(self.labels_df, None)
+                    labels_processor.load_run_processors(dir_save_processors, 'data_processors_for_labels.pkl')
+                    self.labels_df = labels_processor._df
+                else:
+                    raise FileNotFoundError(f"Processor files for labels are not found in {dir_save_processors}")
+            else:
+                labels_processor = ProcOnTrainSet(self.labels_df, sample_ind_for_proc)
+                labels_processor.pr_impute(strategy="mean")
+                labels_processor.pr_zscore()
+                if dir_save_processors is not None:
+                    labels_processor.save_processors(dir_save_processors, 'data_processors_for_labels.pkl')
+                self.labels_df = labels_processor._df
+                self.label_data = self.labels_df.drop("ID").to_numpy().astype(np.float32)
+
 
 def init_snp_dataset(
         n_fragments: int,
@@ -109,6 +128,7 @@ def init_snp_dataset(
         sample_ind_for_zsc_label: Optional[List] = None,
         len_one_hot_vec: int = 10,
         seed_resample: int = 42,
+        dir_save_processors: Optional[str] = None,
     ):
     n_samples = 0
     if path_label is not None:
@@ -126,9 +146,9 @@ def init_snp_dataset(
         goal_num = n_samples + num2add
     
     if num2add > 0:
-        data_init = SNPDataset(path_gtype_pkl, path_label, col2use, sample_ind_for_zsc_label, len_one_hot_vec, goal_num, seed_resample)
+        data_init = SNPDataset(False, path_gtype_pkl, path_label, col2use, sample_ind_for_zsc_label, dir_save_processors, len_one_hot_vec, goal_num, seed_resample)
     else:
-        data_init = SNPDataset(path_gtype_pkl, path_label, col2use, sample_ind_for_zsc_label, len_one_hot_vec, None)
+        data_init = SNPDataset(False, path_gtype_pkl, path_label, col2use, sample_ind_for_zsc_label, dir_save_processors, len_one_hot_vec, None)
     
     return data_init
 
@@ -179,14 +199,9 @@ def snp_data_opt_ncv(
             
             # IF STANDARDIZE labels, calc mean & std of training set and apply to validation & test data.
             if std_labels:
-                snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, indices_trn_samples, len_one_hot_vec, seed_resample)
-                # Save mean & std of training set
-                if snp_dataset_xoxi.z_mean is not None:
-                    snp_dataset_xoxi.z_mean.write_csv(os.path.join(dir_xoxi, "z_mean_labels_train.csv"))
-                if snp_dataset_xoxi.z_sd is not None:
-                    snp_dataset_xoxi.z_sd.write_csv(os.path.join(dir_xoxi, "z_sd_labels_train.csv"))
+                snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, indices_trn_samples, len_one_hot_vec, seed_resample, dir_xoxi)
             else:
-                snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, None, len_one_hot_vec, seed_resample)
+                snp_dataset_xoxi = init_snp_dataset(n_fragments, path_gtype_pkl, path_label, col2use, None, len_one_hot_vec, seed_resample, dir_xoxi)
             #
             optimize(
                 fn = snp_dataset_xoxi.__getitem__,
@@ -226,6 +241,7 @@ def snp_data_opt_external(
         path_gtype_pkl: str,
         path_label: Optional[str] = None,
         col2use: Optional[Union[list[int], list[str]]] = None,
+        reproduction_mode: bool = False,
         len_one_hot_vec: int = 10,
         compression: Optional[str] = "zstd",
         n_workers: int = 2,
@@ -236,11 +252,13 @@ def snp_data_opt_external(
     - For **Prediction** purpose, use this function without input `path_label` and `traits_name`.
     """
     data_init = SNPDataset(
-        path_gtype_pkl,
-        path_label,
-        col2use,
-        None,
-        len_one_hot_vec,
+        reproduction_mode=reproduction_mode,
+        path_gtype_pkl=path_gtype_pkl,
+        path_label=path_label,
+        col2use=col2use,
+        sample_ind_for_zsc_label=None,
+        dir_save_processors=output_dir,
+        len_one_hot_vec=len_one_hot_vec,
     )
     optimize(
         fn = data_init.__getitem__,

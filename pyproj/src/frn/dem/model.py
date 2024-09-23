@@ -251,8 +251,8 @@ class DEMLTN(ltn.LightningModule):
                 # Multi-label regression
                 self.loss_fn = nn.MSELoss()
                 self.mae = MeanAbsoluteError()
-                self.r2 = R2Score()
-                self.pcc = PearsonCorrCoef()
+                # self.r2 = R2Score()
+                # self.pcc = PearsonCorrCoef()
             else:
                 self.loss_fn = nn.CrossEntropyLoss()
                 self.mcc = MatthewsCorrCoef(task='multiclass', num_classes=output_dim)
@@ -295,8 +295,8 @@ class DEMLTN(ltn.LightningModule):
                 self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
                 if y.shape[0] < 2:
                     return loss
-                self.log(f"{which_step}_pcc", self.pcc(y_pred, y), sync_dist=True)
-                self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
+                # self.log(f"{which_step}_pcc", self.pcc(y_pred, y), sync_dist=True)
+                # self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
             else:
                 self.log(f"{which_step}_mcc", self.mcc(y_pred, y), sync_dist=True)
                 self.log(f"{which_step}_f1_micro", self.f1_micro(y_pred, y), sync_dist=True)

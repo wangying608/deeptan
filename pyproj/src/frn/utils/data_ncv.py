@@ -80,7 +80,7 @@ class MyDataset:
         self.omics_dims = []
         for i in range(self.n_omics):
             self.omics_data.append(self.omics_dfs[self.omics_name[i]].drop("ID").to_numpy().astype(np.float32))
-            self.omics_features.append(self.omics_dfs[self.omics_name[i]].columns)
+            self.omics_features.append(self.omics_dfs[self.omics_name[i]].drop("ID").columns)
             self.omics_dims.append(self.omics_data[i].shape[1])
         
         if dir_save_processors is not None:
@@ -91,7 +91,7 @@ class MyDataset:
                 pl.DataFrame(data={"omics_feature": self.omics_features[i]}).write_csv(os.path.join(dir_save_processors, f"omics_features_{self.omics_name[i]}.csv"))
             # Write labels' names
             if self.labels_df is not None:
-                pl.DataFrame(data={"label": self.labels_df.columns}).write_csv(os.path.join(dir_save_processors, "label_names.csv"))
+                pl.DataFrame(data={"label": self.labels_df.columns[1:]}).write_csv(os.path.join(dir_save_processors, "label_names.csv"))
         
     def __len__(self):
         return self.n_samples

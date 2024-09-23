@@ -150,8 +150,8 @@ class SNPReductionNet(ltn.LightningModule):
                 # Multi-label regression
                 self.loss_fn = nn.MSELoss()
                 self.mae = MeanAbsoluteError()
-                self.r2 = R2Score()
-                self.pcc = PearsonCorrCoef()
+                # self.r2 = R2Score()
+                # self.pcc = PearsonCorrCoef()
             else:
                 self.loss_fn = nn.CrossEntropyLoss()
                 self.recall_micro = MulticlassRecall(average="micro", num_classes=output_dim)
@@ -192,8 +192,8 @@ class SNPReductionNet(ltn.LightningModule):
                 self.log(f"{which_step}_mae", self.mae(y_hat, y), sync_dist=True)
                 if y.shape[0] < 2:
                     return loss
-                self.log(f"{which_step}_pcc", self.pcc(y_hat, y), sync_dist=True)
-                self.log(f"{which_step}_r2", self.r2(y_hat, y), sync_dist=True)
+                # self.log(f"{which_step}_pcc", self.pcc(y_hat, y), sync_dist=True)
+                # self.log(f"{which_step}_r2", self.r2(y_hat, y), sync_dist=True)
             else:
                 self.log(f"{which_step}_f1_micro", self.f1_micro(y_hat, y), sync_dist=True)
                 self.log(f"{which_step}_f1_macro", self.f1_macro(y_hat, y), sync_dist=True)
