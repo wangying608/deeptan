@@ -337,12 +337,13 @@ def train_model(
     
     trainer.fit(model=model, datamodule=datamodule)
 
-    trainer.test(model=model, dataloaders=datamodule)
-
     if callback_ckpt.best_model_score is not None:
         best_score = callback_ckpt.best_model_score.item()
     else:
         best_score = None
+
+    # trainer.test(model=model, dataloaders=datamodule)
+
     return best_score
 
 

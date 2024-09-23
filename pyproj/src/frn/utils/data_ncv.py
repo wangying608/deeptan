@@ -143,7 +143,11 @@ class MyDataset:
                 snp_ids = snp_data_dict['snp_ids']
                 # snp_block_ids = snp_data_dict['block_ids']
                 _tmp_snp_df = pl.DataFrame(data=snp_matrix, schema=snp_ids)
-                _tmp_snp_df = pl.DataFrame(snp_sample_ids, schema="ID").hstack(_tmp_snp_df)
+                # print(type(snp_sample_ids))
+                # print(snp_sample_ids)
+                _tmp_id = pl.DataFrame({"ID": snp_sample_ids})
+                # print(_tmp_id.shape, _tmp_snp_df.shape)
+                _tmp_snp_df = _tmp_id.hstack(_tmp_snp_df)
                 self.omics_dfs[self.omics_name[i]] = _tmp_snp_df
 
             else:
@@ -304,19 +308,23 @@ class OptimizeLitdataNCV:
         if self.path_label is not None:
             _, dim_model_output, _ = read_labels(self.path_label, self.col2use_in_labels)
             df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
-            df_output_dim.write_csv(os.path.join(self.output_dir, "model_output_dim.csv"))
+            path_output_dim = os.path.join(self.output_dir, "model_output_dim.csv")
+            if not os.path.exists(path_output_dim):
+                df_output_dim.write_csv(path_output_dim)
         
         # Check if Genomic Variants are available in paths_omics
         for px in self.paths_omics.values():
             if px.endswith(".pkl.gz"):
-                shutil.copy(px, os.path.join(self.output_dir, "genotypes.pkl.gz"))
+                path_cp_pklgz = os.path.join(self.output_dir, "genotypes.pkl.gz")
+                if not os.path.exists(path_cp_pklgz):
+                    shutil.copy(px, path_cp_pklgz)
 
         return None
 
     def _check(self, seed_permut: int, fragment_elem_ids: Optional[List[List[int]]]):
         if fragment_elem_ids is None:
             n_fragments = int(self.k_outer * self.k_inner)
-            tmp_init = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, None, None, 42, n_fragments, False, False)
+            tmp_init = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, None, None, None, 42, n_fragments, False, False)
 
             np.random.seed(seed_permut)
             _indices = np.random.permutation(len(tmp_init))

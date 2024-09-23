@@ -18,58 +18,60 @@ from frn.utils.uni import idx_convert, get_map_location
 torch.set_float32_matmul_precision('high')
 
 
-class SNPReductionNetModel(nn.Module):
-    def __init__(
-            self,
-            output_dim: int,
-            blocks_gt: List[List[int]],
-            len_one_hot_vec: int,
-            dense_layers_hidden_dims: List[int],
-        ):
-        super().__init__()
-        n_blocks = len(blocks_gt)
-        self.n_blocks = n_blocks
+# class SNPReductionNetModel(nn.Module):
+#     def __init__(
+#             self,
+#             output_dim: int,
+#             blocks_gt: List[List[int]],
+#             len_one_hot_vec: int,
+#             dense_layers_hidden_dims: List[int],
+#         ):
+#         super().__init__()
+#         n_blocks = len(blocks_gt)
+#         self.n_blocks = n_blocks
         
-        self.sparse_layers = nn.ModuleList()
-        # Define the sparse linear layers that maps SNPs to genome blocks
-        for i_gb in range(n_blocks):
-            self.sparse_layers.append(nn.Linear(len(blocks_gt[i_gb]) * len_one_hot_vec, 1, bias=False))
+#         self.sparse_layers = nn.ModuleList()
+#         # Define the sparse linear layers that maps SNPs to genome blocks
+#         for i_gb in range(n_blocks):
+#             self.sparse_layers.append(nn.Linear(len(blocks_gt[i_gb]) * len_one_hot_vec, 1, bias=False))
         
-        indices_gt = []
-        for i_gb in range(n_blocks):
-            indices_gt.append(idx_convert(blocks_gt[i_gb], len_one_hot_vec))
-        self.indices_gt = indices_gt
+#         indices_gt = []
+#         for i_gb in range(n_blocks):
+#             indices_gt.append(idx_convert(blocks_gt[i_gb], len_one_hot_vec))
+#         self.indices_gt = indices_gt
 
-        # Define the dense layers for predicting the phenotype
-        self.dense_layers = nn.ModuleList()
+#         # Define the dense layers for predicting the phenotype
+#         self.dense_layers = nn.ModuleList()
         
-        # Apply LayerNorm to the input features.
-        self.dense_layers.append(nn.LayerNorm(n_blocks))
+#         # Apply LayerNorm to the input features.
+#         self.dense_layers.append(nn.LayerNorm(n_blocks))
         
-        # First dense layer takes the genome blocks features as input.
-        self.dense_layers.append(nn.Linear(n_blocks, dense_layers_hidden_dims[0]))
-        for i_dim in range(len(dense_layers_hidden_dims) - 1):
-            self.dense_layers.append(nn.Linear(dense_layers_hidden_dims[i_dim], dense_layers_hidden_dims[i_dim + 1]))
-            self.dense_layers.append(nn.Sigmoid())
-            # self.dense_layers.append(nn.Dropout(p=0.1))
-        self.dense_layers.append(nn.Linear(dense_layers_hidden_dims[-1], output_dim))
-        # if output_dim > 1:
-        #     self.dense_layers.append(nn.Softmax(dim=1))
+#         # First dense layer takes the genome blocks features as input.
+#         self.dense_layers.append(nn.Linear(n_blocks, dense_layers_hidden_dims[0]))
+#         for i_dim in range(len(dense_layers_hidden_dims) - 1):
+#             self.dense_layers.append(nn.Linear(dense_layers_hidden_dims[i_dim], dense_layers_hidden_dims[i_dim + 1]))
+#             self.dense_layers.append(nn.Sigmoid())
+#             # self.dense_layers.append(nn.Dropout(p=0.1))
+#         self.dense_layers.append(nn.Linear(dense_layers_hidden_dims[-1], output_dim))
+#         # if output_dim > 1:
+#         #     self.dense_layers.append(nn.Softmax(dim=1))
     
-    def forward(self, x):
-        # Map SNPs to genome features
-        g_features: list[torch.Tensor] = []
-        for i_gb in range(self.n_blocks):
-            g_features.append(self.sparse_layers[i_gb](x[:, self.indices_gt[i_gb]]))
+#     def forward(self, x):
+#         # Map SNPs to genome features
+#         g_features: list[torch.Tensor] = []
+#         for i_gb in range(self.n_blocks):
+#             g_features.append(self.sparse_layers[i_gb](x[:, self.indices_gt[i_gb]]))
         
-        gblocks = torch.cat(g_features, dim=1)
+#         gblocks = torch.cat(g_features, dim=1)
         
-        # Predict phenotype based on the low-dimensional features
-        for layer in self.dense_layers:
-            gblocks = layer(gblocks)
+#         # Predict phenotype based on the low-dimensional features
+#         for layer in self.dense_layers:
+#             gblocks = layer(gblocks)
         
-        # Return predicted phenotype(s)
-        return gblocks#.type(torch.float32)
+#         # Return predicted phenotype(s)
+#         return gblocks#.type(torch.float32)
+
+from frn.s2g.model_sparse import SNPReductionNetModel
 
 
 class SNPReductionNet(ltn.LightningModule):
