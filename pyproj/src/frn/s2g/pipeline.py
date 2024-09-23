@@ -105,8 +105,7 @@ class SNP2GBFit:
 
         val_loss_min = train_model(
             model=_model,
-            dataloader_train=self.datamodule.train_dataloader(),
-            dataloader_val=self.datamodule.val_dataloader(),
+            datamodule=self.datamodule,
             es_patience=hparams['patience'],
             max_epochs=hparams['max_epochs'],
             min_epochs=hparams['min_epochs'],

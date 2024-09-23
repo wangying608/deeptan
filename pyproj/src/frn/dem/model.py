@@ -151,6 +151,7 @@ class DEM(nn.Module):
         y_pred_integrated = self.integrate_extractions(h_integrated)
 
         y_pred = self.weight_conc * y_pred_conc + self.weight_integrated * y_pred_integrated + y_pred_each_omics
+        
         return y_pred
 
 
@@ -249,8 +250,8 @@ class DEMLTN(ltn.LightningModule):
         else:
             if regression:
                 # Multi-label regression
-                self.loss_fn = nn.MSELoss()
-                self.mae = MeanAbsoluteError()
+                self.loss_fn = nn.MSELoss(reduction='none')
+                # self.mae = MeanAbsoluteError()
                 # self.r2 = R2Score()
                 # self.pcc = PearsonCorrCoef()
             else:
@@ -281,10 +282,10 @@ class DEMLTN(ltn.LightningModule):
             y = y.argmax(dim=-1)
         
         y_pred = y_pred_integrated
-        loss = self.loss_fn(y_pred, y)
-        self.log(f"{which_step}_loss", loss, sync_dist=True)
 
         if self.output_dim == 1:
+            loss = self.loss_fn(y_pred, y)
+            self.log(f"{which_step}_loss", loss, sync_dist=True)
             self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
             if y.shape[0] < 2:
                 return loss
@@ -292,12 +293,19 @@ class DEMLTN(ltn.LightningModule):
             self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
         else:
             if self.is_regression:
-                self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
-                if y.shape[0] < 2:
-                    return loss
+                loss = self.loss_fn(y_pred, y)
+                loss = loss.mean(dim=0)
+                loss = loss.sum()
+                self.log(f"{which_step}_loss", loss, sync_dist=True)
+                # self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
+                # if y.shape[0] < 2:
+                #     return loss
                 # self.log(f"{which_step}_pcc", self.pcc(y_pred, y), sync_dist=True)
                 # self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
             else:
+                loss = self.loss_fn(y_pred, y)
+                self.log(f"{which_step}_loss", loss, sync_dist=True)
+                
                 self.log(f"{which_step}_mcc", self.mcc(y_pred, y), sync_dist=True)
                 self.log(f"{which_step}_f1_micro", self.f1_micro(y_pred, y), sync_dist=True)
                 self.log(f"{which_step}_f1_macro", self.f1_macro(y_pred, y), sync_dist=True)

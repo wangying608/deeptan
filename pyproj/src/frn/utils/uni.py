@@ -12,12 +12,12 @@ import gzip
 import optuna
 from typing import Any, List, Dict, Optional, Sequence, Union
 from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.feature_selection import VarianceThreshold, f_classif
-from sklearn.decomposition import PCA
+# from sklearn.ensemble import RandomForestRegressor
+# from sklearn.feature_selection import VarianceThreshold, f_classif
+# from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
-from lightning import Trainer
+from lightning import Trainer, LightningDataModule
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
@@ -76,7 +76,13 @@ def idx_convert(indices: List[int], len_one_hot_vec: int = 10) -> List[int]:
 
 
 def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted: bool = True):
-    shared = list(set.intersection(*map(set, lists)))
+    if len(lists) == 0:
+        raise ValueError("The list of lists is empty.")
+    elif len(lists) == 1:
+        shared = lists[0]
+    else:
+        shared = list(set.intersection(*map(set, lists)))
+    
     assert len(shared) > 0, "No intersecting elements!"
     if to_sorted:
         shared = sorted(shared)
@@ -240,8 +246,8 @@ def one_hot_encode_snp_matrix(
             snp_vec = snp_matrix[i_sample].astype(int)
             snp_vec = np.eye(len_one_hot_vec + 1)[snp_vec][:, 1:].reshape(-1).astype(np.float32)
             snp_data.append(snp_vec)
-
-    return snp_data
+    snp_data_np = np.array(snp_data)
+    return snp_data_np
 
 
 def read_pkl_gv(path_pkl: str) -> Dict[str, Any]:
@@ -284,8 +290,7 @@ def read_pkl_gv(path_pkl: str) -> Dict[str, Any]:
 
 def train_model(
         model,
-        dataloader_train,
-        dataloader_val,
+        datamodule: LightningDataModule,
         es_patience: int,
         max_epochs: int,
         min_epochs: int,
@@ -330,7 +335,9 @@ def train_model(
         default_root_dir=log_dir,
     )
     
-    trainer.fit(model=model, train_dataloaders=dataloader_train, val_dataloaders=dataloader_val)
+    trainer.fit(model=model, datamodule=datamodule)
+
+    trainer.test(model=model, dataloaders=datamodule)
 
     if callback_ckpt.best_model_score is not None:
         best_score = callback_ckpt.best_model_score.item()

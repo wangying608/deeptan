@@ -3,36 +3,48 @@ Read multi-omics data (and labels) and split into nested train/val/test sets.
 
 The processed data will be stored in litdata's format.
 
-!!! The input labels (phenotypes) are expected as follows:
-    - For REGRESSION task
-        + Please keep original values that are not standardized.
-        + If you have MULTIPLE traits, please set different columns names in CSV file.
-        + _In our pipeline, we standardize/normalize the data after splitting to avoid data leakage._
-        + _The method and parameters of standardization/normalization are kept the same as those in training data._
-    - For CLASSIFICATION task
-        + Please transform labels by one-hot encoder MANUALLY BEFORE input.
-        + The length of one-hot vectors is recommended to be **n_categories + 1** for **UNPRECEDENTED labels**.
-        + If you have MULTIPLE traits, please concatenate one-hot encoded matrix along the horizontal axis before input.
-
 """
+
 import os
+import shutil
 from typing import Optional, Union, List, Dict
+import itertools
 import numpy as np
 import polars as pl
 from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
-from frn.utils.uni import intersect_lists, read_labels, get_indices_ncv, ProcOnTrainSet
+from frn.utils.uni import intersect_lists, read_labels, get_indices_ncv, ProcOnTrainSet, read_pkl_gv, one_hot_encode_snp_matrix
 
 
 class MyDataset:
     """
     Read data for litdata optimization.
 
-    - `reproduction_mode` is used to determine whether to use the processors fitted before. Please provide `dir_save_processors` if `reproduction_mode` is `True`.
-    - `sample_ind_for_proc` is used to select samples for preprocessors fitting. ***If it is `None`, all samples are used.***
-    - `dir_save_processors` is used to save data processors that fitted on training data. ***If it is `None`, preprocessing is not performed.***
+    If you have labels (phenotypes) and want to use them,
+    the input labels (phenotypes) are expected as follows:
+    - For **REGRESSION** task
+        + Please keep original values that are not preprocessed.
+        + If you have MULTIPLE traits, please set different columns names in CSV file.
+        + ***In our pipeline, we standardize/normalize the data after splitting to avoid data leakage.***
+        + *The method and parameters of standardization/normalization are kept the same as those in training data.*
+    - For **CLASSIFICATION** task
+        + Please transform labels by one-hot encoder ***MANUALLY BEFORE input***.
+        + The length of one-hot vectors is recommended to be **n_categories + 1** for **UNPRECEDENTED labels**.
+        + If you have MULTIPLE traits, please **concatenate** one-hot encoded matrix along the horizontal axis before input.
 
+    *Parameters*:
+    - `reproduction_mode`: whether to use the processors fitted before. Please provide `dir_save_processors` if `reproduction_mode` is `True`.
+    - `paths_omics`: the paths to omics data. Commonly, it is a `Dict` of paths to multiple `CSV` files. ***For SNP data, it is a path to a `PKL` file.***
+    - `path_label`: The path to label data (a `CSV` file).
+    - `col2use_in_label`: The columns to use in label data.
+    - `sample_ind_for_preproc`: The indices for selecting samples for preprocessors fitting. ***If it is `None`, all samples are used.***
+    - `dir_save_processors`: The directory used to save data processors that fitted on training data. ***If it is `None`, preprocessing is not performed.***
+    - `target_n_samples`: The target sample size for expanding the dataset through random sampling.
+    - `seed_resample`: The random seed for sampling new samples.
+    - `n_fragments`: The number of fragments (= k_outer * k_inner).
+    - `prepr_labels`: Whether to preprocess labels or not.
+    - `prepr_omics`: Whether to preprocess omics data or not.
     """
     def __init__(
             self,
@@ -40,17 +52,19 @@ class MyDataset:
             paths_omics: Dict[str, str],
             path_label: Optional[str] = None,
             col2use_in_label: Optional[Union[List[str], List[int]]] = None,
-            sample_ind_for_proc: Optional[List] = None,
+            sample_ind_for_preproc: Optional[List] = None,
             dir_save_processors: Optional[str] = None,
             target_n_samples: Optional[int] = None,
             seed_resample: int = 42,
             n_fragments: int = 1,
-            process_labels: bool = True,
-            process_omics: bool = True,
+            prepr_labels: bool = True,
+            prepr_omics: bool = True,
+            snp_onehot_bits: int = 10,
         ):
         super().__init__()
 
         self.omics_name = sorted(list(paths_omics.keys()))
+        self.key_gv = None
         self.n_omics = len(self.omics_name)
         self.omics_dfs: Dict[str, pl.DataFrame] = {}
         
@@ -71,9 +85,14 @@ class MyDataset:
 
         if self.n_samples_to_add > 0:
             self._sample_new2add(seed_resample)
+        
+        if self.key_gv is not None:
+            gv_np = self.omics_dfs[self.key_gv].drop("ID").to_numpy()
+            gv_np_onehot = one_hot_encode_snp_matrix(gv_np, snp_onehot_bits)
+            self.omics_dfs[self.key_gv] = pl.DataFrame({"ID": self.sample_ids}).hstack(pl.DataFrame(data=gv_np_onehot))
 
-        self._proc_omics(process_omics, sample_ind_for_proc, dir_save_processors, reproduction_mode)
-        self._proc_labels(process_labels, sample_ind_for_proc, dir_save_processors, reproduction_mode)
+        self._proc_omics(prepr_omics, sample_ind_for_preproc, dir_save_processors, reproduction_mode)
+        self._proc_labels(prepr_labels, sample_ind_for_preproc, dir_save_processors, reproduction_mode)
 
         self.omics_data = []
         self.omics_features = []
@@ -109,7 +128,27 @@ class MyDataset:
     def _pick_shared_samples_in_omics(self, paths_omics: Dict[str, str]):
         original_omics_IDs = []
         for i in range(self.n_omics):
-            self.omics_dfs[self.omics_name[i]] = pl.read_csv(paths_omics[self.omics_name[i]], schema_overrides={"ID": pl.Utf8})
+            _tmp_path = paths_omics[self.omics_name[i]]
+
+            if _tmp_path.endswith(".csv") or _tmp_path.endswith(".CSV"):
+                self.omics_dfs[self.omics_name[i]] = pl.read_csv(_tmp_path, schema_overrides={"ID": pl.Utf8})
+            
+            elif _tmp_path.endswith(".pkl.gz"):
+                #
+                self.key_gv = self.omics_name[i]
+                #
+                snp_data_dict = read_pkl_gv(_tmp_path)
+                snp_matrix = snp_data_dict['gt_mat']
+                snp_sample_ids = snp_data_dict['sample_ids']
+                snp_ids = snp_data_dict['snp_ids']
+                # snp_block_ids = snp_data_dict['block_ids']
+                _tmp_snp_df = pl.DataFrame(data=snp_matrix, schema=snp_ids)
+                _tmp_snp_df = pl.DataFrame(snp_sample_ids, schema="ID").hstack(_tmp_snp_df)
+                self.omics_dfs[self.omics_name[i]] = _tmp_snp_df
+
+            else:
+                raise ValueError("The path to the omics data is not valid.")
+            
             original_omics_IDs.append(self.omics_dfs[self.omics_name[i]].select("ID").to_series().to_list())
         
         intersect_ids_in_omics, _indices = intersect_lists(original_omics_IDs)
@@ -157,11 +196,13 @@ class MyDataset:
         for i in range(self.n_omics):
             self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]].vstack(self.omics_dfs[self.omics_name[i]][new_indices,:])
     
-    def _proc_omics(self, process_omics: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
-        if process_omics:
+    def _proc_omics(self, prepr_omics: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
+        if prepr_omics:
             if reproduction_mode and dir_save_processors is not None:
                 if os.path.exists(dir_save_processors):
                     for i in range(self.n_omics):
+                        if self.key_gv is not None and self.key_gv == self.omics_name[i]:
+                            continue
                         _loaded_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], None)
                         _loaded_proc.load_run_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
                         self.omics_dfs[self.omics_name[i]] = _loaded_proc._df
@@ -169,6 +210,8 @@ class MyDataset:
                     raise FileNotFoundError(f"Processor files for omics data are not found in {dir_save_processors}")
             else:
                 for i in range(self.n_omics):
+                    if self.key_gv is not None and self.key_gv == self.omics_name[i]:
+                        continue
                     _tmp_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], sample_ind_for_proc)
                     _tmp_proc.pr_impute(strategy="mean")
                     _tmp_proc.pr_minmax()
@@ -176,8 +219,8 @@ class MyDataset:
                         _tmp_proc.save_processors(dir_save_processors, f'data_processors_for_omics_{self.omics_name[i]}.pkl')
                     self.omics_dfs[self.omics_name[i]] = _tmp_proc._df
     
-    def _proc_labels(self, process_labels: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
-        if self.labels_df is not None and process_labels:
+    def _proc_labels(self, prepr_labels: bool, sample_ind_for_proc: Optional[List[int]], dir_save_processors: Optional[str], reproduction_mode: bool):
+        if self.labels_df is not None and prepr_labels:
             if reproduction_mode and dir_save_processors is not None:
                 if os.path.exists(dir_save_processors):
                     labels_processor = ProcOnTrainSet(self.labels_df, None)
@@ -188,112 +231,151 @@ class MyDataset:
             else:
                 labels_processor = ProcOnTrainSet(self.labels_df, sample_ind_for_proc)
                 labels_processor.pr_impute(strategy="mean")
-                labels_processor.pr_minmax()
+                # labels_processor.pr_minmax()
+                labels_processor.pr_zscore()
                 if dir_save_processors is not None:
                     labels_processor.save_processors(dir_save_processors, 'data_processors_for_labels.pkl')
                 self.labels_df = labels_processor._df
                 self.label_data = self.labels_df.drop("ID").to_numpy().astype(np.float32)
 
 
-def optimize_data_ncv(
-        output_dir: str,
-        k_outer: int,
-        k_inner: int,
-        paths_omics: Dict[str, str],
-        path_label: Optional[str] = None,
-        col2use_in_labels: Optional[Union[List[str], List[int]]] = None,
-        process_labels: bool = True,
-        process_omics: bool = True,
-        fragment_elem_ids: Optional[List[List[int]]] = None,
-        seed_permut: int = 42,
-        seed_resample: int = 42,
-        compression: Optional[str] = "zstd",
-        n_workers: int = 1,
-    ):
-    """
-    Args:
-        `output_dir`: Directory to save the optimized data.
-        `k_outer`: Number of outer folds.
-        `k_inner`: Number of inner folds.
-        `paths_omics`: List of paths to omics data.
-        `path_label`: Path to label data.
-        `col2use_in_labels`: List of columns (of label data) to use.
-        `process_labels`: Whether to preprocess labels.
-        `process_omics`: Whether to preprocess omics.
-        `fragment_elem_ids`: List of list of indices of elements in each fragment. For nested cross validation with 10 outer folds and 5 inner folds, this should be a list of 50 lists of indices.
-        `seed_permut`: Seed for permutation.
-        `seed_resample`: Seed for resampling.
-        `compression`: Compression algorithm.
-        `n_workers`: Number of workers.
-    """
-    if fragment_elem_ids is None:
-        n_fragments = int(k_outer * k_inner)
-        tmp_data_init = MyDataset(False, paths_omics, path_label, col2use_in_labels, None, None, None, seed_resample, n_fragments, False, False)
+class OptimizeLitdataNCV:
+    def __init__(
+            self,
+            paths_omics: Dict[str, str],
+            path_label: Optional[str],
+            output_dir: str,
+            k_outer: int,
+            k_inner: int,
+            fragment_elem_ids: Optional[List[List[int]]] = None,
+            which_outer_inner: Optional[List[int]] = None,
+            col2use_in_labels: Optional[Union[List[str], List[int]]] = None,
+            prepr_labels: bool = True,
+            prepr_omics: bool = True,
+            seed_permut: int = 42,
+            seed_resample: int = 43,
+            compression: Optional[str] = "zstd",
+            n_workers: int = 2,
+        ):
+        """
+        Args:
+            `paths_omics`: Paths to omics data. Dict of {name: path}.
+            `path_label`: Path to label data.
+            `output_dir`: Directory to save the optimized data.
+            `k_outer`: Number of outer folds.
+            `k_inner`: Number of inner folds.
+            `fragment_elem_ids`: List of list of indices of elements in each fragment. For nested cross validation with 10 outer folds and 5 inner folds, this should be a list of 50 lists of indices.
+            `which_outer_inner`: If specified, only the specified outer-inner fold will be optimized.
+            `col2use_in_labels`: Columns to use in labels.
+            `prepr_labels`: Whether to preprocess labels.
+            `prepr_omics`: Whether to preprocess omics.
+            `seed_permut`: Seed for permutation.
+            `seed_resample`: Seed for resampling for the target number of samples.
+            `compression`: Compression method.
+            `n_workers`: Number of workers.
+        """
+        self.paths_omics = paths_omics
+        self.path_label = path_label
+        self.output_dir = output_dir
+        self.k_outer = k_outer
+        self.k_inner = k_inner
+        self.col2use_in_labels = col2use_in_labels
+        self.prepr_labels = prepr_labels
+        self.prepr_omics = prepr_omics
+        self.seed_resample = seed_resample
+        self.compression = compression
+        self.n_workers = n_workers
+        self.which_outer_inner = which_outer_inner
+        if which_outer_inner is not None:
+            if len(which_outer_inner) != 2:
+                raise ValueError("which_outer_inner must be a list of two elements")
+        self.fragments = self._check(seed_permut, fragment_elem_ids)
+        self.n_fragments = len(self.fragments)
+        # self.run_optimization()
 
-        # Permutate samples
-        np.random.seed(seed_permut)
-        _indices = np.random.permutation(len(tmp_data_init))
-        fragments = np.array_split(_indices, n_fragments)
-        fragments = [i.tolist() for i in fragments]
-    else:
-        fragments = fragment_elem_ids
-        n_fragments = len(fragment_elem_ids)
-        assert k_outer * k_inner == n_fragments
+    def run_optimization(self):
+        if self.which_outer_inner is None:
+            combn_outer_inner = list(itertools.product(range(self.k_outer), range(self.k_inner)))
+            for xo, xi in combn_outer_inner:
+                self.optimize_xoxi(xo, xi)
+        else:
+            self.optimize_xoxi(*self.which_outer_inner)
+        
+        if self.path_label is not None:
+            _, dim_model_output, _ = read_labels(self.path_label, self.col2use_in_labels)
+            df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
+            df_output_dim.write_csv(os.path.join(self.output_dir, "model_output_dim.csv"))
+        
+        # Check if Genomic Variants are available in paths_omics
+        for px in self.paths_omics.values():
+            if px.endswith(".pkl.gz"):
+                shutil.copy(px, os.path.join(self.output_dir, "genotypes.pkl.gz"))
 
-    for xo in range(k_outer):
-        for xi in range(k_inner):
-            fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(k_outer, k_inner, xo, xi)
-            indices_trn_samples = np.concatenate([fragments[i] for i in fr_indices_trn]).tolist()
-            indices_val_samples = np.concatenate([fragments[i] for i in fr_indices_val]).tolist()
-            indices_tst_samples = np.concatenate([fragments[i] for i in fr_indices_test]).tolist()
-            dir_xoxi = os.path.join(output_dir, f"ncv_test_{xo}_val_{xi}")
-            os.makedirs(dir_xoxi, exist_ok=True)
-            
-            #
-            dataset_xoxi = MyDataset(False, paths_omics, path_label, col2use_in_labels, indices_trn_samples, dir_xoxi, None, seed_resample, n_fragments, process_labels, process_omics)
-            sample_ids = dataset_xoxi.sample_ids
-            # Write sample IDs
-            _df_ids = pl.DataFrame(sample_ids, schema=["ID"])
-            _df_ids.write_csv(os.path.join(dir_xoxi, "sample_ids.csv"))
-            _df_ids_trn = pl.DataFrame(sample_ids[indices_trn_samples], schema=["ID"])
-            _df_ids_trn.write_csv(os.path.join(dir_xoxi, "sample_ids_trn.csv"))
-            _df_ids_val = pl.DataFrame(sample_ids[indices_val_samples], schema=["ID"])
-            _df_ids_val.write_csv(os.path.join(dir_xoxi, "sample_ids_val.csv"))
-            _df_ids_tst = pl.DataFrame(sample_ids[indices_tst_samples], schema=["ID"])
-            _df_ids_tst.write_csv(os.path.join(dir_xoxi, "sample_ids_tst.csv"))
-            
-            # Start optimizing
-            optimize(
-                fn = dataset_xoxi.__getitem__,
-                inputs = indices_trn_samples,
-                output_dir = os.path.join(dir_xoxi, "train"),
-                chunk_bytes = "256MB",
-                compression = compression,
-                num_workers = n_workers,
-            )
-            optimize(
-                fn = dataset_xoxi.__getitem__,
-                inputs = indices_val_samples,
-                output_dir = os.path.join(dir_xoxi, "valid"),
-                chunk_bytes = "256MB",
-                compression = compression,
-                num_workers = n_workers,
-            )
-            optimize(
-                fn = dataset_xoxi.__getitem__,
-                inputs = indices_tst_samples,
-                output_dir = os.path.join(dir_xoxi, "test"),
-                chunk_bytes = "256MB",
-                compression = compression,
-                num_workers = n_workers,
-            )
+        return None
+
+    def _check(self, seed_permut: int, fragment_elem_ids: Optional[List[List[int]]]):
+        if fragment_elem_ids is None:
+            n_fragments = int(self.k_outer * self.k_inner)
+            tmp_init = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, None, None, 42, n_fragments, False, False)
+
+            np.random.seed(seed_permut)
+            _indices = np.random.permutation(len(tmp_init))
+            fragments = np.array_split(_indices, n_fragments)
+            fragments = [i.tolist() for i in fragments]
+        else:
+            fragments = fragment_elem_ids
+            n_fragments = len(fragments)
+            assert n_fragments == self.k_outer * self.k_inner
+        
+        return fragments
     
-    if path_label is not None:
-        _, dim_model_output, _ = read_labels(path_label, col2use_in_labels)
-        df_output_dim = pl.DataFrame(data={"model_output_dim": [dim_model_output]})
-        df_output_dim.write_csv(os.path.join(output_dir, "model_output_dim.csv"))
-    
-    return None
+    def optimize_xoxi(self, which_outer_test: int, which_inner_valid: int):
+        chunk_bytes = "256MB"
+        fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(self.k_outer, self.k_inner, which_outer_test, which_inner_valid)
+        ind_trn = np.concatenate([self.fragments[i] for i in fr_indices_trn]).tolist()
+        ind_val = np.concatenate([self.fragments[i] for i in fr_indices_val]).tolist()
+        ind_tst = np.concatenate([self.fragments[i] for i in fr_indices_test]).tolist()
+        dir_xoxi = os.path.join(self.output_dir, f"ncv_test_{which_outer_test}_val_{which_inner_valid}")
+        os.makedirs(dir_xoxi, exist_ok=True)
+
+        dataset_xoxi = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, ind_trn, dir_xoxi, None, self.seed_resample, self.n_fragments, self.prepr_labels, self.prepr_omics)
+        sample_ids = dataset_xoxi.sample_ids
+
+        # Write sample IDs
+        _df_ids = pl.DataFrame(sample_ids, schema=["ID"])
+        _df_ids.write_csv(os.path.join(dir_xoxi, "sample_ids.csv"))
+        _df_ids_trn = pl.DataFrame([sample_ids[i] for i in ind_trn], schema=["ID"])
+        _df_ids_trn.write_csv(os.path.join(dir_xoxi, "sample_ids_trn.csv"))
+        _df_ids_val = pl.DataFrame([sample_ids[i] for i in ind_val], schema=["ID"])
+        _df_ids_val.write_csv(os.path.join(dir_xoxi, "sample_ids_val.csv"))
+        _df_ids_tst = pl.DataFrame([sample_ids[i] for i in ind_tst], schema=["ID"])
+        _df_ids_tst.write_csv(os.path.join(dir_xoxi, "sample_ids_tst.csv"))
+        
+        # Start optimizing
+        optimize(
+            fn = dataset_xoxi.__getitem__,
+            inputs = ind_trn,
+            output_dir = os.path.join(dir_xoxi, "train"),
+            chunk_bytes = chunk_bytes,
+            compression = self.compression,
+            num_workers = self.n_workers,
+        )
+        optimize(
+            fn = dataset_xoxi.__getitem__,
+            inputs = ind_val,
+            output_dir = os.path.join(dir_xoxi, "valid"),
+            chunk_bytes = chunk_bytes,
+            compression = self.compression,
+            num_workers = self.n_workers,
+        )
+        optimize(
+            fn = dataset_xoxi.__getitem__,
+            inputs = ind_tst,
+            output_dir = os.path.join(dir_xoxi, "test"),
+            chunk_bytes = chunk_bytes,
+            compression = self.compression,
+            num_workers = self.n_workers,
+        )
 
 
 def optimize_data_external(
@@ -301,15 +383,19 @@ def optimize_data_external(
         paths_omics: Dict[str, str],
         path_label: Optional[str] = None,
         col2use_in_labels: Optional[Union[List[str], List[int]]] = None,
-        process_labels: bool = True,
-        process_omics: bool = True,
+        prepr_labels: bool = True,
+        prepr_omics: bool = True,
         reproduction_mode: bool = False,
         dir_processors: Optional[str] = None,
         compression: Optional[str] = "zstd",
-        n_workers: int = 1,
+        n_workers: int = 2,
+        chunk_bytes: str = "64MB"
     ):
     """
     Optimize data for external use.
+
+    For details, see the documentation of the class `OptimizeLitdataNCV`.
+    
     """
     dataset_ext = MyDataset(
         reproduction_mode=reproduction_mode,
@@ -317,14 +403,14 @@ def optimize_data_external(
         path_label=path_label,
         col2use_in_label=col2use_in_labels,
         dir_save_processors=dir_processors,
-        process_labels=process_labels,
-        process_omics=process_omics,
+        prepr_labels=prepr_labels,
+        prepr_omics=prepr_omics,
     )
     optimize(
         fn = dataset_ext.__getitem__,
         inputs = range(len(dataset_ext)),
         output_dir = output_dir,
-        chunk_bytes = "256MB",
+        chunk_bytes = chunk_bytes,
         compression = compression,
         num_workers = n_workers,
     )
