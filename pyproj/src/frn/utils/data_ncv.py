@@ -464,7 +464,7 @@ class MyDataModule4Train(LightningDataModule):
         Read litdata from directories and return dataloaders for NCV.
         """
         dir_train, dir_valid, dir_test = self.get_dir_ncv_litdata()
-        dataloader_train = StreamingDataLoader(StreamingDataset(dir_train), batch_size=self.batch_size, num_workers=self.n_workers)
+        dataloader_train = StreamingDataLoader(StreamingDataset(dir_train), batch_size=self.batch_size, num_workers=self.n_workers, shuffle=True)
         dataloader_valid = StreamingDataLoader(StreamingDataset(dir_valid), batch_size=self.batch_size, num_workers=self.n_workers)
         dataloader_test = StreamingDataLoader(StreamingDataset(dir_test), batch_size=self.batch_size, num_workers=self.n_workers)
         return dataloader_train, dataloader_valid, dataloader_test

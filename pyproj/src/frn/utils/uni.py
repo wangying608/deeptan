@@ -71,8 +71,9 @@ def idx_convert(indices: List[int], len_one_hot_vec: int = 10) -> List[int]:
     """
     Convert the indices to the corresponding indices in the one-hot vector.
     """
-    converted_indices = [(i * len_one_hot_vec + nx) for nx in range(len_one_hot_vec) for i in indices]
-    return sorted(converted_indices)
+    converted_indices = np.array(indices)[:, np.newaxis] * len_one_hot_vec + np.arange(len_one_hot_vec)
+    converted_indices = np.sort(converted_indices.flatten()).tolist()
+    return converted_indices
 
 
 def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted: bool = True):
