@@ -100,6 +100,9 @@ class SNP2GBFit:
             learning_rate=hparams['learning_rate'],
             regression=self.regression,
         )
+        # Try compiling
+        _model.compile()
+        
         # Unique tag for the experiment
         log_dir_uniq_model = os.path.join(self.log_dir, self.log_name, random_string())
 

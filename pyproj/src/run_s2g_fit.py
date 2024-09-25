@@ -4,7 +4,13 @@ from frn.s2g.pipeline import SNP2GBFitPipe, SNP2GBTransPipe
 from frn.utils.uni import CollectFitLog
 
 
-list_ncv = [[int(sys.argv[1]), int(sys.argv[2])]]
+if len(sys.argv) < 3:
+    print('Start default NCV: 10 outer folds and 5 inner folds')
+    list_ncv = [[i,j] for i in range(10) for j in range(5)]
+else:
+    print('Start with NCV: {} outer folds and {} inner folds'.format(sys.argv[1], sys.argv[2]))
+    list_ncv = [[int(sys.argv[1]), int(sys.argv[2])]]
+
 work_dir_home = '/mnt/hdd2/homext/wuch/xn2p'
 litdata_dir = os.path.join(work_dir_home, 'data/_optimized/SNP_zsLabel_FT16_except_external_val')
 is_regression = True
@@ -20,6 +26,8 @@ if __name__ == '__main__':
         list_ncv=list_ncv,
         log_dir=log_dir,
         regression=is_regression,
+        devices=-1,
+        accelerator='gpu',
         # dense_layers_hidden_dims=dense_layers_hidden_dims,
         n_jobs=n_jobs,
         n_trials=n_trials,
