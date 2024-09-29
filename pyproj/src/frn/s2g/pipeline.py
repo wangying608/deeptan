@@ -11,6 +11,7 @@ from lightning import Trainer
 from frn.s2g.model import SNPReductionNet, SNP2GB
 from frn.utils.uni import get_avail_nvgpu, train_model, CollectFitLog, random_string, read_pkl_gv, time_string
 from frn.utils.data_ncv import MyDataModule4Train, MyDataModule4Uni
+import frn.constants as MC
 
 
 class SNP2GBFit:
@@ -25,16 +26,16 @@ class SNP2GBFit:
             which_outer_testset: int,
             which_inner_valset: int,
             regression: bool,
-            dense_layers_hidden_dims: List[int],
-            len_one_hot_vec: int = 10,
-            devices: Union[List[int], str, int] = 'auto',
-            accelerator: str = 'auto',
-            n_jobs: int = 1,
-            learning_rate: float = 1e-3,
-            patience: int = 10,
-            max_epochs: int = 1000,
-            min_epochs: int = 20,
-            batch_size: int = 16,
+            dense_layer_dims: List[int],
+            snp_onehot_bits: int = MC.default.snp_onehot_bits,
+            devices: Union[List[int], str, int] = MC.default.devices,
+            accelerator: str = MC.default.accelerator,
+            n_jobs: int = MC.default.n_jobs,
+            learning_rate: float = MC.default.lr,
+            patience: int = MC.default.patience,
+            max_epochs: int = MC.default.max_epochs,
+            min_epochs: int = MC.default.min_epochs,
+            batch_size: int = MC.default.batch_size,
         ):
         """
         Initialize SNP2GBTrain.
@@ -45,9 +46,9 @@ class SNP2GBFit:
         self.devices = devices
         self.accelerator = accelerator
         self.n_jobs = n_jobs
-        self.len_one_hot_vec = len_one_hot_vec
-        self.blocks_gt = read_pkl_gv(os.path.join(litdata_dir, 'genotypes.pkl.gz'))['block2gtype']
-        self.model_out_dim = pl.read_csv(os.path.join(litdata_dir, "model_output_dim.csv"), has_header=True)[0,0]
+        self.snp_onehot_bits = snp_onehot_bits
+        self.blocks_gt = read_pkl_gv(os.path.join(litdata_dir, MC.fname.genotypes))[MC.dkey.gblock2gtype]
+        self.model_out_dim = pl.read_csv(os.path.join(litdata_dir, MC.fname.output_dim), has_header=True)[0,0]
 
         self.datamodule = MyDataModule4Train(litdata_dir, which_outer_testset, which_inner_valset, batch_size, n_jobs)
         self.datamodule.setup()
@@ -58,7 +59,7 @@ class SNP2GBFit:
             max_epochs=max_epochs,
             min_epochs=min_epochs,
             batch_size=batch_size,
-            dense_layers_hidden_dims=dense_layers_hidden_dims,
+            dense_layer_dims=dense_layer_dims,
         )
     
     def hparams_fit(
@@ -68,18 +69,18 @@ class SNP2GBFit:
             max_epochs: int,
             min_epochs: int,
             batch_size: int,
-            dense_layers_hidden_dims: List[int],
+            dense_layer_dims: List[int],
         ) -> Dict[str, Any]:
         """
         Generate a dictionary of hyperparameters for SNP2GB model training.
         """
         hparams = {
-            'learning_rate': learning_rate,
-            'patience': patience,
-            'max_epochs': max_epochs,
-            'min_epochs': min_epochs,
-            'batch_size': batch_size,
-            'dense_layers_hidden_dims': dense_layers_hidden_dims,
+            MC.dkey.lr: learning_rate,
+            MC.dkey.patience: patience,
+            MC.dkey.max_epochs: max_epochs,
+            MC.dkey.min_epochs: min_epochs,
+            MC.dkey.bsize: batch_size,
+            MC.dkey.s2g_dense_layer_dims: dense_layer_dims,
         }
         return hparams
 
@@ -95,9 +96,9 @@ class SNP2GBFit:
         _model = SNPReductionNet(
             output_dim=self.model_out_dim,
             blocks_gt=self.blocks_gt,
-            len_one_hot_vec=self.len_one_hot_vec,
-            dense_layers_hidden_dims=hparams['dense_layers_hidden_dims'],
-            learning_rate=hparams['learning_rate'],
+            snp_onehot_bits=self.snp_onehot_bits,
+            dense_layer_dims=hparams[MC.dkey.s2g_dense_layer_dims],
+            learning_rate=hparams[MC.dkey.lr],
             regression=self.regression,
         )
         # Try compiling
@@ -109,9 +110,9 @@ class SNP2GBFit:
         val_loss_min = train_model(
             model=_model,
             datamodule=self.datamodule,
-            es_patience=hparams['patience'],
-            max_epochs=hparams['max_epochs'],
-            min_epochs=hparams['min_epochs'],
+            es_patience=hparams[MC.dkey.patience],
+            max_epochs=hparams[MC.dkey.max_epochs],
+            min_epochs=hparams[MC.dkey.min_epochs],
             log_dir=log_dir_uniq_model,
             devices=devices,
             accelerator=accelerator,
@@ -137,15 +138,15 @@ class SNP2GBFit:
         """
         print('Trial number:', trial.number)
         if self.n_jobs > 1:
-            time_delay = (trial.number + self.n_jobs) % self.n_jobs * 11.7
+            time_delay = (trial.number + self.n_jobs) % self.n_jobs * MC.default.time_delay
             time.sleep(time_delay)
         
-        lr = trial.suggest_categorical('lr', [1e-3, 1e-4, 1e-5, 1e-6])
-        batch_size = trial.suggest_categorical('batch_size', [16, 32, 64])
+        lr = trial.suggest_categorical(MC.dkey.lr, MC.hparam_candidates.lr)
+        batch_size = trial.suggest_categorical(MC.dkey.bsize, MC.hparam_candidates.batch_size)
         
         hparams_trial = self.hparams.copy()
-        hparams_trial['learning_rate'] = lr
-        hparams_trial['batch_size'] = batch_size
+        hparams_trial[MC.dkey.lr] = lr
+        hparams_trial[MC.dkey.bsize] = batch_size
         
         val_loss_min = self.snp2gb_fit(
             hparams = hparams_trial,
@@ -157,21 +158,20 @@ class SNP2GBFit:
     
     def optimize(
             self,
-            n_trials: Optional[int] = None,
-            storage: str = 'sqlite:///optuna_s2g.db',
+            n_trials: Optional[int] = MC.default.n_trials,
+            storage: str = MC.default.optuna_db,
+            gc_after_trial: bool = True,
         ):
         """
         Hyperparameters optimization for SNP2GB model.
         """
-        time_str = time_string()
-
         study = optuna.create_study(
             storage = storage,
-            study_name = self.log_name + '_' + time_str,
+            study_name = self.log_name + '_' + time_string(),
             load_if_exists = True,
             direction = 'minimize',
         )
-        study.optimize(self.objective, n_jobs=self.n_jobs, n_trials=n_trials, gc_after_trial=True)
+        study.optimize(self.objective, n_jobs=self.n_jobs, n_trials=n_trials, gc_after_trial=gc_after_trial)
 
 
 class SNP2GBFitPipe:
@@ -186,40 +186,37 @@ class SNP2GBFitPipe:
             list_ncv: List[List[int]],
             log_dir: str,
             regression: bool,
-            devices: Union[List[int], str, int] = 'auto',
-            accelerator: str = 'auto',
-            n_jobs: int = 1,
-            n_trials: Optional[int] = 10,
-            dense_layers_hidden_dims: Optional[List[int]] = None,
-            len_onehot_snp: int = 10,
+            devices: Union[List[int], str, int] = MC.default.devices,
+            accelerator: str = MC.default.accelerator,
+            n_jobs: int = MC.default.n_jobs,
+            n_trials: Optional[int] = MC.default.n_trials,
+            dense_layer_dims: Optional[List[int]] = None,
+            snp_onehot_bits: int = MC.default.snp_onehot_bits,
         ):
         """
         Initialize SNP2GB pipeline.
 
         Parameters:
         - `list_ncv`: List of nested cross-validation folds. e.g., `[[0,0], [0,1], [9,4]]`.
-        - `len_onehot_snp`: Length of the one-hot vector for each SNP.
-        - `dense_layers_hidden_dims`: List of hidden dimensions for the dense layers.
+        - `snp_onehot_bits`: Length of the one-hot vector for each SNP.
+        - `dense_layer_dims`: List of hidden dimensions for the dense layers.
         """
         # Unique tag for the training log directory
-        rand_str = random_string()
-        time_str = time_string()
-        tag_str = time_str + '_' + rand_str
-        self.uniq_logdir = os.path.join(log_dir, 'train_' + tag_str)
-        if not os.path.exists(self.uniq_logdir):
-            os.makedirs(self.uniq_logdir)
+        tag_str = time_string() + '_' + random_string()
+        self.uniq_logdir = os.path.join(log_dir, MC.title_train + '_' + tag_str)
+        os.makedirs(self.uniq_logdir, exist_ok=False)
 
         self.litdata_dir = litdata_dir
         self.list_ncv = list_ncv
         self.n_slice = len(list_ncv)
         
-        if dense_layers_hidden_dims is None:
-            self.dense_layers_hidden_dims = [1024, 512, 128]
+        if dense_layer_dims is None:
+            self.dense_layer_dims = MC.hparam_candidates.s2g_dense_layer_dims[0]
         else:
-            self.dense_layers_hidden_dims = dense_layers_hidden_dims
+            self.dense_layer_dims = dense_layer_dims
         
         self.regression = regression
-        self.len_onehot_snp = len_onehot_snp
+        self.snp_onehot_bits = snp_onehot_bits
         self.devices = devices
         self.accelerator = accelerator
         self.n_jobs = n_jobs
@@ -246,8 +243,8 @@ class SNP2GBFitPipe:
                 which_outer_testset = self.list_ncv[0][0],
                 which_inner_valset = self.list_ncv[0][1],
                 regression = self.regression,
-                dense_layers_hidden_dims = self.dense_layers_hidden_dims,
-                len_one_hot_vec = self.len_onehot_snp,
+                dense_layer_dims = self.dense_layer_dims,
+                snp_onehot_bits = self.snp_onehot_bits,
                 devices = self.devices,
                 accelerator=self.accelerator,
                 n_jobs=self.n_jobs,
@@ -262,8 +259,8 @@ class SNP2GBFitPipe:
                     which_outer_testset = self.list_ncv[xfold][0],
                     which_inner_valset = self.list_ncv[xfold][1],
                     regression = self.regression,
-                    dense_layers_hidden_dims = self.dense_layers_hidden_dims,
-                    len_one_hot_vec = self.len_onehot_snp,
+                    dense_layer_dims = self.dense_layer_dims,
+                    snp_onehot_bits = self.snp_onehot_bits,
                     devices = self.devices,
                     accelerator=self.accelerator,
                     n_jobs=self.n_jobs,
@@ -276,9 +273,9 @@ def execute_s2g(
         path_gtype_pkl: str,
         path_pretrained_model: str,
         dir_log_predict: str = os.getcwd(),
-        len_one_hot_vec: int = 10,
-        batch_size: int = 32,
-        accelerator: str = 'auto',
+        snp_onehot_bits: int = MC.default.snp_onehot_bits,
+        batch_size: int = MC.default.batch_size,
+        accelerator: str = MC.default.accelerator,
     ):
     """
     Run the SNP2GB model for independent test / prediction.
@@ -289,8 +286,8 @@ def execute_s2g(
 
     model4gene = SNP2GB(
         path_pretrained_model=path_pretrained_model,
-        blocks_gt=g_data_dict['block2gtype'],
-        len_one_hot_vec=len_one_hot_vec,
+        blocks_gt=g_data_dict[MC.dkey.gblock2gtype],
+        snp_onehot_bits=snp_onehot_bits,
     )
 
     avail_dev = get_avail_nvgpu()
@@ -305,16 +302,16 @@ def execute_s2g(
     # - Prepare sample ids
     sample_ids = []
     for batch in datamodule_s2g.dataloader_xxx:
-        sample_ids.extend(batch['id'])
+        sample_ids.extend(batch[MC.dkey.litdata_id])
     print(f'Number of samples: {len(sample_ids)}')
     print(sample_ids)
     assert len(sample_ids) == len(pred_array)
-    assert len(g_data_dict['block_ids']) == pred_array.shape[1]
+    assert len(g_data_dict[MC.dkey.gblock_ids]) == pred_array.shape[1]
     
     # Prepare prediction dataframe
-    pred_df = pl.DataFrame(pred_array, schema=g_data_dict['block_ids'])
+    pred_df = pl.DataFrame(pred_array, schema=g_data_dict[MC.dkey.gblock_ids])
     # Add a column of sample ids
-    df_ids = pl.DataFrame(sample_ids, schema=['ID'])
+    df_ids = pl.DataFrame(sample_ids, schema=[MC.dkey.id])
     pred_df = df_ids.hstack(pred_df)
 
     return pred_df
@@ -333,8 +330,7 @@ class SNP2GBTransPipe:
     ):
         self.dir_log = dir_log
         self.dir_output = dir_output
-        if not os.path.exists(self.dir_output):
-            os.makedirs(self.dir_output)
+        os.makedirs(self.dir_output, exist_ok=False)
         self.overwrite_collected_log = overwrite_collected_log
 
     def collect_models(self):
@@ -350,10 +346,10 @@ class SNP2GBTransPipe:
             self,
             dir_litdata: str,
             list_ncv: Optional[List[List[int]]] = None,
-            len_one_hot_vec: int = 10,
-            accelerator: str = 'auto',
-            batch_size: int = 32,
-            n_workers: int = 0,
+            snp_onehot_bits: int = MC.default.snp_onehot_bits,
+            accelerator: str = MC.default.accelerator,
+            batch_size: int = MC.default.batch_size,
+            n_workers: int = MC.default.n_workers,
         ):
         """
         Convert SNPs to genome blocks features using the best model for each fold in nested cross-validation.
@@ -364,13 +360,13 @@ class SNP2GBTransPipe:
         if not hasattr(self,'models_bv'):
             self.collect_models()
         
-        path_gtype_pkl = os.path.join(dir_litdata, 'genotypes.pkl.gz')
+        path_gtype_pkl = os.path.join(dir_litdata, MC.fname.genotypes)
 
         if list_ncv is None:
             # Take the best model's path overall by searching the line min `val_loss` in models_bi.
-            path_best_model = self.models_bi.filter(pl.col('val_loss') == self.models_bi.select('val_loss').min()).select('path_ckpt')[0,0]
-            output = execute_s2g(dir_litdata, path_gtype_pkl, path_best_model, self.dir_output, len_one_hot_vec, batch_size, accelerator)
-            output.write_parquet(os.path.join(self.dir_output, 'snp2gb.parquet'))
+            path_best_model = self.models_bi.filter(pl.col(MC.title_val_loss) == self.models_bi.select(MC.title_val_loss).min()).select(MC.dkey.ckpt_path)[0,0]
+            output = execute_s2g(dir_litdata, path_gtype_pkl, path_best_model, self.dir_output, snp_onehot_bits, batch_size, accelerator)
+            output.write_parquet(os.path.join(self.dir_output, MC.fname.transformed_genotypes))
             
             return None
         
@@ -382,17 +378,17 @@ class SNP2GBTransPipe:
             path_o_pred_tst = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_tst.parquet')
             # path_o_pred_test_bestinner = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_tst_bestinner.parquet')
 
-            path_mdl = self.models_bv.filter((pl.col('x_outer') == x_outer) & (pl.col('x_inner') == x_inner)).select('path_ckpt')[0,0]
+            path_mdl = self.models_bv.filter((pl.col(MC.dkey.which_outer) == x_outer) & (pl.col(MC.dkey.which_inner) == x_inner)).select(MC.dkey.ckpt_path)[0,0]
             print(f'\nUsing model {path_mdl}\n')
 
             ncv_data = MyDataModule4Train(dir_litdata, x_outer, x_inner, batch_size, n_workers)
             dir_train, dir_valid, dir_test = ncv_data.get_dir_ncv_litdata()
 
-            pred_trn = execute_s2g(dir_train, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
+            pred_trn = execute_s2g(dir_train, path_gtype_pkl, path_mdl, self.dir_output, snp_onehot_bits, batch_size, accelerator)
             pred_trn.write_parquet(path_o_pred_trn)
-            pred_val = execute_s2g(dir_valid, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
+            pred_val = execute_s2g(dir_valid, path_gtype_pkl, path_mdl, self.dir_output, snp_onehot_bits, batch_size, accelerator)
             pred_val.write_parquet(path_o_pred_val)
-            pred_tst = execute_s2g(dir_test, path_gtype_pkl, path_mdl, self.dir_output, len_one_hot_vec, batch_size, accelerator)
+            pred_tst = execute_s2g(dir_test, path_gtype_pkl, path_mdl, self.dir_output, snp_onehot_bits, batch_size, accelerator)
             pred_tst.write_parquet(path_o_pred_tst)
 
             # # Check if the model is the best for the current outer fold

@@ -13,9 +13,10 @@ import lightning as ltn
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall
 from torchmetrics.regression import MeanAbsoluteError, R2Score, PearsonCorrCoef
 from frn.utils.uni import idx_convert, get_map_location
+import frn.constants as MC
 
 
-torch.set_float32_matmul_precision('high')
+torch.set_float32_matmul_precision(MC.default.float32_matmul_precision)
 
 
 class SNPReductionNetModel(nn.Module):
@@ -23,33 +24,33 @@ class SNPReductionNetModel(nn.Module):
             self,
             output_dim: int,
             blocks_gt: List[List[int]],
-            len_one_hot_vec: int,
-            dense_layers_hidden_dims: List[int],
+            snp_onehot_bits: int,
+            dense_layer_dims: List[int],
         ):
         super().__init__()
         self.n_blocks = len(blocks_gt)
         
         # Define the sparse linear layers that maps SNPs to genome blocks
         self.sparse_layers = nn.ModuleList([
-            nn.Linear(len(block) * len_one_hot_vec, 1, bias=False) for block in blocks_gt
+            nn.Linear(len(block) * snp_onehot_bits, 1, bias=False) for block in blocks_gt
         ])
 
-        self.indices_gt = [idx_convert(block, len_one_hot_vec) for block in blocks_gt]
+        self.indices_gt = [idx_convert(block, snp_onehot_bits) for block in blocks_gt]
         
         # Define the dense layers for predicting the phenotype
         # + Apply LayerNorm to the input features.
         # + First dense layer takes the genome blocks' features as input.
         dense_layers = [
             nn.LayerNorm(self.n_blocks),
-            nn.Linear(self.n_blocks, dense_layers_hidden_dims[0]),
+            nn.Linear(self.n_blocks, dense_layer_dims[0]),
         ]
-        for i in range(len(dense_layers_hidden_dims) - 1):
+        for i in range(len(dense_layer_dims) - 1):
             dense_layers.extend([
-                nn.Linear(dense_layers_hidden_dims[i], dense_layers_hidden_dims[i + 1]),
+                nn.Linear(dense_layer_dims[i], dense_layer_dims[i + 1]),
                 nn.Sigmoid(),
                 # nn.Dropout(p=0.1),
             ])
-        dense_layers.append(nn.Linear(dense_layers_hidden_dims[-1], output_dim))
+        dense_layers.append(nn.Linear(dense_layer_dims[-1], output_dim))
         self.dense_layers = nn.Sequential(*dense_layers)
     
     def forward(self, x):
@@ -71,8 +72,8 @@ class SNPReductionNet(ltn.LightningModule):
             self,
             output_dim: int,
             blocks_gt: List[List[int]],
-            len_one_hot_vec: int,
-            dense_layers_hidden_dims: List[int],
+            snp_onehot_bits: int,
+            dense_layer_dims: List[int],
             learning_rate: float,
             regression: bool,
         ):
@@ -87,39 +88,39 @@ class SNPReductionNet(ltn.LightningModule):
         self.model = SNPReductionNetModel(
             output_dim=output_dim,
             blocks_gt=blocks_gt,
-            len_one_hot_vec=len_one_hot_vec,
-            dense_layers_hidden_dims=dense_layers_hidden_dims,
+            snp_onehot_bits=snp_onehot_bits,
+            dense_layer_dims=dense_layer_dims,
         )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
     
     def training_step(self, batch, batch_idx):
-        x = batch['omics'][0]
-        y = batch['label']
+        x = batch[MC.dkey.litdata_omics][0]
+        y = batch[MC.dkey.litdata_label]
 
         y_pred = self.forward(x)
-        loss = self._my_loss(y_pred, y, "train")
+        loss = self._my_loss(y_pred, y, MC.title_train)
         return loss
     
     def validation_step(self, batch, batch_idx):
-        x = batch['omics'][0]
-        y = batch['label']
+        x = batch[MC.dkey.litdata_omics][0]
+        y = batch[MC.dkey.litdata_label]
         
         y_pred = self.forward(x)
-        loss = self._my_loss(y_pred, y, "val")
+        loss = self._my_loss(y_pred, y, MC.title_val)
         return loss
     
     def test_step(self, batch, batch_idx):
-        x = batch['omics'][0]
-        y = batch['label']
+        x = batch[MC.dkey.litdata_omics][0]
+        y = batch[MC.dkey.litdata_label]
         
         y_pred = self.forward(x)
-        loss = self._my_loss(y_pred, y, "test")
+        loss = self._my_loss(y_pred, y, MC.title_test)
         return loss
     
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        x = batch['omics'][0]
+        x = batch[MC.dkey.litdata_omics][0]
         y_pred = self.forward(x)
         return y_pred
     
@@ -222,7 +223,7 @@ class SNP2GB(ltn.LightningModule):
             self,
             path_pretrained_model: str,
             blocks_gt: List[List[int]],
-            len_one_hot_vec: int,
+            snp_onehot_bits: int,
             map_location: Optional[str] = None,
         ):
         super().__init__()
@@ -230,7 +231,7 @@ class SNP2GB(ltn.LightningModule):
 
         indices_gt = []
         for i_gb in range(self.n_gb):
-            indices_gt.append(idx_convert(blocks_gt[i_gb], len_one_hot_vec))
+            indices_gt.append(idx_convert(blocks_gt[i_gb], snp_onehot_bits))
         self.indices_gt = indices_gt
 
         # Load the pre-trained model
@@ -257,5 +258,5 @@ class SNP2GB(ltn.LightningModule):
         return gblocks
     
     def predict_step(self, batch, batch_idx) -> torch.Tensor:
-        return self(batch['omics'][0])
+        return self(batch[MC.dkey.litdata_omics][0])
 

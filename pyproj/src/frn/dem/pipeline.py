@@ -11,6 +11,7 @@ import polars as pl
 from frn.dem.model import DEMLTN
 from frn.utils.uni import get_avail_nvgpu, get_map_location, train_model, CollectFitLog, random_string, time_string
 from frn.utils.data_ncv import MyDataModule4Train, MyDataModule4Uni
+import frn.constants as MC
 
 
 class DEMFit:
@@ -25,18 +26,18 @@ class DEMFit:
             which_outer_testset: int,
             which_inner_valset: int,
             regression: bool,
-            devices: Union[List[int], str, int] = 'auto',
-            accelerator: str = 'auto',
-            n_jobs: int = 1,
-            n_heads: int = 4,
-            n_encoders: int = 2,
-            hidden_dim: int = 1024,
-            learning_rate: float = 1e-5,
-            dropout: float = 0.4,
-            patience: int = 20,
-            max_epochs: int = 1000,
-            min_epochs: int = 20,
-            batch_size: int = 16,
+            devices: Union[List[int], str, int] = MC.default.devices,
+            accelerator: str = MC.default.accelerator,
+            n_jobs: int = MC.default.n_jobs,
+            n_heads: int = MC.default.n_heads,
+            n_encoders: int = MC.default.n_encoders,
+            hidden_dim: int = MC.default.hidden_dim,
+            learning_rate: float = MC.default.lr,
+            dropout: float = MC.default.dropout,
+            patience: int = MC.default.patience,
+            max_epochs: int = MC.default.max_epochs,
+            min_epochs: int = MC.default.min_epochs,
+            batch_size: int = MC.default.batch_size,
         ):
         """
         Initialize DEM model training with given hyperparameters and input/output paths.
@@ -46,7 +47,7 @@ class DEMFit:
         self.devices = devices
         self.accelerator = accelerator
         self.n_jobs = n_jobs
-        self.model_out_dim = pl.read_csv(os.path.join(litdata_dir, "model_output_dim.csv"), has_header=True)[0,0]
+        self.model_out_dim = pl.read_csv(os.path.join(litdata_dir, MC.fname.output_dim), has_header=True)[0,0]
         self.is_regression = regression
         self.datamodule = MyDataModule4Train(litdata_dir, which_outer_testset, which_inner_valset, batch_size, n_jobs)
         self.datamodule.setup()
@@ -80,15 +81,15 @@ class DEMFit:
         Generate a dictionary of hyperparameters for DEM model training.
         """
         hparams = {
-            'n_heads': n_heads,
-            'n_encoders': n_encoders,
-            'hidden_dim': hidden_dim,
-            'learning_rate': learning_rate,
-            'dropout': dropout,
-            'patience': patience,
-            'max_epochs': max_epochs,
-            'min_epochs': min_epochs,
-            'batch_size': batch_size,
+            MC.dkey.num_heads: n_heads,
+            MC.dkey.num_encoders: n_encoders,
+            MC.dkey.hidden_dim: hidden_dim,
+            MC.dkey.lr: learning_rate,
+            MC.dkey.dropout: dropout,
+            MC.dkey.dropout: patience,
+            MC.dkey.max_epochs: max_epochs,
+            MC.dkey.min_epochs: min_epochs,
+            MC.dkey.bsize: batch_size,
         }
         return hparams
 
@@ -103,12 +104,12 @@ class DEMFit:
         """
         _model = DEMLTN(
             omics_dim=self.omics_dims,
-            n_heads=hparams['n_heads'],
-            n_encoders=hparams['n_encoders'],
-            hidden_dim=hparams['hidden_dim'],
+            n_heads=hparams[MC.dkey.num_heads],
+            n_encoders=hparams[MC.dkey.num_encoders],
+            hidden_dim=hparams[MC.dkey.hidden_dim],
             output_dim=self.model_out_dim,
-            dropout=hparams['dropout'],
-            learning_rate=hparams['learning_rate'],
+            dropout=hparams[MC.dkey.dropout],
+            learning_rate=hparams[MC.dkey.lr],
             is_regression=self.is_regression,
         )
         
@@ -117,9 +118,9 @@ class DEMFit:
         val_loss_min = train_model(
             model=_model,
             datamodule=self.datamodule,
-            es_patience=hparams['patience'],
-            max_epochs=hparams['max_epochs'],
-            min_epochs=hparams['min_epochs'],
+            es_patience=hparams[MC.dkey.patience],
+            max_epochs=hparams[MC.dkey.max_epochs],
+            min_epochs=hparams[MC.dkey.min_epochs],
             log_dir=log_dir_uniq_model,
             devices=devices,
             accelerator=accelerator,
@@ -145,25 +146,25 @@ class DEMFit:
         """
         print("Trial number:", trial.number)
         if self.n_jobs > 1:
-            time_delay = (trial.number + self.n_jobs) % self.n_jobs * 11.7
+            time_delay = (trial.number + self.n_jobs) % self.n_jobs * MC.default.time_delay
             time.sleep(time_delay)
 
         # Generate hyperparameters
-        batch_size = trial.suggest_categorical("batch_size", [16, 32, 64])
-        n_heads = trial.suggest_categorical("n_heads", [1, 2, 4])
-        n_encoders = trial.suggest_categorical("n_encoders", [1, 2, 4])
-        hidden_dim = trial.suggest_categorical("hidden_dim", [512, 1024])
-        dropout = trial.suggest_float("dropout", 0.0, 0.8, step=0.2)
-        lr = trial.suggest_categorical("lr", [1e-7, 1e-6, 1e-5, 1e-4, 1e-3])
+        batch_size = trial.suggest_categorical(MC.dkey.bsize, MC.hparam_candidates.batch_size)
+        n_heads = trial.suggest_categorical(MC.dkey.num_heads, MC.hparam_candidates.n_heads)
+        n_encoders = trial.suggest_categorical(MC.dkey.num_encoders, MC.hparam_candidates.n_encoders)
+        hidden_dim = trial.suggest_categorical(MC.dkey.hidden_dim, MC.hparam_candidates.hidden_dim)
+        dropout = trial.suggest_float(MC.dkey.dropout, 0.0, MC.hparam_candidates.dropout_high, step=MC.hparam_candidates.dropout_step)
+        lr = trial.suggest_categorical(MC.dkey.lr, MC.hparam_candidates.lr)
 
         # Update hyperparameters in DEMTrain object based on manual parameters in initialization
         hparams_tmp = self.hparams.copy()
-        hparams_tmp['batch_size'] = batch_size
-        hparams_tmp['n_heads'] = n_heads
-        hparams_tmp['n_encoders'] = n_encoders
-        hparams_tmp['hidden_dim'] = hidden_dim
-        hparams_tmp['learning_rate'] = lr
-        hparams_tmp['dropout'] = dropout
+        hparams_tmp[MC.dkey.bsize] = batch_size
+        hparams_tmp[MC.dkey.num_heads] = n_heads
+        hparams_tmp[MC.dkey.num_encoders] = n_encoders
+        hparams_tmp[MC.dkey.hidden_dim] = hidden_dim
+        hparams_tmp[MC.dkey.lr] = lr
+        hparams_tmp[MC.dkey.dropout] = dropout
         
         val_loss_min = self.dem_fit(
             hparams = hparams_tmp,
@@ -176,20 +177,19 @@ class DEMFit:
     def optimize(
             self,
             n_trials: Optional[int] = None,
-            storage: str = "sqlite:///optuna_dem.db",
+            storage: str = MC.default.optuna_db,
+            gc_after_trial: bool = True,
         ):
         """
         Optimize hyperparameters of DEM model with Optuna.
         """
-        time_str = time_string()
-
         study = optuna.create_study(
             storage = storage,
-            study_name = self.log_name + "_" + time_str,
+            study_name = self.log_name + "_" + time_string(),
             direction = "minimize",
             load_if_exists = True,
         )
-        study.optimize(self.objective, n_trials=n_trials, n_jobs=self.n_jobs, gc_after_trial=True)
+        study.optimize(self.objective, n_trials=n_trials, n_jobs=self.n_jobs, gc_after_trial=gc_after_trial)
 
 
 class DEMFitPipe:
@@ -202,21 +202,18 @@ class DEMFitPipe:
             list_ncv: List[List[int]],
             log_dir: str,
             regression: bool,
-            devices: Union[List[int], str, int] = 'auto',
-            accelerator: str = 'auto',
-            n_jobs: int = 1,
-            n_trials: Optional[int] = 10,
+            devices: Union[List[int], str, int] = MC.default.devices,
+            accelerator: str = MC.default.accelerator,
+            n_jobs: int = MC.default.n_jobs,
+            n_trials: Optional[int] = MC.default.n_trials,
         ):
         """
         Initialize DEM model training pipeline.
         """
         # Unique tag for the training log directory
-        rand_str = random_string()
-        time_str = time_string()
-        tag_str = time_str + '_' + rand_str
-        self.uniq_logdir = os.path.join(log_dir, 'train_' + tag_str)
-        if not os.path.exists(self.uniq_logdir):
-            os.makedirs(self.uniq_logdir)
+        tag_str = time_string() + '_' + random_string()
+        self.uniq_logdir = os.path.join(log_dir, MC.title_train + "_" + tag_str)
+        os.makedirs(self.uniq_logdir, exist_ok=False)
 
         self.litdata_dir = litdata_dir
         self.list_ncv = list_ncv
@@ -227,13 +224,13 @@ class DEMFitPipe:
         self.accelerator = accelerator
         self.n_jobs = n_jobs
         self.n_trials = n_trials
-            
+        
     def train_pipeline(self):
         """
         Train DEM model for each fold in nested cross-validation.
         """
         # Storage for optuna trials in self.log_dir
-        path_storage = 'sqlite:///' + self.uniq_logdir + '/optuna_dem' + '.db'
+        path_storage = 'sqlite:///' + self.uniq_logdir + '/optuna.db'
         
         print(f"\nNumber of data slices to train: {self.n_slice}\n")
         log_names = []
@@ -280,23 +277,18 @@ class DEMPredict:
             dir_output: str,
             overwrite_collected_log: bool = False,
         ):
-        """
-        Initialize DEM model prediction.
-        - map_location: `cuda:0` for GPU, `cpu` for CPU.
-        """
         self.dir_logs = dir_fit_logs
         self.dir_output = dir_output
-        if not os.path.exists(self.dir_output):
-            os.makedirs(self.dir_output)
+        os.makedirs(self.dir_output, exist_ok=True)
         self.overwrite_collected_log = overwrite_collected_log
 
     def runs(
             self,
             dir_litdata: str,
             list_ncv: Optional[List[List[int]]] = None,
-            accelerator: str = 'auto',
-            batch_size: int = 32,
-            n_workers: int = 0,
+            accelerator: str = MC.default.accelerator,
+            batch_size: int = MC.default.batch_size,
+            n_workers: int = MC.default.n_workers,
         ):
         """
         Predict for NCV or not.
@@ -306,9 +298,9 @@ class DEMPredict:
         
         if list_ncv is None:
             # Take the best model's path overall by searching the line min `val_loss` in models_bi.
-            path_best_model = self.models_bi.filter(pl.col('val_loss') == self.models_bi.select('val_loss').min()).select('path_ckpt')[0,0]
+            path_best_model = self.models_bi.filter(pl.col(MC.dkey.val_loss) == self.models_bi.select(MC.dkey.val_loss)).min().select(MC.dkey.ckpt_path)[0,0]
             output = self.predict(dir_litdata, path_best_model, self.dir_output, batch_size, accelerator, n_workers)
-            output.write_parquet(os.path.join(self.dir_output, 'dem_predicted_labels.parquet'))
+            output.write_parquet(os.path.join(self.dir_output, MC.fname.predicted_labels))
 
             return None
         
@@ -318,12 +310,12 @@ class DEMPredict:
         
         return None
     
-    def run_xo_xi(self, x_outer: int, x_inner: int, dir_litdata: str, batch_size: int, accelerator: str = 'auto', n_workers: int = 0):
-        path_o_pred_trn = os.path.join(self.dir_output, f'dem_predicted_labels_{x_outer}_{x_inner}_trn.parquet')
-        path_o_pred_val = os.path.join(self.dir_output, f'dem_predicted_labels_{x_outer}_{x_inner}_val.parquet')
-        path_o_pred_tst = os.path.join(self.dir_output, f'dem_predicted_labels_{x_outer}_{x_inner}_tst.parquet')
+    def run_xo_xi(self, x_outer: int, x_inner: int, dir_litdata: str, batch_size: int, accelerator: str = MC.default.accelerator, n_workers: int = MC.default.n_workers):
+        path_o_pred_trn = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_trn.parquet'))
+        path_o_pred_val = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_val.parquet'))
+        path_o_pred_tst = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_tst.parquet'))
 
-        path_mdl = self.models_bv.filter((pl.col('x_outer') == x_outer) & (pl.col('x_inner') == x_inner)).select('path_ckpt')[0,0]
+        path_mdl = self.models_bv.filter((pl.col(MC.dkey.which_outer) == x_outer) & (pl.col(MC.dkey.which_inner) == x_inner)).select(MC.dkey.ckpt_path)[0,0]
         print(f'\nUsing model {path_mdl}\n')
 
         ncv_data = MyDataModule4Train(dir_litdata, x_outer, x_inner, batch_size, n_workers)
@@ -359,9 +351,9 @@ class DEMPredict:
             dir_litdata: str,
             path_model_ckpt: str,
             dir_log_predict: str,
-            batch_size: int = 32,
-            accelerator: str = 'auto',
-            n_workers: int = 0,
+            batch_size: int = MC.default.batch_size,
+            accelerator: str = MC.default.accelerator,
+            n_workers: int = MC.default.n_workers,
         ):
         """
         Predict phenotypes from omics data using a trained DEM model.
@@ -380,26 +372,26 @@ class DEMPredict:
 
         # Output
 
-        path_sample_ids = os.path.join(dir_litdata, 'sample_ids.csv')
-        path_label_names = os.path.join(dir_litdata, 'label_names.csv')
+        path_sample_ids = os.path.join(dir_litdata, MC.fname.predata_ids)
+        path_label_names = os.path.join(dir_litdata, MC.fname.predata_label_names)
+
         if not os.path.exists(path_sample_ids):
-            match os.path.basename(dir_litdata):
-                case 'train':
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), 'sample_ids_trn.csv')
-                    path_label_names = os.path.join(os.path.dirname(dir_litdata), 'label_names.csv')
-                case 'valid':
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), 'sample_ids_val.csv')
-                    path_label_names = os.path.join(os.path.dirname(dir_litdata), 'label_names.csv')
-                case 'test':
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), 'sample_ids_tst.csv')
-                    path_label_names = os.path.join(os.path.dirname(dir_litdata), 'label_names.csv')
+            data_dir_name = os.path.basename(dir_litdata)
+            match data_dir_name:
+                case MC.title_train:
+                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_trn)
+                case MC.title_val:
+                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_val)
+                case MC.title_test:
+                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_tst)
                 case _:
                     raise ValueError(f'Unknown directory name: {dir_litdata}')
+        
         df_sample_ids = pl.read_csv(path_sample_ids)
         print(f'Number of samples in predict_dataloader: {len(df_sample_ids)}')
         assert len(df_sample_ids) == len(pred_array)
 
-        label_names = pl.read_csv(path_label_names)['label'].to_list()
+        label_names = pl.read_csv(path_label_names)[MC.dkey.label].to_list()
         
         pred_df = pl.DataFrame(pred_array, schema=label_names)
         pred_df = df_sample_ids.hstack(pred_df)

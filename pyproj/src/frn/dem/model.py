@@ -8,13 +8,10 @@ from torch.optim.adam import Adam
 import lightning as ltn
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
 from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
+import frn.constants as MC
 
 
 torch.set_float32_matmul_precision('medium')
-
-dim_1st_linear_o_xomics = 512
-dim_1st_linear_o_cat = 2048
-dim_1st_linear_o_integrated = 1024
 
 
 class Extract1Omics(nn.Module):
@@ -27,10 +24,10 @@ class Extract1Omics(nn.Module):
             n_encoders,
         )
         self.linears = nn.Sequential(
-            nn.Linear(input_dim, dim_1st_linear_o_xomics),
-            nn.LayerNorm(dim_1st_linear_o_xomics),
-            nn.Linear(dim_1st_linear_o_xomics, 128),
-            nn.Linear(128, output_dim),
+            nn.Linear(input_dim, MC.hparam_candidates.linear_dims_single_omics[0][0]),
+            nn.LayerNorm(MC.hparam_candidates.linear_dims_single_omics[0][0]),
+            nn.Linear(MC.hparam_candidates.linear_dims_single_omics[0][0], MC.hparam_candidates.linear_dims_single_omics[0][1]),
+            nn.Linear(MC.hparam_candidates.linear_dims_single_omics[0][1], output_dim),
         )
 
     def forward(self, x):
@@ -51,10 +48,10 @@ class ExtractConcOmics(nn.Module):
             n_encoders,
         )
         self.linears = nn.Sequential(
-            nn.Linear(input_dim, dim_1st_linear_o_cat),
-            nn.LayerNorm(dim_1st_linear_o_cat),
-            nn.Linear(dim_1st_linear_o_cat, 512),
-            nn.Linear(512, output_dim),
+            nn.Linear(input_dim, MC.hparam_candidates.linear_dims_conc_omics[0][0]),
+            nn.LayerNorm(MC.hparam_candidates.linear_dims_conc_omics[0][0]),
+            nn.Linear(MC.hparam_candidates.linear_dims_conc_omics[0][0], MC.hparam_candidates.linear_dims_conc_omics[0][1]),
+            nn.Linear(MC.hparam_candidates.linear_dims_conc_omics[0][1], output_dim),
         )
     
     def forward(self, x):
@@ -76,12 +73,12 @@ class IntegrateExtractions(nn.Module):
             n_encoders,
         )
         self.linears = nn.Sequential(
-            nn.Linear(input_dim, dim_1st_linear_o_integrated),
-            nn.LayerNorm(dim_1st_linear_o_integrated),
+            nn.Linear(input_dim, MC.hparam_candidates.linear_dims_integrated[0][0]),
+            nn.LayerNorm(MC.hparam_candidates.linear_dims_integrated[0][0]),
             # nn.Mish(),
-            nn.Linear(dim_1st_linear_o_integrated, 256),
-            nn.Linear(256, 64),
-            nn.Linear(64, output_dim),
+            nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][0], MC.hparam_candidates.linear_dims_integrated[0][1]),
+            nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][1], MC.hparam_candidates.linear_dims_integrated[0][2]),
+            nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][2], output_dim),
         )
     
     def forward(self, x):
@@ -114,7 +111,7 @@ class DEM(nn.Module):
             for i in range(len(omics_dim))
         ])
 
-        integrated_input_dim = dim_1st_linear_o_cat + dim_1st_linear_o_xomics * len(omics_dim)
+        integrated_input_dim = MC.hparam_candidates.linear_dims_conc_omics[0][0] + MC.hparam_candidates.linear_dims_single_omics[0][0] * len(omics_dim)
 
         self.integrate_extractions = IntegrateExtractions(n_heads, n_encoders, integrated_input_dim, hidden_dim, output_dim, dropout)
 
@@ -201,30 +198,30 @@ class DEMLTN(ltn.LightningModule):
         return self.DEM_model(x_omics)
     
     def training_step(self, batch, batch_idx):
-        x = batch['omics']
-        y = batch['label']
-        y_pred_conc, y_pred_omics, y_pred_integrated = self.forward(x)
-        loss = self._my_loss('train', y, y_pred_conc, y_pred_omics, y_pred_integrated)
+        x = batch[MC.dkey.litdata_omics]
+        y = batch[MC.dkey.litdata_label]
+        y_pred = self.forward(x)
+        loss = self._my_loss(MC.title_train, y, y_pred)
         return loss
     
     def validation_step(self, batch, batch_idx):
-        x = batch['omics']
-        y = batch['label']
-        y_pred_conc, y_pred_omics, y_pred_integrated = self.forward(x)
-        loss = self._my_loss('val', y, y_pred_conc, y_pred_omics, y_pred_integrated)
+        x = batch[MC.dkey.litdata_omics]
+        y = batch[MC.dkey.litdata_label]
+        y_pred = self.forward(x)
+        loss = self._my_loss(MC.title_val, y, y_pred)
         return loss
     
     def test_step(self, batch, batch_idx):
-        x = batch['omics']
-        y = batch['label']
-        y_pred_conc, y_pred_omics, y_pred_integrated = self.forward(x)
-        loss = self._my_loss('test', y, y_pred_conc, y_pred_omics, y_pred_integrated)
+        x = batch[MC.dkey.litdata_omics]
+        y = batch[MC.dkey.litdata_label]
+        y_pred = self.forward(x)
+        loss = self._my_loss(MC.title_test, y, y_pred)
         return loss
 
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
-        x = batch['omics']
-        y_pred_conc, y_pred_omics, y_pred_integrated = self.forward(x)
-        return y_pred_integrated
+        x = batch[MC.dkey.litdata_omics]
+        y_pred = self.forward(x)
+        return y_pred
     
     def configure_optimizers(self):
         optimizer = Adam(self.parameters(), lr=self.learning_rate)
@@ -276,12 +273,10 @@ class DEMLTN(ltn.LightningModule):
                 self.auroc_macro = MulticlassAUROC(average="macro", num_classes=output_dim)
                 self.auroc_weighted = MulticlassAUROC(average="weighted", num_classes=output_dim)
     
-    def _my_loss(self, which_step: str, y: torch.Tensor, y_pred_conc: torch.Tensor, y_pred_omics, y_pred_integrated):
+    def _my_loss(self, which_step: str, y: torch.Tensor, y_pred: torch.Tensor):
         #!!!!!!!!!!!!!!!!!!!!!!!!!
         if self.output_dim > 1 and not self.is_regression:
             y = y.argmax(dim=-1)
-        
-        y_pred = y_pred_integrated
 
         if self.output_dim == 1:
             loss = self.loss_fn(y_pred, y)
