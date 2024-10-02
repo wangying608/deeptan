@@ -227,12 +227,9 @@ class SNP2GB(ltn.LightningModule):
             map_location: Optional[str] = None,
         ):
         super().__init__()
-        self.n_gb = len(blocks_gt)
+        self.n_blocks = len(blocks_gt)
 
-        indices_gt = []
-        for i_gb in range(self.n_gb):
-            indices_gt.append(idx_convert(blocks_gt[i_gb], snp_onehot_bits))
-        self.indices_gt = indices_gt
+        self.indices_gt = [idx_convert(block, snp_onehot_bits) for block in blocks_gt]
 
         # Load the pre-trained model
         pretrained_model = SNPReductionNet.load_from_checkpoint(
@@ -244,19 +241,17 @@ class SNP2GB(ltn.LightningModule):
         
         # Extract the sparse layer
         # self.sparse_layer = list(pretrained_model.children())[0]
-        self.sparse_layer = pretrained_model.model.sparse_layers
+        self.sparse_layers = pretrained_model.model.sparse_layers
         
         # Freeze the sparse layer
-        self.sparse_layer.requires_grad_(False)
+        self.sparse_layers.requires_grad_(False)
 
     def forward(self, x):
         # Map SNPs to genome blocks
-        g_features: list[torch.Tensor] = []
-        for i_gb in range(self.n_gb):
-            g_features.append(self.sparse_layer[i_gb](x[:, self.indices_gt[i_gb]].float()))
+        g_features = [layer(x[:, indices]) for layer, indices in zip(self.sparse_layers, self.indices_gt)]
         gblocks = torch.cat(g_features, dim=1)
         return gblocks
     
     def predict_step(self, batch, batch_idx) -> torch.Tensor:
-        return self(batch[MC.dkey.litdata_omics][0])
+        return self.forward(batch[MC.dkey.litdata_omics][0])
 

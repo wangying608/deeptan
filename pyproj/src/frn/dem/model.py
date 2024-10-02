@@ -11,7 +11,7 @@ from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score
 import frn.constants as MC
 
 
-torch.set_float32_matmul_precision('medium')
+torch.set_float32_matmul_precision(MC.default.float32_matmul_precision)
 
 
 class Extract1Omics(nn.Module):
@@ -231,7 +231,7 @@ class DEMLTN(ltn.LightningModule):
                     'scheduler': scheduler,
                     'interval': 'step',
                     'frequency': 1,
-                    'monitor': 'val_loss',
+                    'monitor': MC.title_val_loss,
                     }
                 }
     

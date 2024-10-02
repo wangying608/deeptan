@@ -295,8 +295,9 @@ def execute_s2g(
     trainer = Trainer(accelerator=accelerator, devices=avail_dev, default_root_dir=dir_log_predict, logger=False)
     
     predictions = trainer.predict(model=model4gene, datamodule=datamodule_s2g)
-
-    pred_array = np.concatenate(np.array(predictions), axis=0)
+    assert predictions is not None
+    pred_array = np.concatenate(predictions)
+    print(f"Shape of prediction results: {pred_array.shape}")
 
     # Rename index to sample_ids
     # - Prepare sample ids
@@ -373,10 +374,9 @@ class SNP2GBTransPipe:
         # For each inner fold
         for data_xx in list_ncv:
             x_outer, x_inner = data_xx
-            path_o_pred_trn = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_trn.parquet')
-            path_o_pred_val = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_val.parquet')
-            path_o_pred_tst = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_tst.parquet')
-            # path_o_pred_test_bestinner = os.path.join(self.dir_output, f'snp2gb_{x_outer}_{x_inner}_tst_bestinner.parquet')
+            path_o_pred_trn = os.path.join(self.dir_output, MC.fname.transformed_genotypes.removesuffix(".parquet") + f"_{x_outer}_{x_inner}_trn.parquet")
+            path_o_pred_val = os.path.join(self.dir_output, MC.fname.transformed_genotypes.removesuffix(".parquet") + f"_{x_outer}_{x_inner}_val.parquet")
+            path_o_pred_tst = os.path.join(self.dir_output, MC.fname.transformed_genotypes.removesuffix(".parquet") + f"_{x_outer}_{x_inner}_tst.parquet")
 
             path_mdl = self.models_bv.filter((pl.col(MC.dkey.which_outer) == x_outer) & (pl.col(MC.dkey.which_inner) == x_inner)).select(MC.dkey.ckpt_path)[0,0]
             print(f'\nUsing model {path_mdl}\n')
@@ -390,10 +390,5 @@ class SNP2GBTransPipe:
             pred_val.write_parquet(path_o_pred_val)
             pred_tst = execute_s2g(dir_test, path_gtype_pkl, path_mdl, self.dir_output, snp_onehot_bits, batch_size, accelerator)
             pred_tst.write_parquet(path_o_pred_tst)
-
-            # # Check if the model is the best for the current outer fold
-            # if self.models_bi.loc[self.models_bi['x_outer'] == x_outer]['x_inner'].values[0] == x_inner:
-            #     # Copy the predictions of test set
-            #     shutil.copy(path_o_pred_tst, path_o_pred_test_bestinner)
         
         return None

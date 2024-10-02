@@ -31,3 +31,7 @@ n_encoders = 2
 n_heads = 2
 
 snp_onehot_bits = 10
+
+# Graph
+negative_slope = 0.2
+node_feature_dim = 32
