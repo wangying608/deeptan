@@ -7,7 +7,8 @@ The processed data will be stored in litdata's format.
 
 import os
 import shutil
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Any
+from copy import deepcopy
 import itertools
 import numpy as np
 import polars as pl
@@ -15,7 +16,7 @@ from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
 import frn.constants as MC
-from frn.utils.uni import intersect_lists, read_labels, get_indices_ncv, ProcOnTrainSet, read_pkl_gv, onehot_encode_snp_mat, random_string
+from frn.utils.uni import intersect_lists, read_labels, read_omics, read_omics_xoxi, get_indices_ncv, ProcOnTrainSet, onehot_encode_snp_mat, random_string
 
 
 class MyDataset:
@@ -46,6 +47,8 @@ class MyDataset:
     - `n_fragments`: The number of fragments (= k_outer * k_inner).
     - `prepr_labels`: Whether to preprocess labels or not.
     - `prepr_omics`: Whether to preprocess omics data or not.
+
+
     """
     def __init__(
             self,
@@ -61,57 +64,111 @@ class MyDataset:
             prepr_labels: bool = True,
             prepr_omics: bool = True,
             snp_onehot_bits: int = MC.default.snp_onehot_bits,
+            which_outer_test: Optional[int] = None,
+            which_inner_val: Optional[int] = None,
         ):
         super().__init__()
+        self.reproduction_mode = reproduction_mode
+        self.paths_omics = paths_omics
+        self.path_label = path_label
+        self.col2use_in_label = col2use_in_label
 
+        self.sample_ind_for_preproc = sample_ind_for_preproc
+        self.dir_preprocessors = dir_preprocessors
+        self.prepr_labels = prepr_labels
+        self.prepr_omics = prepr_omics
+        self.snp_onehot_bits = snp_onehot_bits
+        
+        self.target_n_samples = target_n_samples
+        self.seed_resample = seed_resample
+        self.n_fragments = n_fragments
+
+        self.which_outer_test = which_outer_test
+        self.which_inner_val = which_inner_val
+
+        self.existing_omics_sample_id: Dict[str, Dict[str, List[str]]] = {}
+        self.existing_omics: Dict[str, Dict[str, pl.DataFrame]] = {}
+        
         self.omics_name = sorted(list(paths_omics.keys()))
+        self.omics_name_new: List[str] = []
+        self.omics_name_existing: List[str] = []
+        self.indices_trn: List[int] | None = None
+        self.indices_val: List[int] | None = None
+        self.indices_tst: List[int] | None = None
+
         self.key_gv = None
         self.n_omics = len(self.omics_name)
         self.omics_dfs: Dict[str, pl.DataFrame] = {}
         
-        self._pick_shared_samples_in_omics(paths_omics)
-        
-        self.sample_ids = []
+        self.sample_ids: List[str] = []
         self.labels_df = None
         self.dim_model_output = None
 
-        if path_label is not None:
-            self._pick_shared_samples_in_omics_and_labels(path_label, col2use_in_label)
-        else:
-            self.sample_ids = self.intersect_ids_in_omics
+        self.omics_data: List[np.ndarray] = []
+        self.omics_features: List[List[str]] = []
+        self.omics_dims: List[int] = []
+
+    def _setup(self):
+        self._pick_shared_samples_in_omics()
+
+        if self.path_label is not None:
+            self._pick_shared_samples_in_omics_and_labels(self.path_label, self.col2use_in_label)
         
         self.n_samples = len(self.sample_ids)
-        self._calc_n_samples2sample(target_n_samples, n_fragments)
-        
 
-        if self.n_samples_to_add > 0:
-            self._sample_new2add(seed_resample)
+        # Try reading existing (treated) omics data
+        self._read_existing_omics(self.paths_omics)
+
+        # ! Pick samples that are shared in all omics, especially for the case of existing data
+        self.recommend_index_by_existing_omics()
         
+        # !!! Resampling is not necessary when using existing data !!!
+        if len(self.omics_name_existing) < 1:
+            self._calc_n_samples2sample(self.target_n_samples, self.n_fragments)
+
+            if self.n_samples_to_add > 0:
+                self._sample_new2add(self.seed_resample)
+        
+        # Preprocess omics data
+        if self.dir_preprocessors is not None:
+            if self.prepr_labels:
+                self._proc_labels(self.sample_ind_for_preproc, self.dir_preprocessors, self.reproduction_mode)
+            if self.prepr_omics:
+                self._proc_omics(self.sample_ind_for_preproc, self.dir_preprocessors, self.reproduction_mode)
+        
+        # Preprocess genotype data
         if self.key_gv is not None:
             gv_np = self.omics_dfs[self.key_gv].drop(MC.dkey.id).to_numpy()
-            gv_np_onehot = onehot_encode_snp_mat(gv_np, snp_onehot_bits)
+            gv_np_onehot = onehot_encode_snp_mat(gv_np, self.snp_onehot_bits)
             self.omics_dfs[self.key_gv] = pl.DataFrame({MC.dkey.id: self.sample_ids}).hstack(pl.DataFrame(data=gv_np_onehot))
 
-        self._proc_omics(prepr_omics, sample_ind_for_preproc, dir_preprocessors, reproduction_mode)
-        self._proc_labels(prepr_labels, sample_ind_for_preproc, dir_preprocessors, reproduction_mode)
-
-        self.omics_data = []
-        self.omics_features = []
-        self.omics_dims = []
+        # Get omics data properties
         for i in range(self.n_omics):
             self.omics_data.append(self.omics_dfs[self.omics_name[i]].drop(MC.dkey.id).to_numpy().astype(np.float32))
             self.omics_features.append(self.omics_dfs[self.omics_name[i]].drop(MC.dkey.id).columns)
             self.omics_dims.append(self.omics_data[i].shape[1])
+
+        # # If existing omics data exist
+        # if self.existing_omics_sample_id.keys().__len__() > 0:
+        #     # Process existing omics data
+        #     if self.dir_preprocessors is not None and self.prepr_omics:
+        #         self._proc_existing_omics(self.dir_preprocessors, self.reproduction_mode)
+
+        #     # Add existing omics' information to `self.omics_features` and `self.omics_dims`
+        #     for ikey in self.existing_omics_sample_id.keys():
+        #         _tmp_df = self.existing_omics[ikey][MC.abbr_val].drop(MC.dkey.id)
+        #         self.omics_features.append(_tmp_df.columns)
+        #         self.omics_dims.append(_tmp_df.shape[1])
         
-        if dir_preprocessors is not None:
+        if self.dir_preprocessors is not None:
             # Write omics' dimensions for the initialization of the model
-            pl.DataFrame(data={MC.dkey.omics_dim: self.omics_dims}).write_csv(os.path.join(dir_preprocessors, MC.fname.predata_omics_dims))
+            pl.DataFrame(data={MC.dkey.omics_dim: self.omics_dims}).write_csv(os.path.join(self.dir_preprocessors, MC.fname.predata_omics_dims))
             # Write omics' features
             for i in range(self.n_omics):
-                pl.DataFrame(data={MC.dkey.omics_feature: self.omics_features[i]}).write_csv(os.path.join(dir_preprocessors, f"omics_features_{self.omics_name[i]}.csv"))
+                pl.DataFrame(data={MC.dkey.omics_feature: self.omics_features[i]}).write_csv(os.path.join(self.dir_preprocessors, f"omics_features_{self.omics_name[i]}.csv"))
             # Write labels' names
             if self.labels_df is not None:
-                pl.DataFrame(data={MC.dkey.label: self.labels_df.columns[1:]}).write_csv(os.path.join(dir_preprocessors, MC.fname.predata_label_names))
+                pl.DataFrame(data={MC.dkey.label: self.labels_df.columns[1:]}).write_csv(os.path.join(self.dir_preprocessors, MC.fname.predata_label_names))
         
     def __len__(self):
         return self.n_samples
@@ -121,53 +178,102 @@ class MyDataset:
         sample_id_i = self.sample_ids[index]
         if hasattr(self, "label_data"):
             label_data_i = self.label_data[index, :]
-            data_o = {MC.dkey.litdata_index: index, MC.dkey.litdata_label: label_data_i, MC.dkey.litdata_omics: omics_data_i, MC.dkey.litdata_id: sample_id_i}
+            data_o = {MC.dkey.litdata_index: index, MC.dkey.litdata_omics: deepcopy(omics_data_i), MC.dkey.litdata_id: deepcopy(sample_id_i), MC.dkey.litdata_label: deepcopy(label_data_i)}
         else:
-            data_o = {MC.dkey.litdata_index: index, MC.dkey.litdata_omics: omics_data_i, MC.dkey.litdata_id: sample_id_i}
+            data_o = {MC.dkey.litdata_index: index, MC.dkey.litdata_omics: deepcopy(omics_data_i), MC.dkey.litdata_id: deepcopy(sample_id_i)}
         return data_o
     
-    def _pick_shared_samples_in_omics(self, paths_omics: Dict[str, str]):
-        original_omics_IDs = []
-        for i in range(self.n_omics):
-            _tmp_path = paths_omics[self.omics_name[i]]
+    def _read_existing_omics(self, paths_omics: Dict[str, str], default_file_ext: str = MC.fname.data_ext):
+        for ikey in self.omics_name:
+            _tmp_path = paths_omics[ikey]
 
-            if _tmp_path.upper().endswith(".CSV"):
-                self.omics_dfs[self.omics_name[i]] = pl.read_csv(_tmp_path, schema_overrides={MC.dkey.id: pl.Utf8})
-            
-            elif _tmp_path.endswith(".pkl.gz"):
-                #
-                self.key_gv = self.omics_name[i]
-                #
-                snp_data_dict = read_pkl_gv(_tmp_path)
-                snp_matrix = snp_data_dict[MC.dkey.genotype_matrix]
-                snp_sample_ids = snp_data_dict[MC.dkey.sample_ids]
-                snp_ids = snp_data_dict[MC.dkey.snp_ids]
-                # snp_block_ids = snp_data_dict['block_ids']
-                _tmp_snp_df = pl.DataFrame(data=snp_matrix, schema=snp_ids)
-                # print(type(snp_sample_ids))
-                # print(snp_sample_ids)
-                _tmp_id = pl.DataFrame({MC.dkey.id: snp_sample_ids})
-                # print(_tmp_id.shape, _tmp_snp_df.shape)
-                _tmp_snp_df = _tmp_id.hstack(_tmp_snp_df)
-                self.omics_dfs[self.omics_name[i]] = _tmp_snp_df
-
+            if os.path.isdir(_tmp_path):
+                if self.which_inner_val is not None and self.which_outer_test is not None:
+                    _tmp_trn = read_omics_xoxi(_tmp_path, self.which_outer_test, self.which_inner_val, MC.abbr_train, default_file_ext)
+                    _tmp_val = read_omics_xoxi(_tmp_path, self.which_outer_test, self.which_inner_val, MC.abbr_val, default_file_ext)
+                    _tmp_tst = read_omics_xoxi(_tmp_path, self.which_outer_test, self.which_inner_val, MC.abbr_test, default_file_ext)
+                    _tmp_trn_sample_id = _tmp_trn.select(MC.dkey.id).to_series().to_list()
+                    _tmp_val_sample_id = _tmp_val.select(MC.dkey.id).to_series().to_list()
+                    _tmp_tst_sample_id = _tmp_tst.select(MC.dkey.id).to_series().to_list()
+                    # _tmp_sample_id = _tmp_trn_sample_id + _tmp_val_sample_id + _tmp_tst_sample_id
+                    self.existing_omics_sample_id[ikey] = {MC.abbr_train: _tmp_trn_sample_id, MC.abbr_val: _tmp_val_sample_id, MC.abbr_test: _tmp_tst_sample_id}
+                    self.existing_omics[ikey] = {MC.abbr_train: _tmp_trn, MC.abbr_val: _tmp_val, MC.abbr_test: _tmp_tst}
+                    self.omics_name_existing.append(ikey)
+                else:
+                    raise NotImplementedError
             else:
-                raise ValueError("The path to the omics data is not valid.")
-            
-            original_omics_IDs.append(self.omics_dfs[self.omics_name[i]].select(MC.dkey.id).to_series().to_list())
+                continue
+        return None
+    
+    def recommend_index_by_existing_omics(self):
+        if len(self.omics_name_existing) < 1:
+            return None
+        inters_trn, indices_trn = intersect_lists([self.sample_ids, *[self.existing_omics_sample_id[ikey][MC.abbr_train] for ikey in self.omics_name_existing]])
+        inters_val, indices_val = intersect_lists([self.sample_ids, *[self.existing_omics_sample_id[ikey][MC.abbr_val] for ikey in self.omics_name_existing]])
+        inters_tst, indices_tst = intersect_lists([self.sample_ids, *[self.existing_omics_sample_id[ikey][MC.abbr_test] for ikey in self.omics_name_existing]])
+        
+        for i in range(len(self.omics_name_existing)):
+            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_train] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_train][indices_trn[i+1], :]
+            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_val] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_val][indices_val[i+1], :]
+            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_test] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_test][indices_tst[i+1], :]
+            _tmp_part_trn = self.existing_omics[self.omics_name_existing[i]][MC.abbr_train][indices_trn[i+1], :]
+            _tmp_part_val = self.existing_omics[self.omics_name_existing[i]][MC.abbr_val][indices_val[i+1], :]
+            _tmp_part_tst = self.existing_omics[self.omics_name_existing[i]][MC.abbr_test][indices_tst[i+1], :]
+            self.omics_dfs[self.omics_name_existing[i]] = _tmp_part_trn.vstack(_tmp_part_val).vstack(_tmp_part_tst)
+
+        for i in range(len(self.omics_name_new)):
+            _tmp_part_trn = self.omics_dfs[self.omics_name_new[i]][indices_trn[0],:]
+            _tmp_part_val = self.omics_dfs[self.omics_name_new[i]][indices_val[0],:]
+            _tmp_part_tst = self.omics_dfs[self.omics_name_new[i]][indices_tst[0],:]
+            self.omics_dfs[self.omics_name_new[i]] = _tmp_part_trn.vstack(_tmp_part_val).vstack(_tmp_part_tst)
+        
+        if self.labels_df is not None:
+            self.labels_df = self.labels_df[indices_trn[0]+indices_val[0]+indices_tst[0],:]
+
+        n_id_trn = len(inters_trn)
+        n_id_val = len(inters_val)
+        n_id_tst = len(inters_tst)
+        self.indices_trn = [i for i in range(n_id_trn)]
+        self.indices_val = [i+n_id_trn for i in range(n_id_val)]
+        self.indices_tst = [i+n_id_trn+n_id_val for i in range(n_id_tst)]
+
+        self.sample_ids = inters_trn + inters_val + inters_tst
+        self.sample_ids_trn = inters_trn
+        self.sample_ids_val = inters_val
+        self.sample_ids_tst = inters_tst
+        
+        self.n_samples = len(self.sample_ids)
+        self.sample_ind_for_preproc = self.indices_trn
+
+        # return self.indices_trn, self.indices_val, self.indices_tst
+
+    def _pick_shared_samples_in_omics(self):
+        original_omics_IDs = []
+        for ikey in self.omics_name:
+            _tmp_path = self.paths_omics[ikey]
+
+            if os.path.isdir(_tmp_path):
+                continue
+            else:
+                self.omics_dfs[ikey] = read_omics(_tmp_path)
+                if _tmp_path.lower().endswith(".pkl.gz"):
+                    self.key_gv = ikey
+
+                original_omics_IDs.append(self.omics_dfs[ikey].select(MC.dkey.id).to_series().to_list())
+                self.omics_name_new.append(ikey)
         
         intersect_ids_in_omics, _indices = intersect_lists(original_omics_IDs)
-        for i in range(self.n_omics):
-            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]][_indices[i],:].sort(MC.dkey.id)
+        for i in range(len(self.omics_name_new)):
+            self.omics_dfs[self.omics_name_new[i]] = self.omics_dfs[self.omics_name_new[i]][_indices[i],:].sort(MC.dkey.id)
         
-        self.intersect_ids_in_omics = intersect_ids_in_omics
+        self.sample_ids = intersect_ids_in_omics
     
     def _pick_shared_samples_in_omics_and_labels(self, path_label: str, col2use_in_label: Optional[Union[List[str], List[int]]]):
         labels_df, dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use_in_label)
-        intersect_ids, _indices = intersect_lists([self.intersect_ids_in_omics, sample_ids_in_labels])
+        intersect_ids, _indices = intersect_lists([self.sample_ids, sample_ids_in_labels])
         
-        for i in range(self.n_omics):
-            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]][_indices[0],:].sort(MC.dkey.id)
+        for i in range(len(self.omics_name_new)):
+            self.omics_dfs[self.omics_name_new[i]] = self.omics_dfs[self.omics_name_new[i]][_indices[0],:].sort(MC.dkey.id)
         labels_df = labels_df[_indices[1],:].sort(MC.dkey.id)
 
         self.sample_ids = intersect_ids
@@ -198,35 +304,34 @@ class MyDataset:
         if self.labels_df is not None:
             self.labels_df = self.labels_df.vstack(self.labels_df[new_indices,:])
 
-        for i in range(self.n_omics):
-            self.omics_dfs[self.omics_name[i]] = self.omics_dfs[self.omics_name[i]].vstack(self.omics_dfs[self.omics_name[i]][new_indices,:])
+        for ikey in self.omics_name:
+            self.omics_dfs[ikey] = self.omics_dfs[ikey].vstack(self.omics_dfs[ikey][new_indices,:])
     
-    def _proc_omics(self, prepr_omics: bool, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: Optional[str], reproduction_mode: bool):
-        if prepr_omics:
-            if reproduction_mode and dir_preprocessors is not None:
-                if os.path.exists(dir_preprocessors):
-                    for i in range(self.n_omics):
-                        if self.key_gv is not None and self.key_gv == self.omics_name[i]:
-                            continue
-                        _loaded_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], None)
-                        _loaded_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{self.omics_name[i]}.pkl')
-                        self.omics_dfs[self.omics_name[i]] = _loaded_proc._df
-                else:
-                    raise FileNotFoundError(f"Processor files for omics data are not found in {dir_preprocessors}")
-            else:
-                for i in range(self.n_omics):
-                    if self.key_gv is not None and self.key_gv == self.omics_name[i]:
+    def _proc_omics(self, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: str, reproduction_mode: bool, n_feat2save: Optional[int] = MC.default.n_feat2save):
+        if reproduction_mode:
+            if os.path.exists(dir_preprocessors):
+                for ikey in self.omics_name:
+                    if self.key_gv is not None and self.key_gv == ikey:
                         continue
-                    _tmp_proc = ProcOnTrainSet(self.omics_dfs[self.omics_name[i]], sample_ind_for_proc)
-                    _tmp_proc.pr_impute(strategy="mean")
-                    _tmp_proc.pr_minmax()
-                    if dir_preprocessors is not None:
-                        _tmp_proc.save_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{self.omics_name[i]}.pkl')
-                    self.omics_dfs[self.omics_name[i]] = _tmp_proc._df
+                    _loaded_proc = ProcOnTrainSet(self.omics_dfs[ikey], None)
+                    _loaded_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+                    self.omics_dfs[ikey] = _loaded_proc._df
+            else:
+                raise FileNotFoundError(f"Processor files for omics data are not found in {dir_preprocessors}")
+        else:
+            for ikey in self.omics_name:
+                if self.key_gv is not None and self.key_gv == ikey:
+                    continue
+                _tmp_proc = ProcOnTrainSet(self.omics_dfs[ikey], sample_ind_for_proc, n_feat2save, self.labels_df)
+                _tmp_proc.pr_impute(strategy="mean")
+                _tmp_proc.pr_minmax()
+                _tmp_proc.pr_rf(MC.default.random_states, MC.default.n_estimators)
+                _tmp_proc.save_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+                self.omics_dfs[ikey] = _tmp_proc._df
     
-    def _proc_labels(self, prepr_labels: bool, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: Optional[str], reproduction_mode: bool):
-        if self.labels_df is not None and prepr_labels:
-            if reproduction_mode and dir_preprocessors is not None:
+    def _proc_labels(self, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: str, reproduction_mode: bool):
+        if self.labels_df is not None:
+            if reproduction_mode:
                 if os.path.exists(dir_preprocessors):
                     labels_processor = ProcOnTrainSet(self.labels_df, None)
                     labels_processor.load_run_preprocessors(dir_preprocessors, 'preprocessors_for_labels.pkl')
@@ -238,10 +343,37 @@ class MyDataset:
                 labels_processor.pr_impute(strategy="mean")
                 # labels_processor.pr_minmax()
                 labels_processor.pr_zscore()
-                if dir_preprocessors is not None:
-                    labels_processor.save_preprocessors(dir_preprocessors, 'preprocessors_for_labels.pkl')
+                labels_processor.save_preprocessors(dir_preprocessors, 'preprocessors_for_labels.pkl')
                 self.labels_df = labels_processor._df
                 self.label_data = self.labels_df.drop(MC.dkey.id).to_numpy().astype(np.float32)
+
+    # def _proc_existing_omics(self, dir_preprocessors: str, reproduction_mode: bool):
+    #     _steps = [MC.abbr_train, MC.abbr_val, MC.abbr_test]
+    #     if reproduction_mode:
+    #         if os.path.exists(dir_preprocessors):
+    #             for ikey in self.existing_omics_sample_id.keys():
+    #                 for xstep in _steps:
+    #                     _loaded_proc = ProcOnTrainSet(self.existing_omics[ikey][xstep], None)
+    #                     _loaded_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+    #                     self.existing_omics[ikey][xstep] = _loaded_proc._df
+    #         else:
+    #             raise FileNotFoundError(f"Processor files for omics data are not found in {dir_preprocessors}")
+    #     else:
+    #         for ikey in self.existing_omics_sample_id.keys():
+    #             # Fit on training data
+    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_train], None)
+    #             _tmp_proc.pr_impute(strategy="mean")
+    #             _tmp_proc.pr_minmax()
+    #             _tmp_proc.save_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+    #             self.existing_omics[ikey][MC.abbr_train] = _tmp_proc._df
+    #             # Transform validation data
+    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_val], None)
+    #             _tmp_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+    #             self.existing_omics[ikey][MC.abbr_val] = _tmp_proc._df
+    #             # Transform test data
+    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_test], None)
+    #             _tmp_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
+    #             self.existing_omics[ikey][MC.abbr_test] = _tmp_proc._df
 
 
 class OptimizeLitdataNCV:
@@ -294,6 +426,11 @@ class OptimizeLitdataNCV:
         if which_outer_inner is not None:
             if len(which_outer_inner) != 2:
                 raise ValueError("which_outer_inner must be a list of two elements")
+            self.which_outer = which_outer_inner[0]
+            self.which_inner = which_outer_inner[1]
+        else:
+            self.which_outer = None
+            self.which_inner = None
         self.fragments = self._check(seed_permut, fragment_elem_ids)
         self.n_fragments = len(self.fragments)
 
@@ -324,13 +461,17 @@ class OptimizeLitdataNCV:
                     shutil.copy(px, path_cp_pklgz)
 
         # Remove cache dir
-        os.remove(self.litdata_cache_dir)
+        shutil.rmtree(self.litdata_cache_dir)
         return None
 
     def _check(self, seed_permut: int, fragment_elem_ids: Optional[List[List[int]]]):
+        """
+        Check if fragment_elem_ids is provided or not. If not, generate random fragments.
+        """
         if fragment_elem_ids is None:
             n_fragments = int(self.k_outer * self.k_inner)
-            tmp_init = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, None, None, None, MC.default.seed_1, n_fragments, False, False)
+            tmp_init = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, None, None, None, MC.default.seed_1, n_fragments, False, False, MC.default.snp_onehot_bits, self.which_outer, self.which_inner)
+            tmp_init._setup()
 
             np.random.seed(seed_permut)
             _indices = np.random.permutation(len(tmp_init))
@@ -343,16 +484,37 @@ class OptimizeLitdataNCV:
         
         return fragments
     
-    def optimize_xoxi(self, which_outer_test: int, which_inner_valid: int):
-        fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(self.k_outer, self.k_inner, which_outer_test, which_inner_valid)
+    def optimize_xoxi(self, which_outer_test: int, which_inner_val: int):
+        dir_xoxi = os.path.join(self.output_dir, f"ncv_test_{which_outer_test}_val_{which_inner_val}")
+        os.makedirs(dir_xoxi, exist_ok=True)
+        fr_indices_trn, fr_indices_val, fr_indices_test = get_indices_ncv(self.k_outer, self.k_inner, which_outer_test, which_inner_val)
         ind_trn = np.concatenate([self.fragments[i] for i in fr_indices_trn]).tolist()
         ind_val = np.concatenate([self.fragments[i] for i in fr_indices_val]).tolist()
         ind_tst = np.concatenate([self.fragments[i] for i in fr_indices_test]).tolist()
-        dir_xoxi = os.path.join(self.output_dir, f"ncv_test_{which_outer_test}_val_{which_inner_valid}")
-        os.makedirs(dir_xoxi, exist_ok=True)
 
-        dataset_xoxi = MyDataset(False, self.paths_omics, self.path_label, self.col2use_in_labels, ind_trn, dir_xoxi, None, self.seed_resample, self.n_fragments, self.prepr_labels, self.prepr_omics)
+        dataset_xoxi = MyDataset(
+            reproduction_mode=False,
+            paths_omics=self.paths_omics,
+            path_label=self.path_label,
+            col2use_in_label=self.col2use_in_labels,
+            sample_ind_for_preproc=ind_trn,
+            dir_preprocessors=dir_xoxi,
+            target_n_samples=None,
+            seed_resample=self.seed_resample,
+            n_fragments=self.n_fragments,
+            prepr_labels=self.prepr_labels,
+            prepr_omics=self.prepr_omics,
+            which_outer_test=which_outer_test,
+            which_inner_val=which_inner_val,
+        )
+        dataset_xoxi._setup()
         sample_ids = dataset_xoxi.sample_ids
+        if dataset_xoxi.indices_trn is not None:
+            ind_trn = dataset_xoxi.indices_trn
+        if dataset_xoxi.indices_val is not None:
+            ind_val = dataset_xoxi.indices_val
+        if dataset_xoxi.indices_tst is not None:
+            ind_tst = dataset_xoxi.indices_tst
 
         # Write sample IDs
         _df_ids = pl.DataFrame(sample_ids, schema=[MC.dkey.id])
@@ -419,6 +581,7 @@ def optimize_data_external(
         prepr_labels=prepr_labels,
         prepr_omics=prepr_omics,
     )
+    dataset_ext._setup()
     optimize(
         fn = dataset_ext.__getitem__,
         inputs = range(len(dataset_ext)),

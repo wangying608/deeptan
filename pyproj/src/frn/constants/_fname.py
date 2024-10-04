@@ -18,3 +18,5 @@ predata_ids_tst = "sample_ids_tst.csv"
 predicted_labels = "predicted_labels.parquet"
 
 transformed_genotypes = "transformed_genotypes.parquet"
+
+data_ext = ".parquet"

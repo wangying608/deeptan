@@ -12,7 +12,7 @@ import gzip
 import optuna
 from typing import Any, List, Dict, Optional, Sequence, Union
 from sklearn.impute import SimpleImputer
-# from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor
 # from sklearn.feature_selection import VarianceThreshold, f_classif
 # from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler
@@ -78,6 +78,9 @@ def idx_convert(indices: List[int], onehot_bits: int = MC.default.snp_onehot_bit
 
 
 def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted: bool = True):
+    """
+    Find the shared elements between multiple lists.
+    """
     if len(lists) == 0:
         raise ValueError("The list of lists is empty.")
     elif len(lists) == 1:
@@ -109,7 +112,7 @@ def read_labels(path_label: str, col2use: Optional[List[Any]] = None):
     
     If `col2use` is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
     """
-    label_df = pl.read_csv(path_label, schema_overrides={MC.dkey.id: pl.Utf8})
+    label_df = read_omics(path_label)
     sample_ids = label_df.select(MC.dkey.id).to_series().to_list()
 
     if col2use is not None:
@@ -123,6 +126,86 @@ def read_labels(path_label: str, col2use: Optional[List[Any]] = None):
     return label_df, dim_model_output, sample_ids
 
 
+def read_omics(data_path: str):
+    """
+    Read omics data from various formats.
+    """
+    # Check if the path is a file or a folder
+    if os.path.isdir(data_path):
+        raise ValueError(f"The path {data_path} is a folder. Please provide a path to a single file.")
+    
+    # Check the file extension
+    file_ext = os.path.splitext(data_path)[-1]
+    if len(file_ext) < 2:
+        raise ValueError("The file extension is empty.")
+    else:
+        file_ext = file_ext.lower()
+    
+    match file_ext:
+        case '.csv':
+            _data = pl.read_csv(data_path, schema_overrides={MC.dkey.id: pl.Utf8})
+        case '.parquet':
+            _data = pl.read_parquet(data_path)
+        case '.gz':
+            if data_path.endswith('.pkl.gz'):
+                snp_data_dict = read_pkl_gv(data_path)
+                snp_matrix = snp_data_dict[MC.dkey.genotype_matrix]
+                snp_sample_ids = snp_data_dict[MC.dkey.sample_ids]
+                snp_ids = snp_data_dict[MC.dkey.snp_ids]
+                # snp_block_ids = snp_data_dict['block_ids']
+                _tmp_snp_df = pl.DataFrame(data=snp_matrix, schema=snp_ids)
+                # print(type(snp_sample_ids))
+                # print(snp_sample_ids)
+                _tmp_id = pl.DataFrame({MC.dkey.id: snp_sample_ids})
+                # print(_tmp_id.shape, _tmp_snp_df.shape)
+                _data = _tmp_id.hstack(_tmp_snp_df)
+            else:
+                raise ValueError("The file extension is not supported.")
+        case _:
+            raise ValueError("The file extension is not supported.")
+    
+    return _data
+
+
+def read_omics_xoxi(
+        data_path: str,
+        which_outer_test: int,
+        which_inner_val: int,
+        trnvaltst: str = MC.abbr_train,
+        file_ext: Optional[str] = None,
+        prefix: Optional[str] = None,
+    ):
+    """
+    Read processed data from a directory.
+    """
+    if not os.path.isdir(data_path):
+        raise ValueError(f"The path {data_path} is not a directory.")
+    if file_ext is None:
+        fname_ext = MC.fname.data_ext
+    else:
+        fname_ext = file_ext
+    
+    # Walk through the directory and find all files with the specified pattern
+    if prefix is None:
+        files_found = [os.path.join(dir_path, f) for dir_path, _, files in os.walk(data_path) for f in files if f.endswith(fname_ext)]
+    else:
+        files_found = [os.path.join(dir_path, f) for dir_path, _, files in os.walk(data_path) for f in files if f.startswith(prefix) and f.endswith(fname_ext)]
+    
+    if len(files_found) == 0:
+        raise ValueError(f"No files found with the specified pattern in {data_path}.")
+
+    # Search for the specific file name
+    for file_path in files_found:
+        _tmp_name = os.path.basename(file_path)
+        _tmp_name = os.path.splitext(_tmp_name)[0]
+        _tmp_name_parts = _tmp_name.split('_')
+        if _tmp_name_parts[-1] == trnvaltst:
+            if _tmp_name_parts[-2] == str(which_inner_val) and _tmp_name_parts[-3] == str(which_outer_test):
+                return read_omics(file_path)
+    
+    raise ValueError(f"No file found with the specified pattern in {data_path}.")
+
+
 class ProcOnTrainSet:
     """
     Process all data points based on the training set.
@@ -132,15 +215,17 @@ class ProcOnTrainSet:
     - Call the method `pr_xxxxx` to process the data.
     - Call the method `save_processors` to save the processors (as a dict) to a pickle file.
     """
-    def __init__(self, df_in: pl.DataFrame, ind_for_fit: Optional[List[Any]]):
+    def __init__(self, df_in: pl.DataFrame, ind_for_fit: Optional[List[Any]], n_feat2save: Optional[int] = None, df_labels: Optional[pl.DataFrame] = None):
+        self.n_feat2save = n_feat2save
         self._df = df_in
+        if df_labels is not None:
+            self._labels = df_labels
 
-        if ind_for_fit is None:
-            df_part = self._df
-        else:
-            df_part = self._df[ind_for_fit,:]
-        self.df_part = df_part.drop(MC.dkey.id).to_numpy()
-        
+        if ind_for_fit is not None:
+            self._df_part = self._df[ind_for_fit,:]
+            if df_labels is not None:
+                self._labels_part = self._labels[ind_for_fit,:]
+                
         self.preprocessors = {}
     
     def keep_preprocessors(self, x_value):
@@ -183,11 +268,15 @@ class ProcOnTrainSet:
         self._df = _tmp_df
     
     def general_preprocessor(self, _processor):
-        _processor.fit(self.df_part)
-        df_o = _processor.transform(self._df.drop(MC.dkey.id).to_numpy())
-        df_o = pl.DataFrame(df_o, schema=self._df.columns[1:])
-        df_o = pl.DataFrame({MC.dkey.id: self._df[MC.dkey.id]}).hstack(df_o)
-
+        try:
+            _processor.fit(self._df_part.drop(MC.dkey.id).to_numpy())
+            df_o = _processor.transform(self._df.drop(MC.dkey.id).to_numpy())
+            df_o = pl.DataFrame(df_o, schema=self._df.columns[1:])
+            df_o = pl.DataFrame({MC.dkey.id: self._df[MC.dkey.id]}).hstack(df_o)
+        except:
+            _processor.fit(self._df_part, self._labels_part)
+            df_o = _processor.transform(self._df)
+        
         self._df = df_o
         self.keep_preprocessors(_processor)
     
@@ -202,6 +291,57 @@ class ProcOnTrainSet:
     def pr_impute(self, strategy: str = "mean"):
         _imputer = SimpleImputer(strategy=strategy)
         self.general_preprocessor(_imputer)
+    
+    def pr_rf(self, random_states: List[int], n_estimators: int = MC.default.n_estimators):
+        if not hasattr(self, "_labels") or self.n_feat2save is None:
+            raise ValueError("The labels are not provided.")
+        
+        _selector = RFSelector(self.n_feat2save, random_states, n_estimators, n_jobs=MC.default.n_jobs_rf)
+        self.general_preprocessor(_selector)
+
+
+class RFSelector:
+    def __init__(self, n_feat2save: int, random_states: List[int], n_estimators: int, n_jobs: int = MC.default.n_jobs_rf):
+        self.n_feat2save = n_feat2save
+        self.random_states = random_states
+        self.n_estimators = n_estimators
+        self.n_jobs = n_jobs
+        self.processors = {}
+    
+    def fit(self, omics_df: pl.DataFrame, labels_df: pl.DataFrame):
+        _omics_np = omics_df.drop(MC.dkey.id).to_numpy()
+        _labels_np = labels_df.drop(MC.dkey.id).to_numpy()
+        _feat_imp = np.zeros(shape=(len(self.random_states), _omics_np.shape[1]))
+        print(f"Starting to fit RF for {len(self.random_states)} random states...")
+        for i in range(len(self.random_states)):
+            _feat_imp[i,:] = self.fit_1(_omics_np, _labels_np, self.random_states[i])
+            print(f"Finished {i+1}/{len(self.random_states)}")
+        _feat_imp_mean = np.mean(_feat_imp, axis=0)
+        _feat_imp_mean_sorted = np.argsort(_feat_imp_mean)[::-1]
+        if self.n_feat2save <= _omics_np.shape[1]:
+            _feat_to_save = _feat_imp_mean_sorted[:self.n_feat2save]
+        self.colname_to_save = omics_df.drop(MC.dkey.id).columns[_feat_to_save]
+    
+    def transform(self, X_df: pl.DataFrame):
+        _selected = X_df.select(self.colname_to_save)
+        df_o = pl.DataFrame({MC.dkey.id: X_df[MC.dkey.id]}).hstack(_selected)
+        return df_o
+
+    def keep_preprocessor(self, x_processor):
+        """
+        The key (int, ***0-based***) is automatically generated by the order of the data processor,
+        for the reproduction of data processing steps.
+        
+        - `x_processor`: the processor to be kept.
+        """
+        x_order = len(self.processors)
+        self.processors[x_order] = x_processor
+
+    def fit_1(self, X: np.ndarray, y: np.ndarray, random_state: int):
+        _processor = RandomForestRegressor(n_estimators=self.n_estimators, n_jobs=self.n_jobs, random_state=random_state)
+        _processor.fit(X, y)
+        self.keep_preprocessor(_processor)
+        return _processor.feature_importances_
 
 
 def get_indices_ncv(

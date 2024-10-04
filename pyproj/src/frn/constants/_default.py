@@ -16,6 +16,11 @@ float32_matmul_precision = "high"
 compression_alg = "zstd"
 chunk_bytes = "256MB"
 
+n_jobs_rf = -1
+n_estimators = 5000
+n_feat2save = 2000
+random_states = [i + 45 for i in range(10)]
+
 seed_1 = 42
 seed_2 = 43
 
