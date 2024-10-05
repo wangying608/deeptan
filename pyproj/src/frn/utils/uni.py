@@ -301,12 +301,13 @@ class ProcOnTrainSet:
 
 
 class RFSelector:
-    def __init__(self, n_feat2save: int, random_states: List[int], n_estimators: int, n_jobs: int = MC.default.n_jobs_rf):
+    def __init__(self, n_feat2save: int, random_states: List[int], n_estimators: int, n_jobs: int = MC.default.n_jobs_rf, save_processors: bool = False):
         self.n_feat2save = n_feat2save
         self.random_states = random_states
         self.n_estimators = n_estimators
         self.n_jobs = n_jobs
         self.processors = {}
+        self.save_processors = save_processors
     
     def fit(self, omics_df: pl.DataFrame, labels_df: pl.DataFrame):
         _omics_np = omics_df.drop(MC.dkey.id).to_numpy()
@@ -320,7 +321,10 @@ class RFSelector:
         _feat_imp_mean_sorted = np.argsort(_feat_imp_mean)[::-1]
         if self.n_feat2save <= _omics_np.shape[1]:
             _feat_to_save = _feat_imp_mean_sorted[:self.n_feat2save]
-        self.colname_to_save = omics_df.drop(MC.dkey.id).columns[_feat_to_save]
+        else:
+            _feat_to_save = _feat_imp_mean_sorted
+        _colnames = omics_df.drop(MC.dkey.id).columns
+        self.colname_to_save = [_colnames[i] for i in _feat_to_save]
     
     def transform(self, X_df: pl.DataFrame):
         _selected = X_df.select(self.colname_to_save)
@@ -340,7 +344,8 @@ class RFSelector:
     def fit_1(self, X: np.ndarray, y: np.ndarray, random_state: int):
         _processor = RandomForestRegressor(n_estimators=self.n_estimators, n_jobs=self.n_jobs, random_state=random_state)
         _processor.fit(X, y)
-        self.keep_preprocessor(_processor)
+        if self.save_processors:
+            self.keep_preprocessor(_processor)
         return _processor.feature_importances_
 
 
@@ -476,7 +481,7 @@ def train_model(
         fast_dev_run=in_dev,
         logger=logger_tr,
         log_every_n_steps=1,
-        # precision='16-mixed',
+        precision="16-mixed",
         devices=avail_dev,
         accelerator=accelerator,
         max_epochs=max_epochs,
@@ -493,7 +498,7 @@ def train_model(
     else:
         best_score = None
 
-    # trainer.test(model=model, dataloaders=datamodule)
+    trainer.test(ckpt_path="best", dataloaders=datamodule)
 
     return best_score
 

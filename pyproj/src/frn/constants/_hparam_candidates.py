@@ -14,5 +14,5 @@ hidden_dim = [256, 512, 1024]
 s2g_dense_layer_dims = [[1024, 512, 128]]
 
 linear_dims_single_omics = [[512, 128]]
-linear_dims_conc_omics = [[2048, 512]]
+linear_dims_conc_omics = [[1536, 512]]
 linear_dims_integrated = [[1024, 256, 128]]

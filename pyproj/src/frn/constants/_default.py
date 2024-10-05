@@ -24,6 +24,8 @@ random_states = [i + 45 for i in range(10)]
 seed_1 = 42
 seed_2 = 43
 
+# ltn_precision = "16-mixed"
+
 lr = 1e-4
 batch_size = 32
 max_epochs = 1000

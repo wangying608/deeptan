@@ -27,6 +27,7 @@ class Extract1Omics(nn.Module):
             nn.Linear(input_dim, MC.hparam_candidates.linear_dims_single_omics[0][0]),
             nn.LayerNorm(MC.hparam_candidates.linear_dims_single_omics[0][0]),
             nn.Linear(MC.hparam_candidates.linear_dims_single_omics[0][0], MC.hparam_candidates.linear_dims_single_omics[0][1]),
+            nn.Mish(),
             nn.Linear(MC.hparam_candidates.linear_dims_single_omics[0][1], output_dim),
         )
 
@@ -49,6 +50,7 @@ class ExtractConcOmics(nn.Module):
         )
         self.linears = nn.Sequential(
             nn.Linear(input_dim, MC.hparam_candidates.linear_dims_conc_omics[0][0]),
+            nn.Mish(),
             nn.LayerNorm(MC.hparam_candidates.linear_dims_conc_omics[0][0]),
             nn.Linear(MC.hparam_candidates.linear_dims_conc_omics[0][0], MC.hparam_candidates.linear_dims_conc_omics[0][1]),
             nn.Linear(MC.hparam_candidates.linear_dims_conc_omics[0][1], output_dim),
@@ -75,8 +77,8 @@ class IntegrateExtractions(nn.Module):
         self.linears = nn.Sequential(
             nn.Linear(input_dim, MC.hparam_candidates.linear_dims_integrated[0][0]),
             nn.LayerNorm(MC.hparam_candidates.linear_dims_integrated[0][0]),
-            # nn.Mish(),
             nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][0], MC.hparam_candidates.linear_dims_integrated[0][1]),
+            nn.Mish(),
             nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][1], MC.hparam_candidates.linear_dims_integrated[0][2]),
             nn.Linear(MC.hparam_candidates.linear_dims_integrated[0][2], output_dim),
         )

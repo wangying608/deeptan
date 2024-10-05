@@ -86,7 +86,7 @@ class DEMFit:
             MC.dkey.hidden_dim: hidden_dim,
             MC.dkey.lr: learning_rate,
             MC.dkey.dropout: dropout,
-            MC.dkey.dropout: patience,
+            MC.dkey.patience: patience,
             MC.dkey.max_epochs: max_epochs,
             MC.dkey.min_epochs: min_epochs,
             MC.dkey.bsize: batch_size,

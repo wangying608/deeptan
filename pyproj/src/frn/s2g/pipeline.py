@@ -331,7 +331,7 @@ class SNP2GBTransPipe:
     ):
         self.dir_log = dir_log
         self.dir_output = dir_output
-        os.makedirs(self.dir_output, exist_ok=False)
+        os.makedirs(self.dir_output, exist_ok=True)
         self.overwrite_collected_log = overwrite_collected_log
 
     def collect_models(self):
