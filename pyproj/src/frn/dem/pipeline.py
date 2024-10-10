@@ -15,9 +15,6 @@ import frn.constants as MC
 
 
 class DEMFit:
-    r"""
-    DEM model training with hyperparameter optimization using Optuna.
-    """
     def __init__(
             self,
             log_dir: str,
@@ -39,8 +36,48 @@ class DEMFit:
             min_epochs: int = MC.default.min_epochs,
             batch_size: int = MC.default.batch_size,
         ):
-        """
-        Initialize DEM model training with given hyperparameters and input/output paths.
+        r"""DEM model training with hyperparameter optimization
+        
+        Args:
+            log_dir: Directory for saving the training logs and models' checkpoints.
+
+            log_name: Name of the training log.
+
+            litdata_dir: Directory for loading the nested cross-validation data.
+
+            which_outer_testset: Index of the outer test set.
+
+            which_inner_valset: Index of the inner validation set.
+
+            regression: Whether the task is regression or classification.
+
+            devices: Devices to use.
+                Default: "auto".
+            
+            accelerator: Accelerator to use.
+                Default: "auto".
+            
+            n_jobs: Number of jobs to use for parallel hyperparameter optimization.
+                Default: 1.
+            
+            n_heads: Number of heads in the attention mechanism.
+
+            n_encoders: Number of Transformer Encoders.
+
+            hidden_dim: Hidden dimension in the Transformer Encoder.
+
+            learning_rate: Learning rate.
+
+            dropout: Dropout rate.
+
+            patience: Patience for early stopping.
+
+            max_epochs: Maximum number of epochs.
+
+            min_epochs: Minimum number of epochs.
+
+            batch_size: Batch size.
+        
         """
         self.log_dir = log_dir
         self.log_name = log_name
@@ -77,8 +114,7 @@ class DEMFit:
             min_epochs: int,
             batch_size: int,
         ):
-        """
-        Generate a dictionary of hyperparameters for DEM model training.
+        r"""Generate a dictionary of hyperparameters for DEM model training.
         """
         hparams = {
             MC.dkey.num_heads: n_heads,
@@ -99,8 +135,7 @@ class DEMFit:
             devices: Union[List[int], str, int],
             accelerator: str,
         ):
-        """
-        Train DEM model with given hyperparameters and input/output paths.
+        r"""Train DEM model with given hyperparameters and input/output paths.
         """
         _model = DEMLTN(
             omics_dim=self.omics_dims,
@@ -130,8 +165,7 @@ class DEMFit:
         return val_loss_min
 
     def manual_train(self):
-        """
-        Train DEM model with manually specified hyperparameters.
+        r"""Train DEM model with manually specified hyperparameters.
         """
         val_loss_min = self.dem_fit(
             hparams = self.hparams,
@@ -141,8 +175,7 @@ class DEMFit:
         return val_loss_min
 
     def objective(self, trial: optuna.Trial) -> float:
-        """
-        Objective function for DEM model training with Optuna.
+        r"""Objective function for DEM model training with Optuna.
         """
         print("Trial number:", trial.number)
         if self.n_jobs > 1:
@@ -180,8 +213,7 @@ class DEMFit:
             storage: str = MC.default.optuna_db,
             gc_after_trial: bool = True,
         ):
-        """
-        Optimize hyperparameters of DEM model with Optuna.
+        r"""Optimize hyperparameters of DEM model with Optuna.
         """
         study = optuna.create_study(
             storage = storage,
@@ -193,9 +225,6 @@ class DEMFit:
 
 
 class DEMFitPipe:
-    r"""
-    DEM model training pipeline with hyperparameter optimization using Optuna.
-    """
     def __init__(
             self,
             litdata_dir: str,
@@ -206,9 +235,36 @@ class DEMFitPipe:
             accelerator: str = MC.default.accelerator,
             n_jobs: int = MC.default.n_jobs,
             n_trials: Optional[int] = MC.default.n_trials,
-        ):
-        """
-        Initialize DEM model training pipeline.
+        ) -> None:
+        r"""DEM model training pipeline with hyperparameter trials.
+        
+        Args:
+            litdata_dir: Path to the directory containing the nested cross-validation litdata.
+
+            list_ncv: List of lists containing the indices of the outer and inner folds for each data slice.
+
+            log_dir: Path to the directory where the training logs and checkpoints will be saved.
+
+            regression: Whether the task is regression or classification.
+
+            devices: Device(s) to use.
+                Default: ``"auto"``.
+            
+            accelerator: Accelerator to use.
+                Default: ``"auto"``.
+            
+            n_jobs: Number of jobs to use for parallelization.
+                Default: ``1``.
+            
+            n_trials: Number of trials to run for hyperparameter optimization.
+                Default: ``10``.
+        
+        Usage:
+        
+            >>> from frn.dem.pipeline import DEMFitPipe
+            >>> _pipe = DEMFitPipe(...)
+            >>> _pipe.train_pipeline()
+        
         """
         # Unique tag for the training log directory
         tag_str = time_string() + '_' + random_string()
@@ -226,8 +282,7 @@ class DEMFitPipe:
         self.n_trials = n_trials
         
     def train_pipeline(self):
-        """
-        Train DEM model for each fold in nested cross-validation.
+        r"""Train DEM model for each fold in nested cross-validation.
         """
         # Storage for optuna trials in self.log_dir
         path_storage = 'sqlite:///' + self.uniq_logdir + '/optuna.db'
@@ -268,64 +323,79 @@ class DEMFitPipe:
 
 
 class DEMPredict:
-    r"""
-    DEM model prediction for NCV or not.
-    """
-    def __init__(
-            self,
-            dir_fit_logs: str,
-            dir_output: str,
-            overwrite_collected_log: bool = False,
-        ):
-        self.dir_logs = dir_fit_logs
-        self.dir_output = dir_output
-        os.makedirs(self.dir_output, exist_ok=True)
-        self.overwrite_collected_log = overwrite_collected_log
+    def __init__(self):
+        r"""Prediction pipeline for DEM model.
+        """
 
     def runs(
             self,
-            dir_litdata: str,
+            litdata_dir: str,
+            dir_fit_logs: str,
+            dir_output: str,
             list_ncv: Optional[List[List[int]]] = None,
+            overwrite_collected_log: bool = False,
             accelerator: str = MC.default.accelerator,
             batch_size: int = MC.default.batch_size,
             n_workers: int = MC.default.n_workers,
         ):
+        r"""Run prediction for each fold in nested cross-validation.
+
+        Args:
+            litdata_dir: Path to the directory containing the nested cross-validation litdata.
+
+            dir_fit_logs: Path to the directory containing the training logs.
+
+            dir_output: Path to the directory where the prediction results will be saved.
+
+            list_ncv: List of lists containing the indices of the outer and inner folds for each data slice.
+
+            overwrite_collected_log: Whether to overwrite the collected log file.
+
+            accelerator: Accelerator to use.
+                Default: ``"auto"``.
+            
+            batch_size: Batch size to use.
+                Default: ``32``.
+            
+            n_workers: Number of workers to use for dataloader.
+                Default: ``0``.
+        
         """
-        Predict for NCV or not.
-        """
+        os.makedirs(dir_output, exist_ok=True)
         if not hasattr(self, 'models_bv'):
-            self.collect_models()
+            self.collect_models(dir_fit_logs, dir_output, overwrite_collected_log)
         
         if list_ncv is None:
             # Take the best model's path overall by searching the line min `val_loss` in models_bi.
             path_best_model = self.models_bi.filter(pl.col(MC.dkey.val_loss) == self.models_bi.select(MC.dkey.val_loss)).min().select(MC.dkey.ckpt_path)[0,0]
-            output = self.predict(dir_litdata, path_best_model, self.dir_output, batch_size, accelerator, n_workers)
-            output.write_parquet(os.path.join(self.dir_output, MC.fname.predicted_labels))
+            output = self.predict(litdata_dir, path_best_model, dir_output, batch_size, accelerator, n_workers)
+            output.write_parquet(os.path.join(dir_output, MC.fname.predicted_labels))
 
             return None
         
         # Else for each inner fold
         for data_xx in list_ncv:
-            self.run_xo_xi(data_xx[0], data_xx[1], dir_litdata, batch_size, accelerator, n_workers)
+            self.run_xo_xi(data_xx[0], data_xx[1], litdata_dir, dir_output, batch_size, accelerator, n_workers)
         
         return None
     
-    def run_xo_xi(self, x_outer: int, x_inner: int, dir_litdata: str, batch_size: int, accelerator: str = MC.default.accelerator, n_workers: int = MC.default.n_workers):
-        path_o_pred_trn = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_trn.parquet'))
-        path_o_pred_val = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_val.parquet'))
-        path_o_pred_tst = os.path.join(self.dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_tst.parquet'))
+    def run_xo_xi(self, x_outer: int, x_inner: int, litdata_dir: str, dir_output: str, batch_size: int, accelerator: str = MC.default.accelerator, n_workers: int = MC.default.n_workers):
+        os.makedirs(dir_output, exist_ok=True)
+        path_o_pred_trn = os.path.join(dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_trn.parquet'))
+        path_o_pred_val = os.path.join(dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_val.parquet'))
+        path_o_pred_tst = os.path.join(dir_output, MC.fname.predicted_labels.replace(".parquet", f'_{x_outer}_{x_inner}_tst.parquet'))
 
         path_mdl = self.models_bv.filter((pl.col(MC.dkey.which_outer) == x_outer) & (pl.col(MC.dkey.which_inner) == x_inner)).select(MC.dkey.ckpt_path)[0,0]
         print(f'\nUsing model {path_mdl}\n')
 
-        ncv_data = MyDataModule4Train(dir_litdata, x_outer, x_inner, batch_size, n_workers)
+        ncv_data = MyDataModule4Train(litdata_dir, x_outer, x_inner, batch_size, n_workers)
         dir_train, dir_valid, dir_test = ncv_data.get_dir_ncv_litdata()
 
-        pred_trn = self.predict(dir_train, path_mdl, self.dir_output, batch_size, accelerator, n_workers)
+        pred_trn = self.predict(dir_train, path_mdl, dir_output, batch_size, accelerator, n_workers)
         pred_trn.write_parquet(path_o_pred_trn)
-        pred_val = self.predict(dir_valid, path_mdl, self.dir_output, batch_size, accelerator, n_workers)
+        pred_val = self.predict(dir_valid, path_mdl, dir_output, batch_size, accelerator, n_workers)
         pred_val.write_parquet(path_o_pred_val)
-        pred_tst = self.predict(dir_test, path_mdl, self.dir_output, batch_size, accelerator, n_workers)
+        pred_tst = self.predict(dir_test, path_mdl, dir_output, batch_size, accelerator, n_workers)
         pred_tst.write_parquet(path_o_pred_tst)
         print(f'\nPredicted labels saved to {path_o_pred_trn}, {path_o_pred_val}, {path_o_pred_tst}\n')
 
@@ -337,59 +407,69 @@ class DEMPredict:
         self._model.eval()
         self._model.freeze()
 
-    def collect_models(self):
+    def collect_models(self, dir_fit_logs: str, dir_output: str, overwrite_collected_log: bool = False):
+        r"""Collect trained models for each fold in nested cross-validation.
         """
-        Collect trained models for each fold in nested cross-validation.
-        """
-        collector = CollectFitLog(self.dir_logs)
-        models_bv, models_bi = collector.get_df_csv(self.dir_output, self.overwrite_collected_log)
+        os.makedirs(dir_output, exist_ok=True)
+        collector = CollectFitLog(dir_fit_logs)
+        models_bv, models_bi = collector.get_df_csv(dir_output, overwrite_collected_log)
         self.models_bv = models_bv
         self.models_bi = models_bi
 
     def predict(
             self,
-            dir_litdata: str,
+            litdata_dir: str,
             path_model_ckpt: str,
-            dir_log_predict: str,
+            dir_log_predict: Optional[str],
             batch_size: int = MC.default.batch_size,
             accelerator: str = MC.default.accelerator,
             n_workers: int = MC.default.n_workers,
         ):
+        r"""Predict phenotypes from omics data using a trained DEM model.
+
+        Args:
+            litdata_dir: Path to the directory containing the litdata.
+                The directory should have a parent directory which is for nested cross-validation (e.g., ``ncv_test_0_val_0``).
+
+            path_model_ckpt: Path to the trained DEM model.
+
+            dir_log_predict: The directory to save the prediction logs.
+        
         """
-        Predict phenotypes from omics data using a trained DEM model.
-        """
-        datamodule_ = MyDataModule4Uni(dir_litdata, batch_size, n_workers)
+        parent_dir = os.path.dirname(litdata_dir)
+        datamodule_ = MyDataModule4Uni(litdata_dir, batch_size, n_workers)
         datamodule_.setup()
 
-        self.load_model(path_model_ckpt)
+        if not hasattr(self, "_model"):
+            self.load_model(path_model_ckpt)
 
         available_devices = get_avail_nvgpu()
 
         trainer = Trainer(accelerator=accelerator, devices=available_devices, default_root_dir=dir_log_predict, logger=False)
 
         predictions = trainer.predict(model=self._model, datamodule=datamodule_)
-        pred_array = np.concatenate(np.array(predictions), axis=0)
+        assert predictions is not None
+        pred_array = np.concatenate(predictions)
+        print(f"Shape of prediction results: {pred_array.shape}")
 
         # Output
 
-        path_sample_ids = os.path.join(dir_litdata, MC.fname.predata_ids)
-        path_label_names = os.path.join(dir_litdata, MC.fname.predata_label_names)
+        path_sample_ids = os.path.join(parent_dir, MC.fname.predata_ids)
+        path_label_names = os.path.join(parent_dir, MC.fname.predata_label_names)
 
-        if not os.path.exists(path_sample_ids):
-            data_dir_name = os.path.basename(dir_litdata)
-            match data_dir_name:
-                case MC.title_train:
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_trn)
-                case MC.title_val:
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_val)
-                case MC.title_test:
-                    path_sample_ids = os.path.join(os.path.dirname(dir_litdata), MC.fname.predata_ids_tst)
-                case _:
-                    raise ValueError(f'Unknown directory name: {dir_litdata}')
+        data_dir_name = os.path.basename(litdata_dir)
+        if data_dir_name.startswith(MC.title_train):
+            path_sample_ids = os.path.join(parent_dir, MC.fname.predata_ids_trn)
+        elif data_dir_name.startswith(MC.title_val):
+            path_sample_ids = os.path.join(parent_dir, MC.fname.predata_ids_val)
+        elif data_dir_name.startswith(MC.title_test):
+            path_sample_ids = os.path.join(parent_dir, MC.fname.predata_ids_tst)
+        else:
+            raise ValueError(f'Unknown directory name: {litdata_dir}')
         
         df_sample_ids = pl.read_csv(path_sample_ids)
-        print(f'Number of samples in predict_dataloader: {len(df_sample_ids)}')
         assert len(df_sample_ids) == len(pred_array)
+        print(f'Number of samples in predict_dataloader: {len(df_sample_ids)}')
 
         label_names = pl.read_csv(path_label_names)[MC.dkey.label].to_list()
         

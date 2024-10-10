@@ -1,4 +1,4 @@
-"""
+r"""
 Default values.
 """
 
@@ -18,7 +18,7 @@ chunk_bytes = "256MB"
 
 n_jobs_rf = -1
 n_estimators = 5000
-n_feat2save = 2000
+n_feat2save = 1000
 random_states = [i + 45 for i in range(10)]
 
 seed_1 = 42
@@ -33,7 +33,7 @@ min_epochs = 20
 patience = 20
 dropout = 0.4
 
-hidden_dim = 1024
+hidden_dim = 512
 n_encoders = 2
 n_heads = 2
 

@@ -61,13 +61,7 @@ class SNPReductionNetModel(nn.Module):
         return self.dense_layers(gblocks)
 
 
-# from frn.s2g.model_sparse import SNPReductionNetModel
-
-
 class SNPReductionNet(ltn.LightningModule):
-    """
-    A PyTorch Lightning module for SNP reduction and phenotype prediction.
-    """
     def __init__(
             self,
             output_dim: int,
@@ -77,6 +71,8 @@ class SNPReductionNet(ltn.LightningModule):
             learning_rate: float,
             regression: bool,
         ):
+        r"""A PyTorch Lightning module for SNP reduction and phenotype prediction.
+        """
         super().__init__()
         self.save_hyperparameters()
         self.output_dim = output_dim
@@ -216,9 +212,6 @@ class SNPReductionNet(ltn.LightningModule):
 
 
 class SNP2GB(ltn.LightningModule):
-    """
-    Transform SNPs to genome blocks using a pre-trained model.
-    """
     def __init__(
             self,
             path_pretrained_model: str,
@@ -226,6 +219,8 @@ class SNP2GB(ltn.LightningModule):
             snp_onehot_bits: int,
             map_location: Optional[str] = None,
         ):
+        r"""Transform SNPs to genome blocks using a pre-trained model.
+        """
         super().__init__()
         self.n_blocks = len(blocks_gt)
 

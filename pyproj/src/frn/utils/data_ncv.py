@@ -7,7 +7,7 @@ The processed data will be stored in litdata's format.
 
 import os
 import shutil
-from typing import Optional, Union, List, Dict, Any
+from typing import Optional, Union, List, Dict, Tuple, Any
 from copy import deepcopy
 import itertools
 import numpy as np
@@ -15,48 +15,19 @@ import polars as pl
 from litdata import optimize, StreamingDataLoader, StreamingDataset
 from lightning import LightningDataModule
 from torch import Tensor
+from torch.utils.data import Dataset, DataLoader
 import frn.constants as MC
 from frn.utils.uni import intersect_lists, read_labels, read_omics, read_omics_xoxi, get_indices_ncv, ProcOnTrainSet, onehot_encode_snp_mat, random_string
 
 
 class MyDataset:
-    """
-    Read data for litdata optimization.
-
-    If you have labels (phenotypes) and want to use them,
-    the input labels (phenotypes) are expected as follows:
-    - For **REGRESSION** task
-        + Please keep original values that are not preprocessed.
-        + If you have MULTIPLE traits, please set different columns names in CSV file.
-        + ***In our pipeline, we standardize/normalize the data after splitting to avoid data leakage.***
-        + *The method and parameters of standardization/normalization are kept the same as those in training data.*
-    - For **CLASSIFICATION** task
-        + Please transform labels by one-hot encoder ***MANUALLY BEFORE input***.
-        + The length of one-hot vectors is recommended to be **n_categories + 1** for **UNPRECEDENTED labels**.
-        + If you have MULTIPLE traits, please **concatenate** one-hot encoded matrix along the horizontal axis before input.
-
-    *Parameters*:
-    - `reproduction_mode`: whether to use the processors fitted before. Please provide `dir_preprocessors` if `reproduction_mode` is `True`.
-    - `paths_omics`: the paths to omics data. Commonly, it is a `Dict` of paths to multiple `CSV` files. ***For SNP data, it is a path to a `PKL` file.***
-    - `path_label`: The path to label data (a `CSV` file).
-    - `col2use_in_label`: The columns to use in label data.
-    - `sample_ind_for_preproc`: The indices for selecting samples for preprocessors fitting. ***If it is `None`, all samples are used.***
-    - `dir_preprocessors`: The directory used to save data processors that fitted on training data. ***If it is `None`, preprocessing is not performed.***
-    - `target_n_samples`: The target sample size for expanding the dataset through random sampling.
-    - `seed_resample`: The random seed for sampling new samples.
-    - `n_fragments`: The number of fragments (= k_outer * k_inner).
-    - `prepr_labels`: Whether to preprocess labels or not.
-    - `prepr_omics`: Whether to preprocess omics data or not.
-
-
-    """
     def __init__(
             self,
             reproduction_mode: bool,
             paths_omics: Dict[str, str],
             path_label: Optional[str] = None,
             col2use_in_label: Optional[Union[List[str], List[int]]] = None,
-            sample_ind_for_preproc: Optional[List] = None,
+            sample_ind_for_preproc: Optional[List[int]] = None,
             dir_preprocessors: Optional[str] = None,
             target_n_samples: Optional[int] = None,
             seed_resample: int = MC.default.seed_1,
@@ -66,7 +37,71 @@ class MyDataset:
             snp_onehot_bits: int = MC.default.snp_onehot_bits,
             which_outer_test: Optional[int] = None,
             which_inner_val: Optional[int] = None,
-        ):
+        ) -> None:
+        r"""Read data for litdata optimization. Preprocessing is optional.
+
+        If you have labels (phenotypes) and want to use them,
+        the input labels (phenotypes) are expected as follows:
+        - For **REGRESSION** task
+            + Please keep original values that are not preprocessed.
+            + If you have MULTIPLE traits, please set different columns names in CSV file.
+            + The pipeline ***standardize/normalize data AFTER splitting*** to ***avoid data leakage.***
+            + The method and parameters of standardization/normalization are kept the same as those in training data.
+        - For **CLASSIFICATION** task
+            + Please transform labels by one-hot encoder ***MANUALLY BEFORE input***.
+            + The length of one-hot vectors is recommended to be **n_categories + 1** for **UNPRECEDENTED labels**.
+            + If you have MULTIPLE traits, please **concatenate** one-hot encoded matrix along the horizontal axis before input.
+
+        Args:
+            reproduction_mode: Whether to use existing processors.
+                Please provide ``dir_preprocessors`` if ``reproduction_mode`` is ``True``.
+            
+            paths_omics: The ``Dict`` ``{name: path}`` of paths to multiple ``.csv`` or ``.parquet`` files or directories. For genotypes, it is a path to a ``.pkl.gz`` file.
+                If some paths are directories, the files inside will be read as existing data, and ``target_n_samples`` will be ignored.
+
+            path_label: The path to label data (a ``.csv`` or ``.parquet`` file).
+                If it is `None`, no labels(phenotypes) are provided.
+
+            col2use_in_label: The columns to use in label data.
+                If it is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+                If it is `None`, all columns are used.
+            
+            sample_ind_for_preproc: The indices for selecting samples for preprocessors fitting.
+                If it is `None`, all samples are used.
+                It is ignored when existing data are used.
+
+            dir_preprocessors: The directory used to save data processors that fitted on training data.
+                If it is `None`, preprocessing is not performed.
+            
+            target_n_samples: The target sample size for expanding the dataset through random sampling.
+                Resampling is not performed when existing data are used.
+
+            seed_resample: The random seed for sampling new samples.
+                Default: ``MC.default.seed_1``.
+
+            n_fragments: The number of fragments (= k_outer * k_inner).
+                Default: ``1``.
+
+            prepr_labels: Whether to preprocess labels or not.
+                Default: ``True``.
+
+            prepr_omics: Whether to preprocess omics data or not.
+                Default: ``True``.
+
+            snp_onehot_bits: The number of bits for one-hot encoding SNPs.
+                Default: ``MC.default.snp_onehot_bits``.
+
+            which_outer_test: The index of outer test set. It is used for reading existing data.
+
+            which_inner_val: The index of inner validation set. It is used for reading existing data.
+
+        Usage:
+
+            >>> from frn.utils.data_ncv import MyDataset
+            >>> _dataset = MyDataset(...)
+            >>> _dataset._setup()
+            
+        """
         super().__init__()
         self.reproduction_mode = reproduction_mode
         self.paths_omics = paths_omics
@@ -147,25 +182,13 @@ class MyDataset:
             self.omics_data.append(self.omics_dfs[self.omics_name[i]].drop(MC.dkey.id).to_numpy().astype(np.float32))
             self.omics_features.append(self.omics_dfs[self.omics_name[i]].drop(MC.dkey.id).columns)
             self.omics_dims.append(self.omics_data[i].shape[1])
-
-        # # If existing omics data exist
-        # if self.existing_omics_sample_id.keys().__len__() > 0:
-        #     # Process existing omics data
-        #     if self.dir_preprocessors is not None and self.prepr_omics:
-        #         self._proc_existing_omics(self.dir_preprocessors, self.reproduction_mode)
-
-        #     # Add existing omics' information to `self.omics_features` and `self.omics_dims`
-        #     for ikey in self.existing_omics_sample_id.keys():
-        #         _tmp_df = self.existing_omics[ikey][MC.abbr_val].drop(MC.dkey.id)
-        #         self.omics_features.append(_tmp_df.columns)
-        #         self.omics_dims.append(_tmp_df.shape[1])
         
         if self.dir_preprocessors is not None:
             # Write omics' dimensions for the initialization of the model
             pl.DataFrame(data={MC.dkey.omics_dim: self.omics_dims}).write_csv(os.path.join(self.dir_preprocessors, MC.fname.predata_omics_dims))
             # Write omics' features
             for i in range(self.n_omics):
-                pl.DataFrame(data={MC.dkey.omics_feature: self.omics_features[i]}).write_csv(os.path.join(self.dir_preprocessors, f"omics_features_{self.omics_name[i]}.csv"))
+                pl.DataFrame(data={MC.dkey.omics_feature: self.omics_features[i]}).write_csv(os.path.join(self.dir_preprocessors, f"{MC.fname.predata_omics_features_prefix}_{self.omics_name[i]}.csv"))
             # Write labels' names
             if self.labels_df is not None:
                 pl.DataFrame(data={MC.dkey.label: self.labels_df.columns[1:]}).write_csv(os.path.join(self.dir_preprocessors, MC.fname.predata_label_names))
@@ -184,6 +207,9 @@ class MyDataset:
         return data_o
     
     def _read_existing_omics(self, paths_omics: Dict[str, str], default_file_ext: str = MC.fname.data_ext):
+        r"""Read existing omics data from the given paths.
+        If the path is a directory, then the data will be read from the files that names could be recognized by the function ``read_omics_xoxi``.
+        """
         for ikey in self.omics_name:
             _tmp_path = paths_omics[ikey]
 
@@ -195,7 +221,6 @@ class MyDataset:
                     _tmp_trn_sample_id = _tmp_trn.select(MC.dkey.id).to_series().to_list()
                     _tmp_val_sample_id = _tmp_val.select(MC.dkey.id).to_series().to_list()
                     _tmp_tst_sample_id = _tmp_tst.select(MC.dkey.id).to_series().to_list()
-                    # _tmp_sample_id = _tmp_trn_sample_id + _tmp_val_sample_id + _tmp_tst_sample_id
                     self.existing_omics_sample_id[ikey] = {MC.abbr_train: _tmp_trn_sample_id, MC.abbr_val: _tmp_val_sample_id, MC.abbr_test: _tmp_tst_sample_id}
                     self.existing_omics[ikey] = {MC.abbr_train: _tmp_trn, MC.abbr_val: _tmp_val, MC.abbr_test: _tmp_tst}
                     self.omics_name_existing.append(ikey)
@@ -206,6 +231,8 @@ class MyDataset:
         return None
     
     def recommend_index_by_existing_omics(self):
+        r"""Recommend indices for the samples that are shared in all omics if existing data is used.
+        """
         if len(self.omics_name_existing) < 1:
             return None
         inters_trn, indices_trn = intersect_lists([self.sample_ids, *[self.existing_omics_sample_id[ikey][MC.abbr_train] for ikey in self.omics_name_existing]])
@@ -213,9 +240,6 @@ class MyDataset:
         inters_tst, indices_tst = intersect_lists([self.sample_ids, *[self.existing_omics_sample_id[ikey][MC.abbr_test] for ikey in self.omics_name_existing]])
         
         for i in range(len(self.omics_name_existing)):
-            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_train] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_train][indices_trn[i+1], :]
-            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_val] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_val][indices_val[i+1], :]
-            # self.existing_omics[self.omics_name_existing[i]][MC.abbr_test] = self.existing_omics[self.omics_name_existing[i]][MC.abbr_test][indices_tst[i+1], :]
             _tmp_part_trn = self.existing_omics[self.omics_name_existing[i]][MC.abbr_train][indices_trn[i+1], :]
             _tmp_part_val = self.existing_omics[self.omics_name_existing[i]][MC.abbr_val][indices_val[i+1], :]
             _tmp_part_tst = self.existing_omics[self.omics_name_existing[i]][MC.abbr_test][indices_tst[i+1], :]
@@ -245,9 +269,9 @@ class MyDataset:
         self.n_samples = len(self.sample_ids)
         self.sample_ind_for_preproc = self.indices_trn
 
-        # return self.indices_trn, self.indices_val, self.indices_tst
-
     def _pick_shared_samples_in_omics(self):
+        r"""Pick samples that are shared between omics.
+        """
         original_omics_IDs = []
         for ikey in self.omics_name:
             _tmp_path = self.paths_omics[ikey]
@@ -269,6 +293,8 @@ class MyDataset:
         self.sample_ids = intersect_ids_in_omics
     
     def _pick_shared_samples_in_omics_and_labels(self, path_label: str, col2use_in_label: Optional[Union[List[str], List[int]]]):
+        r"""Pick samples that are shared between omics and labels.
+        """
         labels_df, dim_model_output, sample_ids_in_labels = read_labels(path_label, col2use_in_label)
         intersect_ids, _indices = intersect_lists([self.sample_ids, sample_ids_in_labels])
         
@@ -281,6 +307,8 @@ class MyDataset:
         self.model_output_dim = dim_model_output
     
     def _calc_n_samples2sample(self, target_n_samples: Optional[int], n_fragments: int):
+        r"""Calculate the number of samples to add to the dataset.
+        """
         n_samples_to_add = 0
         match target_n_samples:
             case None:
@@ -295,7 +323,8 @@ class MyDataset:
         self.n_samples_target = self.n_samples + n_samples_to_add
     
     def _sample_new2add(self, seed_resample: int):
-        # Generate random indices to add
+        r"""Generate new samples by resampling existing samples.
+        """
         np.random.seed(seed_resample)
         new_indices: list[int] = np.random.choice(self.n_samples, self.n_samples_to_add, replace=True).tolist()
         self.n_samples = self.n_samples_target
@@ -308,6 +337,8 @@ class MyDataset:
             self.omics_dfs[ikey] = self.omics_dfs[ikey].vstack(self.omics_dfs[ikey][new_indices,:])
     
     def _proc_omics(self, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: str, reproduction_mode: bool, n_feat2save: Optional[int] = MC.default.n_feat2save):
+        r"""Preprocess omics data.
+        """
         if reproduction_mode:
             if os.path.exists(dir_preprocessors):
                 for ikey in self.omics_name:
@@ -330,6 +361,8 @@ class MyDataset:
                 self.omics_dfs[ikey] = _tmp_proc._df
     
     def _proc_labels(self, sample_ind_for_proc: Optional[List[int]], dir_preprocessors: str, reproduction_mode: bool):
+        r"""Preprocess labels.
+        """
         if self.labels_df is not None:
             if reproduction_mode:
                 if os.path.exists(dir_preprocessors):
@@ -346,34 +379,6 @@ class MyDataset:
                 labels_processor.save_preprocessors(dir_preprocessors, 'preprocessors_for_labels.pkl')
                 self.labels_df = labels_processor._df
                 self.label_data = self.labels_df.drop(MC.dkey.id).to_numpy().astype(np.float32)
-
-    # def _proc_existing_omics(self, dir_preprocessors: str, reproduction_mode: bool):
-    #     _steps = [MC.abbr_train, MC.abbr_val, MC.abbr_test]
-    #     if reproduction_mode:
-    #         if os.path.exists(dir_preprocessors):
-    #             for ikey in self.existing_omics_sample_id.keys():
-    #                 for xstep in _steps:
-    #                     _loaded_proc = ProcOnTrainSet(self.existing_omics[ikey][xstep], None)
-    #                     _loaded_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
-    #                     self.existing_omics[ikey][xstep] = _loaded_proc._df
-    #         else:
-    #             raise FileNotFoundError(f"Processor files for omics data are not found in {dir_preprocessors}")
-    #     else:
-    #         for ikey in self.existing_omics_sample_id.keys():
-    #             # Fit on training data
-    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_train], None)
-    #             _tmp_proc.pr_impute(strategy="mean")
-    #             _tmp_proc.pr_minmax()
-    #             _tmp_proc.save_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
-    #             self.existing_omics[ikey][MC.abbr_train] = _tmp_proc._df
-    #             # Transform validation data
-    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_val], None)
-    #             _tmp_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
-    #             self.existing_omics[ikey][MC.abbr_val] = _tmp_proc._df
-    #             # Transform test data
-    #             _tmp_proc = ProcOnTrainSet(self.existing_omics[ikey][MC.abbr_test], None)
-    #             _tmp_proc.load_run_preprocessors(dir_preprocessors, f'preprocessors_for_omics_{ikey}.pkl')
-    #             self.existing_omics[ikey][MC.abbr_test] = _tmp_proc._df
 
 
 class OptimizeLitdataNCV:
@@ -394,22 +399,50 @@ class OptimizeLitdataNCV:
             compression: Optional[str] = MC.default.compression_alg,
             n_workers: int = MC.default.n_workers_litdata,
         ):
-        """
+        r"""Optimize the data for nested cross validation.
+
         Args:
-            `paths_omics`: Paths to omics data. Dict of {name: path}.
-            `path_label`: Path to label data.
-            `output_dir`: Directory to save the optimized data.
-            `k_outer`: Number of outer folds.
-            `k_inner`: Number of inner folds.
-            `fragment_elem_ids`: List of list of indices of elements in each fragment. For nested cross validation with 10 outer folds and 5 inner folds, this should be a list of 50 lists of indices.
-            `which_outer_inner`: If specified, only the specified outer-inner fold will be optimized.
-            `col2use_in_labels`: Columns to use in labels.
-            `prepr_labels`: Whether to preprocess labels.
-            `prepr_omics`: Whether to preprocess omics.
-            `seed_permut`: Seed for permutation.
-            `seed_resample`: Seed for resampling for the target number of samples.
-            `compression`: Compression method.
-            `n_workers`: Number of workers.
+            paths_omics: The ``Dict`` ``{name: path}`` of paths to multiple ``.csv`` or ``.parquet`` files or directories. For genotypes, it is a path to a ``.pkl.gz`` file.
+                If some paths are directories, the files inside will be read as existing data.
+            
+            path_label: The path to label data (a ``.csv`` or ``.parquet`` file).
+                If it is `None`, no labels(phenotypes) are provided.
+            
+            output_dir: The directory to save optimized data.
+
+            k_outer: Number of outer folds.
+
+            k_inner: Number of inner folds.
+
+            fragment_elem_ids: List of list of indices of elements in each fragment.
+                It is optional when the data is already split into fragments.
+                It overrides ``seed_permut` and disables random permutation.
+                For nested cross validation with 10 outer folds and 5 inner folds, it is a list of 50 lists of indices.
+            
+            which_outer_inner: If specified, only the specified outer-inner fold will be optimized.
+
+            col2use_in_labels: The columns to use in label data.
+                If it is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+                If it is `None`, all columns are used.
+
+            prepr_labels: Whether to preprocess labels.
+                Default: ``True``.
+
+            prepr_omics: Whether to preprocess omics.
+                Default: ``True``.
+            
+            seed_permut: Seed for permutation.
+                Default: ``MC.default.seed_1``.
+            
+            seed_resample: The random seed for sampling new samples for the target number of samples.
+                Default: ``MC.default.seed_2``.
+            
+            compression: Compression method.
+                Default: ``MC.default.compression_alg``.
+            
+            n_workers: Number of workers.
+                Default: ``MC.default.n_workers_litdata``.
+        
         """
         self.paths_omics = paths_omics
         self.path_label = path_label
@@ -566,10 +599,41 @@ def optimize_data_external(
         n_workers: int = MC.default.n_workers_litdata,
         chunk_bytes: str = MC.default.chunk_bytes,
     ):
-    """
-    Optimize data for external use.
+    r"""Optimize data for external data.
 
-    For details, see the documentation of the class `OptimizeLitdataNCV`.
+    Args:
+        output_dir: The directory to save optimized data.
+        
+        paths_omics: The ``Dict`` ``{name: path}`` of paths to multiple ``.csv`` or ``.parquet`` files or directories. For genotypes, it is a path to a ``.pkl.gz`` file.
+            If some paths are directories, the files inside will be read as existing data.
+        
+        path_label: The path to label data (a ``.csv`` or ``.parquet`` file).
+            If it is `None`, no labels(phenotypes) are provided.
+        
+        col2use_in_labels: The columns to use in label data.
+            If it is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+            If it is `None`, all columns are used.
+        
+        prepr_labels: Whether to preprocess labels.
+            Default: ``True``.
+
+        prepr_omics: Whether to preprocess omics.
+            Default: ``True``.
+
+        reproduction_mode: Whether to use existing processors.
+            Please provide ``dir_preprocessors`` if ``reproduction_mode`` is ``True``.
+
+        dir_preprocessors: The directory used to save data processors that fitted on training data.
+            If it is `None`, preprocessing is not performed.
+
+        compression: Compression method.
+            Default: ``MC.default.compression_alg``.
+        
+        n_workers: Number of workers.
+            Default: ``MC.default.n_workers_litdata``.
+        
+        chunk_bytes: Chunk size.
+            Default: ``MC.default.chunk_bytes``.
     
     """
     dataset_ext = MyDataset(
@@ -593,15 +657,6 @@ def optimize_data_external(
 
 
 class MyDataModule4Train(LightningDataModule):
-    """
-    LightningDataModule for training models with LitData.
-    
-    Args:
-    - `litdata_dir` (str): Directory containing the LitData fragments.
-    - `which_outer_testset` (int): Index of the outer test set fold.
-    - `which_inner_valset` (int): Index of the inner validation set fold.
-    - `batch_size` (int): Batch size for training and evaluation.
-    """
     def __init__(
             self,
             litdata_dir: str,
@@ -610,6 +665,20 @@ class MyDataModule4Train(LightningDataModule):
             batch_size: int,
             n_workers: int = MC.default.n_workers,
         ):
+        r"""LightningDataModule for training.
+
+        Args:
+            litdata_dir: Directory containing the LitData for nested cross-validation.
+
+            which_outer_testset: Index of the outer test set fold.
+
+            which_inner_valset: Index of the inner validation set fold.
+
+            batch_size: Batch size for dataloader.
+
+            n_workers: Number of workers for dataloader.
+        
+        """
         super().__init__()
         self.litdata_dir = litdata_dir
         self.which_outer_testset = which_outer_testset
@@ -648,20 +717,48 @@ class MyDataModule4Train(LightningDataModule):
         return pl.read_csv(os.path.join(self.dir_xoi, MC.fname.predata_omics_dims)).select(MC.dkey.omics_dim).to_series().to_list()
 
 
-class MyDataModule4Uni(LightningDataModule):
-    """
-    LightningDataModule for predicting/testing.
+class Dict2Dataset(Dataset):
+    def __init__(self, data_dict: Dict[str, Any]):
+        r"""Transform a dict of data to a Dataset for shuffled omics feature values.
 
-    Args:
-    - `litdata_dir` (str): Directory containing the LitData for prediction.
-    - `batch_size` (int): Batch size for prediction.
-    """
+        Args:
+            data_dict: dict of data
+        
+        """
+        super().__init__()
+        self.data_dict = data_dict
+
+    def __len__(self):
+        return len(self.data_dict[MC.dkey.litdata_index])
+    
+    def __getitem__(self, idx: int):
+        _omics = [om_x[idx, :] for om_x in self.data_dict[MC.dkey.litdata_omics]]
+        _id = self.data_dict[MC.dkey.litdata_id][idx]
+        _idx = idx
+        if MC.dkey.litdata_label in self.data_dict:
+            _labels = self.data_dict[MC.dkey.litdata_label][idx]
+            return {MC.dkey.litdata_index: _idx, MC.dkey.litdata_omics: _omics, MC.dkey.litdata_id: _id, MC.dkey.litdata_label: _labels}
+        else:
+            return {MC.dkey.litdata_index: _idx, MC.dkey.litdata_omics: _omics, MC.dkey.litdata_id: _id}
+
+
+class MyDataModule4Uni(LightningDataModule):
     def __init__(
             self,
             litdata_dir: str,
-            batch_size: int,
+            batch_size: int = MC.default.batch_size,
             n_workers: int = MC.default.n_workers,
         ):
+        r"""LightningDataModule for prediction.
+
+        Args:
+            litdata_dir: Directory containing the LitData for prediction.
+
+            batch_size: Batch size for prediction.
+
+            n_workers: Number of workers for dataloader.
+        
+        """
         super().__init__()
         self.litdata_dir = litdata_dir
         self.batch_size = batch_size
@@ -673,19 +770,132 @@ class MyDataModule4Uni(LightningDataModule):
     def predict_dataloader(self):
         return self.dataloader_xxx
 
-    # def test_dataloader(self):
-    #     return self.dataloader_x
+    def test_dataloader(self):
+        return self.dataloader_xxx
+    
+    def shuffle_a_feat(
+            self,
+            which_omics: Union[int, str],
+            which_feature: int,
+            random_state: int,
+            save_litdata: bool = False,
+            chunk_bytes: str = MC.default.chunk_bytes,
+            compression: str = MC.default.compression_alg,
+        ) -> str | None:
+        r"""
+        Shuffle one feature in one omics data.
+
+        Args:
+            which_omics: The index or name of the omics data to shuffle.
+
+            which_feature: The index of the feature to shuffle.
+
+            random_state: The random seed for reproducibility.
+        
+        """
+        data_all = self.read_mydataloader()
+        omics_names = read_omics_names(self.litdata_dir)
+        if isinstance(which_omics, str):
+            which_om = omics_names.index(which_omics)
+        else:
+            if (which_omics + 1) > len(omics_names):
+                raise ValueError("The specified omics index is out of range.")
+            which_om = which_omics
+        
+        """
+        Shuffle a feature's values
+        """
+        _tmp: np.ndarray = data_all[MC.dkey.litdata_omics][which_om]
+
+        np.random.seed(random_state)
+        _tmp[:, which_feature] = np.random.permutation(_tmp[:, which_feature])
+        data_all[MC.dkey.litdata_omics][which_om] = _tmp
+        
+        """
+        Create new dataset and save as litdata
+        """
+        _dataset = Dict2Dataset(data_all)
+        if save_litdata:
+            output_dir = self.litdata_dir + f"_shuffle_om+{which_om}_feat+{which_feature}_rand+{random_state}"
+            optimize(
+                fn = _dataset.__getitem__,
+                inputs = range(len(_dataset)),
+                output_dir = output_dir,
+                chunk_bytes = chunk_bytes,
+                compression = compression,
+            )
+            return output_dir
+        else:
+            # return DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
+            self.dataloader_xxx = DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
+    
+    def read_mydataloader(self) -> Dict[str, Any]:
+        if not hasattr(self, "dataloader_xxx"):
+            self.setup()
+        
+        """
+        Read data from dataloader.
+        """
+        data_all = {}
+        for batch in self.dataloader_xxx:
+            for xkey in batch.keys():
+                if xkey not in data_all:
+                    data_all[xkey] = batch[xkey]
+                else:
+                    if xkey == MC.dkey.litdata_omics:
+                        data_all[xkey] = [np.concatenate([data_all[xkey][i], batch[xkey][i]], axis=0) for i in range(len(data_all[xkey]))]
+                        # for i in range(len(data_all[xkey])):
+                        #     print(f"shape of {xkey}: {data_all[xkey][i].shape}, type: {type(data_all[xkey][i])}")
+                    else:
+                        data_all[xkey] = np.concatenate((data_all[xkey], batch[xkey]), axis=0)
+                        # print(f"shape of {xkey}: {data_all[xkey].shape}, type: {type(data_all[xkey])}")
+        return data_all
+
+
+def read_omics_names(litdata_dir: str, get_path: bool = False):
+    r"""Read omics names from the parent directory of the litdata.
+    
+    Args:
+        litdata_dir: Path to the litdata directory.
+    
+    Output:
+        A sorted list of omics names.
+    
+    """
+    _dir_trnvaltst = os.path.dirname(litdata_dir)
+    omics_names: List[str] = []
+    omics_paths: List[str] = []
+    for _fname in os.listdir(_dir_trnvaltst):
+        if _fname.startswith(MC.fname.predata_omics_features_prefix):
+            _tmp = os.path.splitext(_fname)[0]
+            _tmp = _tmp.removeprefix(MC.fname.predata_omics_features_prefix)
+            _tmp = _tmp.removeprefix("_")
+            omics_names.append(_tmp)
+            omics_paths.append(os.path.join(_dir_trnvaltst, _fname))
+    if len(omics_names) == 0:
+        raise ValueError("No omics data found in the specified directory.")
+
+    sortperm = np.argsort(omics_names)
+    omics_names = np.take(omics_names, sortperm).tolist()
+    omics_paths = np.take(omics_paths, sortperm).tolist()
+    
+    if get_path:
+        return omics_names, omics_paths
+    else:
+        return omics_names
 
 
 def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
-    """
+    r""" Auto preprocessing for features in training data.
+
     Args:
-    - `in_array` (np.ndarray): Input array with shape (n_features, n_samples).
-    - `threshold_ptp` (float): Threshold for the range.
+        in_array: Input array with shape ``(n_features, n_samples)``.
+        
+        threshold_ptp: Threshold for the range.
 
     Steps:
-    1. Remove feature if its range is similar to zero.
-    2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
+        1. Remove feature if its range is similar to zero.
+        2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
     
     """
     values_min = np.min(in_array, axis=1)
@@ -727,8 +937,11 @@ def read_litdata_ncv_for_mi(
         thre_pcc: float = 0.9,
         thre_mi: float = 0.2,
     ) -> None:
-    """
-    Read specific NCV litdata from directories and calculate MI for each inner training set.
+    r"""Read specific NCV litdata from directories and calculate MI for each inner training set.
+
+    Args:
+        litdata_dir: Directory containing the LitData for nested cross-validation.
+    
     """
     # Check if path_excutable is None
     if path_excutable is None:

@@ -1,3 +1,6 @@
+r"""
+Module for the DEM model with sparse linear layers.
+"""
 from typing import List, Optional
 import numpy as np
 import torch
@@ -8,7 +11,7 @@ from frn.utils.uni import get_map_location
 
 class SparseLinear(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, fixed_indices: np.ndarray, map_location: Optional[str]=None):
-        """
+        r"""A linear layer with sparse weights.
         """
         super(SparseLinear, self).__init__()
         self.input_dim = input_dim
@@ -56,6 +59,8 @@ class SNPReductionNetModel(nn.Module):
             snp_onehot_bits: int,
             dense_layer_dims: List[int],
         ):
+        r""" A model for predicting the phenotype from the genome blocks.
+        """
         super().__init__()
         n_blocks = len(blocks_gt)
         self.n_blocks = n_blocks

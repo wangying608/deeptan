@@ -10,13 +10,14 @@ import polars as pl
 import pickle
 import gzip
 import optuna
-from typing import Any, List, Dict, Optional, Sequence, Union
+from typing import Any, List, Dict, Optional, Union
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestRegressor
 # from sklearn.feature_selection import VarianceThreshold, f_classif
 # from sklearn.decomposition import PCA
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.preprocessing import StandardScaler
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from lightning import Trainer, LightningDataModule
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
@@ -69,8 +70,7 @@ def random_string(length: int = 7) -> str:
 
 
 def idx_convert(indices: List[int], onehot_bits: int = MC.default.snp_onehot_bits) -> List[int]:
-    """
-    Convert the indices to the corresponding indices in the one-hot vector.
+    r"""Convert the indices to the corresponding indices in the one-hot vector.
     """
     converted_indices = np.array(indices)[:, np.newaxis] * onehot_bits + np.arange(onehot_bits)
     converted_indices = np.sort(converted_indices.flatten()).tolist()
@@ -78,8 +78,15 @@ def idx_convert(indices: List[int], onehot_bits: int = MC.default.snp_onehot_bit
 
 
 def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted: bool = True):
-    """
-    Find the shared elements between multiple lists.
+    r"""Find the shared elements between multiple lists.
+
+    Args:
+        lists: A list of lists.
+
+        get_indices: Whether to return the indices of the shared elements in each list.
+
+        to_sorted: Whether to sort the shared elements.
+    
     """
     if len(lists) == 0:
         raise ValueError("The list of lists is empty.")
@@ -107,10 +114,11 @@ def intersect_lists(lists: List[List[Any]], get_indices: bool = True, to_sorted:
         return shared
 
 def read_labels(path_label: str, col2use: Optional[List[Any]] = None):
-    """
-    Read labels from a csv file.
+    r"""Read labels from a csv file.
     
-    If `col2use` is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+    Args:
+        If `col2use` is `List[int]`, its numbers are the indices **(1-based)** of the columns to be used.
+    
     """
     label_df = read_omics(path_label)
     sample_ids = label_df.select(MC.dkey.id).to_series().to_list()
@@ -127,8 +135,7 @@ def read_labels(path_label: str, col2use: Optional[List[Any]] = None):
 
 
 def read_omics(data_path: str):
-    """
-    Read omics data from various formats.
+    r"""Read omics data from various formats.
     """
     # Check if the path is a file or a folder
     if os.path.isdir(data_path):
@@ -154,10 +161,7 @@ def read_omics(data_path: str):
                 snp_ids = snp_data_dict[MC.dkey.snp_ids]
                 # snp_block_ids = snp_data_dict['block_ids']
                 _tmp_snp_df = pl.DataFrame(data=snp_matrix, schema=snp_ids)
-                # print(type(snp_sample_ids))
-                # print(snp_sample_ids)
                 _tmp_id = pl.DataFrame({MC.dkey.id: snp_sample_ids})
-                # print(_tmp_id.shape, _tmp_snp_df.shape)
                 _data = _tmp_id.hstack(_tmp_snp_df)
             else:
                 raise ValueError("The file extension is not supported.")
@@ -175,8 +179,21 @@ def read_omics_xoxi(
         file_ext: Optional[str] = None,
         prefix: Optional[str] = None,
     ):
-    """
-    Read processed data from a directory.
+    r"""Read processed data from a directory.
+
+    Args:
+        data_path: Path to the directory containing the data.
+
+        which_outer_test: Which outer test set to read.
+
+        which_inner_val: Which inner validation set to read.
+
+        trnvaltst: The abbreviation of the training/validation/test set.
+
+        file_ext: The file extension of the data files. If None, the default extension will be used.
+
+        prefix: The prefix of the file name. (Optional)
+    
     """
     if not os.path.isdir(data_path):
         raise ValueError(f"The path {data_path} is not a directory.")
@@ -207,15 +224,24 @@ def read_omics_xoxi(
 
 
 class ProcOnTrainSet:
-    """
-    Process all data points based on the training set.
-
-    How to use:
-    - Initialize the class.
-    - Call the method `pr_xxxxx` to process the data.
-    - Call the method `save_processors` to save the processors (as a dict) to a pickle file.
-    """
     def __init__(self, df_in: pl.DataFrame, ind_for_fit: Optional[List[Any]], n_feat2save: Optional[int] = None, df_labels: Optional[pl.DataFrame] = None):
+        r"""Process all data points based on the training set.
+
+        Args:
+            df_in: Input dataframe.
+            
+            ind_for_fit: Sample indices for fitting the preprocessors.
+            
+            n_feat2save: Number of features to save.
+            
+            df_labels: Labels dataframe.
+        
+        How to use:
+            - Initialize the class.
+            - Call the method `pr_xxxxx` to process the data.
+            - Call the method `save_processors` to save the processors (as a dict) to a pickle file.
+
+        """
         self.n_feat2save = n_feat2save
         self._df = df_in
         if df_labels is not None:
@@ -229,11 +255,8 @@ class ProcOnTrainSet:
         self.preprocessors = {}
     
     def keep_preprocessors(self, x_value):
-        """
-        The key (int, ***0-based***) is automatically generated by the order of the data processor,
+        r"""The key (int, ***0-based***) is automatically generated by the order of the data processor,
         for the reproduction of data processing steps.
-        
-        - `x_value`: the processor to be kept.
         """
         x_order = len(self.preprocessors)
         self.preprocessors[x_order] = x_value
@@ -332,11 +355,12 @@ class RFSelector:
         return df_o
 
     def keep_preprocessor(self, x_processor):
-        """
-        The key (int, ***0-based***) is automatically generated by the order of the data processor,
+        r"""The key (int, ***0-based***) is automatically generated by the order of the data processor,
         for the reproduction of data processing steps.
         
-        - `x_processor`: the processor to be kept.
+        Args:
+            x_processor: the processor to be kept.
+        
         """
         x_order = len(self.processors)
         self.processors[x_order] = x_processor
@@ -355,8 +379,7 @@ def get_indices_ncv(
         which_outer_test: int,
         which_inner_val: int,
     ):
-    """
-    Get indices of fragments for NCV.
+    r"""Get indices of fragments for NCV.
     """
     # Init fragment indices for test dataset
     n_fragments = int(k_outer * k_inner)
@@ -377,8 +400,7 @@ def onehot_encode_snp_mat(
         onehot_bits: Optional[int] = None,
         genes_snps: Optional[List[List[int]]] = None,
     ):
-    """
-    One-hot encode the SNP matrix.
+    r"""One-hot encode the SNP matrix.
     """
     if onehot_bits is None:
         len_onehot = MC.default.snp_onehot_bits
@@ -407,8 +429,7 @@ def onehot_encode_snp_mat(
 
 
 def read_pkl_gv(path_pkl: str) -> Dict[str, Any]:
-    """
-    Read processed VCF data from a pickle file.
+    r"""Read processed VCF data from a pickle file.
     """
     with gzip.open(path_pkl, 'rb') as file:
         # Initialize an empty list to hold all the deserialized vectors
@@ -455,8 +476,7 @@ def train_model(
         accelerator: str = MC.default.accelerator,
         in_dev: bool = False,
     ):
-    """
-    Fit the model.
+    r"""Fit the model.
     """
     avail_dev = get_avail_nvgpu(devices)
 
@@ -498,35 +518,46 @@ def train_model(
     else:
         best_score = None
 
-    trainer.test(ckpt_path="best", dataloaders=datamodule)
+    trainer.test(ckpt_path=callback_ckpt.best_model_path, dataloaders=datamodule)
+
+    print(f"\nBest validation score: {best_score}")
+    print(f"Best model path: {callback_ckpt.best_model_path}\n")
 
     return best_score
 
 
 class CollectFitLog:
     def __init__(self, dir_log: str):
-        """
-        Collect training logs from optuna db files and ckpt files.
+        r"""Collect training logs from optuna db files and ckpt files.
+
+        Args:
+            dir_log: Directory containing the model fitting logs.
+        
         """
         self.dir_log = dir_log
         if not os.path.exists(self.dir_log):
             raise ValueError(f'Directory {self.dir_log} does not exist.')
     
     def get_df_csv(self, dir_output: str, overwrite_collected_log: bool = False):
-        """
-        Collect trained models for each fold in nested cross-validation.
+        r"""Collect trained models for each fold in nested cross-validation.
+
+        Args:
+            dir_output: Directory to save the collected logs.
+
+            overwrite_collected_log: Whether to overwrite existing collected logs.
+        
         """
         collected_logs = self.collect()
 
         models_bv = collected_logs[MC.dkey.best_trials]
-        path_log_best_trials = os.path.join(dir_output, '_log_best_trials' + '.csv')
+        path_log_best_trials = os.path.join(dir_output, MC.fname.log_best_trials)
         if os.path.exists(path_log_best_trials) and not overwrite_collected_log:
             models_bv = pl.read_csv(path_log_best_trials)
         else:
             models_bv.write_csv(path_log_best_trials)
 
         models_bi = collected_logs[MC.dkey.best_inner_folds]
-        path_log_best_inners = os.path.join(dir_output, '_log_best_inners' + '.csv')
+        path_log_best_inners = os.path.join(dir_output, MC.fname.log_best_inners)
         if os.path.exists(path_log_best_inners) and not overwrite_collected_log:
             models_bi = pl.read_csv(path_log_best_inners)
         else:
@@ -535,8 +566,7 @@ class CollectFitLog:
         return models_bv, models_bi
     
     def collect(self) -> Dict[str, pl.DataFrame]:
-        """
-        Collect training logs from optuna db files and ckpt files.
+        r"""Collect training logs from optuna db files and ckpt files.
         """
         best_trials_df, all_ckpt = self.collect_ckpt()
         optuna_best_inners_df = self.collect_optuna_db()
@@ -546,24 +576,27 @@ class CollectFitLog:
         # Remove the MC.title_val_loss column from the merged dataframe
         logs_df = logs_df.drop(MC.title_val_loss)
         # Rename 'min_loss' column to MC.title_val_loss
-        logs_df = logs_df.rename({'min_loss': MC.title_val_loss})
+        logs_df = logs_df.rename({MC.dkey.min_loss: MC.title_val_loss})
+        # Sort the dataframe by MC.dkey.which_outer and MC.dkey.which_inner
+        logs_df = logs_df.sort([MC.dkey.which_outer, MC.dkey.which_inner])
 
-        best_inners_df = logs_df.group_by(MC.dkey.which_outer).agg(pl.col(MC.title_val_loss).min()).join(logs_df, on=[MC.dkey.which_outer, MC.title_val_loss], how='left')
+        best_inners_df = logs_df.group_by(MC.dkey.which_outer).agg(pl.col(MC.title_tst_loss).min()).join(logs_df, on=[MC.dkey.which_outer, MC.title_tst_loss], how='left')
+        best_inners_df = best_inners_df.sort([MC.dkey.which_outer, MC.title_tst_loss])
 
         print("\nFound model logs:")
         print(logs_df)
         print("\nBest inner folds:")
         print(best_inners_df)
 
-        return {'logs': logs_df, 'best_inners': best_inners_df}
+        return {MC.dkey.best_trials: logs_df, MC.dkey.best_inner_folds: best_inners_df}
     
     def collect_ckpt(self):
-        """
-        Collect info of ckpt files.
+        r"""Collect info from ckpt files and tensorboard events.
         """
         paths_ckpt = self.search_ckpt()
 
         # Pick ids of outer and inner folds, val_loss and version from ckpt file paths
+        test_loss_values = [self.read_tensorboard_events(os.path.join(os.path.dirname(path_x), "version_0")) for path_x in paths_ckpt]
         val_loss_values = [float(os.path.basename(path_x).split('-')[3].split('=')[1].split('.ckpt')[0]) for path_x in paths_ckpt]
         trial_tags = [path_x.split('/')[-2] for path_x in paths_ckpt]
         study_tags = [path_x.split('/')[-4].split('_')[-1] for path_x in paths_ckpt]
@@ -571,7 +604,7 @@ class CollectFitLog:
         ncv_outer_x = [int(path_x.split('/')[-3].split('_')[-2]) for path_x in paths_ckpt]
 
         # Create a dataframe with the above values
-        ckpt_df = pl.DataFrame({MC.dkey.which_outer: ncv_outer_x, MC.dkey.which_inner: ncv_inner_x, MC.title_val_loss: val_loss_values, MC.dkey.trial_tag: trial_tags, MC.dkey.study_tag: study_tags, MC.dkey.ckpt_path: paths_ckpt})
+        ckpt_df = pl.DataFrame({MC.dkey.which_outer: ncv_outer_x, MC.dkey.which_inner: ncv_inner_x, MC.title_tst_loss: test_loss_values, MC.title_val_loss: val_loss_values, MC.dkey.trial_tag: trial_tags, MC.dkey.study_tag: study_tags, MC.dkey.ckpt_path: paths_ckpt})
 
         # Pick the best model based on val_loss between the trials of the same outer and inner fold
         best_trials_df = ckpt_df.group_by([MC.dkey.which_outer, MC.dkey.which_inner]).agg([pl.col(MC.title_val_loss).min()]).join(ckpt_df, on=[MC.dkey.which_outer, MC.dkey.which_inner, MC.title_val_loss], how='left')
@@ -579,8 +612,7 @@ class CollectFitLog:
         return best_trials_df, ckpt_df
 
     def collect_optuna_db(self):
-        """
-        Collect info of optuna db files.
+        r"""Collect info of optuna db files.
         """
         # Find all optuna db files in the directory `dir_log` and its subdirectories
         paths_optuna_db = [os.path.join(dirpath, f)
@@ -609,9 +641,28 @@ class CollectFitLog:
         x_time = frag_name[4]
         return {MC.dkey.study_name: study_name, MC.dkey.which_outer: x_outer, MC.dkey.which_inner: x_inner, MC.dkey.min_loss: min_loss, MC.dkey.time_str: x_time}
     
-    def search_ckpt(self):
+    def read_tensorboard_events(self, dir_events: str, get_test_loss: bool = True):
+        r"""Read tensorboard events from the directory.
         """
-        Search checkpoints in the directory and its subdirectories.
+        event_acc = EventAccumulator(dir_events)
+        event_acc.Reload()
+        scalar_tags = event_acc.Tags()["scalars"]
+        scalar_data = {tag: [] for tag in scalar_tags}
+
+        for tag in scalar_tags:
+            _events = event_acc.Scalars(tag)
+            for _event in _events:
+                scalar_data[tag].append((_event.step, _event.value))
+        
+        test_loss: float = scalar_data[MC.title_tst_loss][0][1]
+        
+        if get_test_loss:
+            return test_loss
+        else:
+            return scalar_data
+
+    def search_ckpt(self):
+        r"""Search checkpoints in the directory and its subdirectories.
         """
         paths_ckpt = [os.path.join(dirpath, f)
                     for dirpath, dirnames, files in os.walk(self.dir_log)
@@ -621,8 +672,7 @@ class CollectFitLog:
         return paths_ckpt
     
     def remove_inferior_models(self):
-        """
-        Remove inferior models based on the collected result table.
+        r"""Remove inferior models based on the collected result table.
         """
         best_trials, all_trials = self.collect_ckpt()
         n_all_ckpt = len(all_trials)
@@ -640,8 +690,7 @@ class CollectFitLog:
 
 
 def rm_old_ckpt(ckpt_dir: str, rmALL: bool = False):
-    """
-    Remove checkpoints from a versions directory.
+    r"""Remove checkpoints from a versions directory.
     """
     if not os.path.isdir(ckpt_dir):
         print("Error: {} is not a directory".format(ckpt_dir))

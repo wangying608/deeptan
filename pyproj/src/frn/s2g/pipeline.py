@@ -15,9 +15,6 @@ import frn.constants as MC
 
 
 class SNP2GBFit:
-    """
-    SNP-to-genome-block model training with hyperparameter optimization.
-    """
     def __init__(
             self,
             log_dir: str,
@@ -37,8 +34,7 @@ class SNP2GBFit:
             min_epochs: int = MC.default.min_epochs,
             batch_size: int = MC.default.batch_size,
         ):
-        """
-        Initialize SNP2GBTrain.
+        r"""SNP-to-genome-block model training with hyperparameter optimization.
         """
         self.log_dir = log_dir
         self.log_name = log_name
@@ -71,8 +67,7 @@ class SNP2GBFit:
             batch_size: int,
             dense_layer_dims: List[int],
         ) -> Dict[str, Any]:
-        """
-        Generate a dictionary of hyperparameters for SNP2GB model training.
+        r"""Generate a dictionary of hyperparameters for SNP2GB model training.
         """
         hparams = {
             MC.dkey.lr: learning_rate,
@@ -90,8 +85,7 @@ class SNP2GBFit:
             devices: Union[List[int], str, int],
             accelerator: str,
         ):
-        """
-        Train SNP2GB model with given hyperparameters.
+        r"""Train SNP2GB model with given hyperparameters.
         """
         _model = SNPReductionNet(
             output_dim=self.model_out_dim,
@@ -122,8 +116,7 @@ class SNP2GBFit:
         return val_loss_min
     
     def manual_fit(self):
-        """
-        Train SNP2GB model with manually set hyperparameters.
+        r"""Train SNP2GB model with manually set hyperparameters.
         """
         val_loss_min = self.snp2gb_fit(
             hparams=self.hparams,
@@ -133,8 +126,7 @@ class SNP2GBFit:
         return val_loss_min
     
     def objective(self, trial: optuna.Trial) -> float:
-        """
-        Objective function for SNP2GB model hyperparameter optimization.
+        r"""Objective function for SNP2GB model hyperparameter optimization.
         """
         print('Trial number:', trial.number)
         if self.n_jobs > 1:
@@ -162,8 +154,7 @@ class SNP2GBFit:
             storage: str = MC.default.optuna_db,
             gc_after_trial: bool = True,
         ):
-        """
-        Hyperparameters optimization for SNP2GB model.
+        r"""Hyperparameters optimization for SNP2GB model.
         """
         study = optuna.create_study(
             storage = storage,
@@ -175,11 +166,6 @@ class SNP2GBFit:
 
 
 class SNP2GBFitPipe:
-    r"""
-    SNP2GB model pipeline.
-    Hyperparameters are optimized for each fold in nested cross-validation.
-    The best model for each fold is used to convert SNPs to genome blocks.
-    """
     def __init__(
             self,
             litdata_dir: str,
@@ -193,13 +179,22 @@ class SNP2GBFitPipe:
             dense_layer_dims: Optional[List[int]] = None,
             snp_onehot_bits: int = MC.default.snp_onehot_bits,
         ):
-        """
-        Initialize SNP2GB pipeline.
+        r"""SNP2GB model training pipeline.
+        Hyperparameters are optimized for each fold in nested cross-validation.
+        The best model for each fold is used to convert SNPs to genome blocks.
 
-        Parameters:
-        - `list_ncv`: List of nested cross-validation folds. e.g., `[[0,0], [0,1], [9,4]]`.
-        - `snp_onehot_bits`: Length of the one-hot vector for each SNP.
-        - `dense_layer_dims`: List of hidden dimensions for the dense layers.
+        Args:
+            litdata_dir: Path to the directory containing the nested cross-validation data.
+            list_ncv: List of nested cross-validation folds. e.g., ``[[0,0], [0,1], [9,4]]``.
+            log_dir: Path to the directory for saving the training logs and models' checkpoints.
+            regression: Whether the task is regression or classification.
+            devices: Devices for training.
+            accelerator: Accelerator for training.
+            n_jobs: Number of jobs for parallel hyperparameter optimization.
+            n_trials: Number of trials for hyperparameter optimization.
+            dense_layer_dims: List of hidden dimensions for the dense layers.
+            snp_onehot_bits: Length of the one-hot representation for SNPs.
+        
         """
         # Unique tag for the training log directory
         tag_str = time_string() + '_' + random_string()
@@ -223,8 +218,7 @@ class SNP2GBFitPipe:
         self.n_trials = n_trials
     
     def train_pipeline(self):
-        """
-        Train SNP2GB model for each fold in nested cross-validation.
+        r"""Train SNP2GB model for each fold in nested cross-validation.
         """
         # Storage for optuna trials in self.log_dir
         path_storage = 'sqlite:///' + self.uniq_logdir + '/optuna_s2g' + '.db'
@@ -277,8 +271,7 @@ def execute_s2g(
         batch_size: int = MC.default.batch_size,
         accelerator: str = MC.default.accelerator,
     ):
-    """
-    Run the SNP2GB model for independent test / prediction.
+    r"""Run the SNP2GB model for independent test / prediction.
     """
     g_data_dict = read_pkl_gv(path_gtype_pkl)
     datamodule_s2g = MyDataModule4Uni(dir_litdata, batch_size)
@@ -319,24 +312,32 @@ def execute_s2g(
 
 
 class SNP2GBTransPipe:
-    """
-    1. Collect trained models for each fold in nested cross-validation.
-    2. Transform SNP features to genome block features.
-    """
     def __init__(
             self,
             dir_log: str,
             dir_output: str,
             overwrite_collected_log: bool = False,
-    ):
+        ):
+        r"""The pipeline to transform SNP features to genome block features.
+            1. Collect trained models for each fold in nested cross-validation.
+            2. Transform SNP features to genome block features.
+        
+        Args:
+            dir_log: The log directory of the SNP2GB models.
+
+            dir_output: The output directory.
+
+            overwrite_collected_log: Whether to overwrite existing collected log.
+                Default: ``False``.
+
+        """
         self.dir_log = dir_log
         self.dir_output = dir_output
         os.makedirs(self.dir_output, exist_ok=True)
         self.overwrite_collected_log = overwrite_collected_log
 
     def collect_models(self):
-        """
-        Collect trained models for each fold in nested cross-validation.
+        r"""Collect fitted models for each fold in nested cross-validation.
         """
         collector = CollectFitLog(self.dir_log)
         models_bv, models_bi = collector.get_df_csv(self.dir_output, self.overwrite_collected_log)
@@ -352,11 +353,29 @@ class SNP2GBTransPipe:
             batch_size: int = MC.default.batch_size,
             n_workers: int = MC.default.n_workers,
         ):
-        """
-        Convert SNPs to genome blocks features using the best model for each fold in nested cross-validation.
+        r"""Convert SNPs to genome blocks features using the best model for each fold in nested cross-validation.
 
-        If `list_ncv` is `None`, the best model overall is used.
-        Otherwise, the best model for each fold in `list_ncv` is used.
+        Args:
+            dir_litdata: The directory containing nested cross-validation data for S2G.
+
+            list_ncv: The list of outer-inner folds to use.
+                Default: ``None``.
+                If it is not ``None``, it should be a list of lists of two integers,
+                where the first integer is the outer fold index and the second integer is the inner fold index.
+                If it is ``None``, the best model overall is used.
+            
+            snp_onehot_bits: The number of bits for one-hot representation of SNPs.
+                Default: ``10``.
+            
+            accelerator: The accelerator to use.
+                Default: ``"auto"``.
+            
+            batch_size: The batch size to use.
+                Default: ``32``.
+            
+            n_workers: The number of workers to use for dataloader.
+                Default: ``0``.
+
         """
         if not hasattr(self,'models_bv'):
             self.collect_models()

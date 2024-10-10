@@ -91,11 +91,6 @@ class IntegrateExtractions(nn.Module):
 
 
 class DEM(nn.Module):
-    """
-    The DEM model.
-
-    + Learnable weights are enabled for predictions.
-    """
     def __init__(
             self,
             omics_dim: list[int],
@@ -105,6 +100,8 @@ class DEM(nn.Module):
             output_dim: int,
             dropout: float,
         ):
+        r"""The DEM model.
+        """
         super().__init__()
         self.omics_dim = omics_dim
         self.extract_conc = ExtractConcOmics(n_heads, n_encoders, sum(omics_dim), hidden_dim, output_dim, dropout)
@@ -155,18 +152,6 @@ class DEM(nn.Module):
 
 
 class DEMLTN(ltn.LightningModule):
-    """
-    DEM model in lightning.
-
-    Args:
-        `omics_dim`: list of input dimensions for each omics data.
-        `n_heads`: number of heads in the multi-head attention.
-        `n_encoders`: number of encoders.
-        `hidden_dim`: dimension of the feedforward network.
-        `output_dim`: number of output classes. If it is 1, the model will be a regression model. Otherwise, it should be at least 3 (3 for binary classification) for classification tasks.
-        `dropout`: dropout rate.
-        `learning_rate`: learning rate for the optimizer.
-    """
     def __init__(
             self,
             omics_dim: list[int],
@@ -178,6 +163,19 @@ class DEMLTN(ltn.LightningModule):
             learning_rate: float,
             is_regression: bool,
         ):
+        r"""DEM model in lightning.
+
+        Args:
+            omics_dim: list of input dimensions for each omics data.
+            n_heads: number of heads in the multi-head attention.
+            n_encoders: number of encoders.
+            hidden_dim: dimension of the feedforward network.
+            output_dim: number of output classes. If it is 1, the model will be a regression model. Otherwise, it should be at least 3 (3 for binary classification) for classification tasks.
+            dropout: dropout rate.
+            learning_rate: learning rate for the optimizer.
+            is_regression: whether the task is a regression task or not.
+        
+        """
         super().__init__()
         self.save_hyperparameters()
 
@@ -238,8 +236,7 @@ class DEMLTN(ltn.LightningModule):
                 }
     
     def _define_metrics(self, output_dim: int, regression: bool):
-        """
-        Define the loss function and the metrics.
+        r"""Define the loss function and the metrics.
         """
         if output_dim == 1:
             self.loss_fn = nn.MSELoss()

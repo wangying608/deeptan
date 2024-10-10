@@ -1,4 +1,4 @@
-"""
+r"""
 Dictionary keys and column names.
 """
 
@@ -34,11 +34,16 @@ num_heads = "n_heads"
 num_encoders = "n_encoders"
 dropout = "dropout"
 
-best_trials = 'logs'
-best_inner_folds = 'best_inners'
+best_trials = "logs"
+best_inner_folds = "best_inners"
 
 trial_tag = "trial_tag"
 study_tag = "study_tag"
 study_name = "study_name"
 min_loss = "min_loss"
 time_str = "x_time"
+
+omics = "omics"
+feature = "feature"
+feat_importance = "importance"
+feat_importance_abs = "importance_abs"

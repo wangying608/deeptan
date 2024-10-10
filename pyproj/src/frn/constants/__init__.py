@@ -1,4 +1,4 @@
-"""
+r"""
 Constants.
 """
 
@@ -12,6 +12,7 @@ title_val = "val"
 title_test = "test"
 
 title_val_loss = "val_loss"
+title_tst_loss = "test_loss"
 
 abbr_train = "trn"
 abbr_val = "val"
