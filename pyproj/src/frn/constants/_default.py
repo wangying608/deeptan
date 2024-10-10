@@ -1,6 +1,11 @@
 r"""
 Default values.
 """
+from numpy import ceil
+from multiprocessing import cpu_count
+
+n_threads = int(ceil(cpu_count() * 0.8))
+
 
 time_format = "%Y%m%d%H%M%S"
 time_delay = 11.7
@@ -8,7 +13,7 @@ ckpt_fname_format = "best-model-{epoch:04d}-{val_loss:.4f}"
 optuna_db = "sqlite:///optuna.db"
 n_jobs = 1
 n_trials = 10
-n_workers = 0
+n_workers = n_threads
 n_workers_litdata = 1
 accelerator = "auto"
 devices = "auto"
@@ -16,15 +21,13 @@ float32_matmul_precision = "high"
 compression_alg = "zstd"
 chunk_bytes = "256MB"
 
-n_jobs_rf = -1
+n_jobs_rf = n_threads
 n_estimators = 5000
 n_feat2save = 1000
 random_states = [i + 45 for i in range(10)]
 
 seed_1 = 42
 seed_2 = 43
-
-# ltn_precision = "16-mixed"
 
 lr = 1e-4
 batch_size = 32

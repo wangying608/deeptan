@@ -781,7 +781,7 @@ class MyDataModule4Uni(LightningDataModule):
             save_litdata: bool = False,
             chunk_bytes: str = MC.default.chunk_bytes,
             compression: str = MC.default.compression_alg,
-        ) -> str | None:
+        ) -> str | DataLoader:
         r"""
         Shuffle one feature in one omics data.
 
@@ -793,18 +793,23 @@ class MyDataModule4Uni(LightningDataModule):
             random_state: The random seed for reproducibility.
         
         """
-        data_all = self.read_mydataloader()
-        omics_names = read_omics_names(self.litdata_dir)
+        if not hasattr(self, 'data_all'):
+            self.data_all = self.read_mydataloader()
+        
+        if not hasattr(self, 'omics_names'):
+            self.omics_names = read_omics_names(self.litdata_dir)
+        
         if isinstance(which_omics, str):
-            which_om = omics_names.index(which_omics)
+            which_om = self.omics_names.index(which_omics)
         else:
-            if (which_omics + 1) > len(omics_names):
+            if (which_omics + 1) > len(self.omics_names):
                 raise ValueError("The specified omics index is out of range.")
             which_om = which_omics
         
         """
         Shuffle a feature's values
         """
+        data_all = deepcopy(self.data_all)
         _tmp: np.ndarray = data_all[MC.dkey.litdata_omics][which_om]
 
         np.random.seed(random_state)
@@ -826,8 +831,7 @@ class MyDataModule4Uni(LightningDataModule):
             )
             return output_dir
         else:
-            # return DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
-            self.dataloader_xxx = DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
+            return DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
     
     def read_mydataloader(self) -> Dict[str, Any]:
         if not hasattr(self, "dataloader_xxx"):

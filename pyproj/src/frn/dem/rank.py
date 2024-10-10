@@ -1,6 +1,6 @@
 import os
-import shutil
-from typing import Optional, Union, List
+import pickle
+from typing import Optional, Union, List, Dict
 import numpy as np
 import polars as pl
 from lightning import Trainer
@@ -72,18 +72,22 @@ class DEMFeatureRanking:
             random_states: List of random states for shuffling features.
         
         """
+        _filename = os.path.splitext(output_path)[0]
+
         # Load model
         self.load_model(model_path)
 
+        # Load data
+        self._datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
+
         # Get original prediction loss
-        _datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
-        _datamodule.setup()
-        loss = self.trainer.test(model=self._model, datamodule=_datamodule)
-        loss = np.mean(np.array(loss))
+        self._datamodule.setup()
+        loss = self.trainer.test(self._model, self._datamodule)[0][MC.title_tst_loss]
         
         # Shuffle features and get shuffled prediction loss.
         omics_names, omics_feat_paths = read_omics_names(litdata_dir, True)
-        importance_scores = []
+        importance_scores_list: List[float] = []
+        predicted_labels: Dict[str, np.ndarray] = {}
         feature_names: List[str] = []
         which_omics = []
         for x_om in range(len(omics_names)):
@@ -92,37 +96,58 @@ class DEMFeatureRanking:
             for x_feat in range(n_features):
                 feature_names.append(_feat_names[x_feat])
                 which_omics.append(omics_names[x_om])
-                importance_scores.append(self.run_a_feat(litdata_dir, x_om, x_feat, random_states))
+                _avg_loss, _avg_pred = self.run_a_feat(x_om, x_feat, random_states)
+                importance_scores_list.append(_avg_loss)
+                predicted_labels[f"{omics_names[x_om]}+{_feat_names[x_feat]}"] = _avg_pred
+
+        # Write predicted labels to pickle file
+        path_pkl = _filename + ".pkl"
+        with open(path_pkl, "wb") as f:
+            pickle.dump(predicted_labels, f)
 
         # Rank features by their importance scores
-        importance_scores = loss - np.array(importance_scores)
-        importance_scores_abs = np.absolute(importance_scores)
-        print(feature_names[:4])
-        print(importance_scores_abs[:4])
-        _sortperm = np.argsort(importance_scores_abs, order='descending')
-        importance_scores = np.take(importance_scores, _sortperm)
-        importance_scores_abs = np.take(importance_scores_abs, _sortperm)
+        importance_scores = np.array(importance_scores_list).flatten().astype(np.float64) * -1.0 / loss + 1.0
+        importance_scores_abs = np.absolute(importance_scores).flatten().tolist()
+        _sortperm = np.argsort(importance_scores_abs)
+
+        importance_scores = importance_scores[_sortperm].tolist()
+        importance_scores_abs = importance_scores_abs[_sortperm]
         feature_names = [feature_names[i] for i in _sortperm.astype(int).tolist()]
         which_omics = [which_omics[i] for i in _sortperm.astype(int).tolist()]
 
-        # Save feature ranking results
+        # Save feature ranking results as CSV and Parquet
         df_o = pl.DataFrame({MC.dkey.omics: which_omics, MC.dkey.feature: feature_names, MC.dkey.feat_importance: importance_scores, MC.dkey.feat_importance_abs: importance_scores_abs})
-        _filename = os.path.splitext(output_path)[0]
         df_o.write_csv(_filename + ".csv")
         df_o.write_parquet(_filename + ".parquet")
-
-    def run_a_feat(self, litdata_dir: str, which_omics: Union[int, str], which_feature: int, random_states: List[int]) -> float:
+    
+    def run_a_feat(self, which_omics: Union[int, str], which_feature: int, random_states: List[int], litdata_dir: Optional[str]=None):
         r""" Get average loss for a single shuffled feature.
         """
-        # Load data
+        if not hasattr(self, '_datamodule'):
+            if litdata_dir is not None:
+                self._datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
+            else:
+                raise ValueError("Please specify litdata_dir.")
+        
         losses: List[float] = []
+        predictions = []
         for random_state in random_states:
-            _datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
-            _datamodule.shuffle_a_feat(which_omics, which_feature, random_state)
-            losses_shuffled = self.trainer.test(model=self._model, datamodule=_datamodule)
-            losses.append(np.mean(np.array(losses_shuffled)).item())
+            _dataloader = self._datamodule.shuffle_a_feat(which_omics, which_feature, random_state)
+            losses_shuffled = self.trainer.test(self._model, _dataloader)[0][MC.title_tst_loss]
+            #
+            predictions_shuffled = self.trainer.predict(self._model, _dataloader)
+            assert predictions_shuffled is not None
+            pred_array_shuffled = np.concatenate(predictions_shuffled)
+            # print(f"Shape of prediction results: {pred_array_shuffled.shape}")
+            #
+            losses.append(losses_shuffled)
+            predictions.append(pred_array_shuffled)
         losses_avg = np.mean(losses).item()
-        return losses_avg
+        predictions_avg = np.mean(predictions, axis=0)
+        print(f"\nAverage loss: {losses_avg}")
+        # print(f"Average prediction: {predictions_avg}\n")
+        # print(f"Shape of average prediction: {predictions_avg.shape}\n")
+        return losses_avg, predictions_avg
         
     def load_model(self, model_path: str):
         r"""Load a model's checkpoint to specified device and define a trainer.
