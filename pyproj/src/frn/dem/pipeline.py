@@ -320,6 +320,10 @@ class DEMFitPipe:
                     n_jobs=self.n_jobs,
                 )
                 dem_fit_.optimize(n_trials=self.n_trials, storage=path_storage)
+        
+        # Remove checkpoints of inferior models
+        _collector = CollectFitLog(self.uniq_logdir)
+        _collector.remove_inferior_models()
 
 
 class DEMPredict:

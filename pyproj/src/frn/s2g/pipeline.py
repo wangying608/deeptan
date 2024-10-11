@@ -261,6 +261,10 @@ class SNP2GBFitPipe:
                 )
                 snp2gb_train_x.optimize(n_trials=self.n_trials, storage=path_storage)
 
+        # Remove checkpoints of inferior models
+        _collector = CollectFitLog(self.uniq_logdir)
+        _collector.remove_inferior_models()
+
 
 def execute_s2g(
         dir_litdata: str,

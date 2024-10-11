@@ -598,10 +598,10 @@ class CollectFitLog:
         # Pick ids of outer and inner folds, val_loss and version from ckpt file paths
         test_loss_values = [self.read_tensorboard_events(os.path.join(os.path.dirname(path_x), "version_0")) for path_x in paths_ckpt]
         val_loss_values = [float(os.path.basename(path_x).split('-')[3].split('=')[1].split('.ckpt')[0]) for path_x in paths_ckpt]
-        trial_tags = [path_x.split('/')[-2] for path_x in paths_ckpt]
-        study_tags = [path_x.split('/')[-4].split('_')[-1] for path_x in paths_ckpt]
-        ncv_inner_x = [int(path_x.split('/')[-3].split('_')[-1]) for path_x in paths_ckpt]
-        ncv_outer_x = [int(path_x.split('/')[-3].split('_')[-2]) for path_x in paths_ckpt]
+        trial_tags = [path_x.split(os.path.sep)[-2] for path_x in paths_ckpt]
+        study_tags = [path_x.split(os.path.sep)[-4].split('_')[-1] for path_x in paths_ckpt]
+        ncv_inner_x = [int(path_x.split(os.path.sep)[-3].split('_')[-1]) for path_x in paths_ckpt]
+        ncv_outer_x = [int(path_x.split(os.path.sep)[-3].split('_')[-2]) for path_x in paths_ckpt]
 
         # Create a dataframe with the above values
         ckpt_df = pl.DataFrame({MC.dkey.which_outer: ncv_outer_x, MC.dkey.which_inner: ncv_inner_x, MC.title_tst_loss: test_loss_values, MC.title_val_loss: val_loss_values, MC.dkey.trial_tag: trial_tags, MC.dkey.study_tag: study_tags, MC.dkey.ckpt_path: paths_ckpt})
@@ -619,6 +619,8 @@ class CollectFitLog:
                     for dirpath, dirnames, files in os.walk(self.dir_log)
                     for f in files if f.endswith('.db')
         ]
+        if len(paths_optuna_db) == 0:
+            raise FileNotFoundError('No optuna db files found.')
         paths_optuna_db.sort()
         print(f'Found {len(paths_optuna_db)} optuna db files\n')
         
@@ -667,6 +669,8 @@ class CollectFitLog:
         paths_ckpt = [os.path.join(dirpath, f)
                     for dirpath, dirnames, files in os.walk(self.dir_log)
                     for f in files if f.endswith('.ckpt')]
+        if len(paths_ckpt) == 0:
+            raise FileNotFoundError("No checkpoint files found.")
         paths_ckpt.sort()
         print(f'Found {len(paths_ckpt)} checkpoints.\n')
         return paths_ckpt
