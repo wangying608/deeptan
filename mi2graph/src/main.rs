@@ -30,6 +30,9 @@ fn main() {
     let ratio_step_sliding: f64 = *matches
         .get_one("ratio_step_sliding")
         .expect("Error in reading step size of sliding window / number of samples");
+    let n_threads: usize = *matches
+        .get_one("nthreads")
+        .expect("Error in reading number of threads");
 
     // let rand_2d_array = read_npz_to_array2d(path_in).expect("Failed to read file");
     let rand_2d_array = read_npy_to_array2d(path_in).expect("Failed to read file");
@@ -44,6 +47,7 @@ fn main() {
         ratio_min_window,
         ratio_step_window,
         ratio_step_sliding,
+        n_threads,
     )
     .expect("Failed to read file");
 }
@@ -102,5 +106,11 @@ fn cli() -> Command {
                 .long("stepsli")
                 .help("Step size of sliding window / number of samples")
                 .default_value("0.05"),
+            Arg::new("nthreads")
+                .value_parser(clap::value_parser!(usize))
+                .long("threads")
+                .short('t')
+                .help("Number of threads")
+                .default_value("0"),
         ])
 }

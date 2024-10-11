@@ -1,4 +1,5 @@
 use clap::{self, Arg, ArgAction, Command};
+// use rayon::prelude::*;
 use pregv::{build_gff_dict, vcf2encoded};
 
 fn main() {
@@ -35,6 +36,7 @@ fn main() {
                 .map(|s| s.as_str())
                 .unwrap(),
             sub_matches.get_one::<bool>("moremem").unwrap().to_owned(),
+            sub_matches.get_one::<usize>("nthreads").unwrap().to_owned(),
         )
         .expect("Failed to encode genotypes"),
         _ => unreachable!("Please use available subcommands"),
@@ -73,34 +75,42 @@ fn cli() -> Command {
                     Arg::new("vcf")
                         .long("input-vcf")
                         .short('v')
-                        .help("Input VCF file.")
+                        .help("Input VCF file")
                         .required(true)
                         .action(ArgAction::Set),
                     Arg::new("gffdict")
                         .long("input-gffdict")
                         .short('d')
-                        .help("Input GFF dict file.")
+                        .help("Input GFF dict file")
                         .required(true)
                         .action(ArgAction::Set),
                     Arg::new("output")
                         .long("output")
                         .short('o')
-                        .help("Output pickle file.")
+                        .help("Output pickle file")
                         .required(true)
                         .action(ArgAction::Set),
                     Arg::new("strand")
                         .long("strand")
                         .short('s')
-                        .help("Use \"+\", \"-\" or \".\"(both) to specify strand.")
+                        .help("Use \"+\", \"-\" or \".\"(both) to specify strand")
                         .required(false)
                         .default_value(".")
                         .action(ArgAction::Set),
                     Arg::new("moremem")
                         .long("more-mem")
                         .short('m')
-                        .help("Use more RAM.")
+                        .help("Use more RAM")
                         .required(false)
                         .action(ArgAction::SetTrue),
+                    Arg::new("nthreads")
+                        .value_parser(clap::value_parser!(usize))
+                        .long("threads")
+                        .short('t')
+                        .help("Number of threads")
+                        .required(false)
+                        .default_value("0")
+                        .action(ArgAction::Set),
                 ]),
         )
 }

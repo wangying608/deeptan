@@ -120,7 +120,7 @@ class DEMFeatureRanking:
         df_o.write_csv(_filename + ".csv")
         df_o.write_parquet(_filename + ".parquet")
     
-    def run_a_feat(self, which_omics: Union[int, str], which_feature: int, random_states: List[int], litdata_dir: Optional[str]=None):
+    def run_a_feat(self, which_omics: Union[int, str], which_feature: int, random_states: List[int], litdata_dir: Optional[str]=None, model_path: Optional[str]=None):
         r""" Get average loss for a single shuffled feature.
         """
         if not hasattr(self, '_datamodule'):
@@ -128,6 +128,11 @@ class DEMFeatureRanking:
                 self._datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
             else:
                 raise ValueError("Please specify litdata_dir.")
+        if not hasattr(self, "trainer"):
+            if model_path is not None:
+                self.load_model(model_path)
+            else:
+                raise ValueError("Please specify model_path.")
         
         losses: List[float] = []
         predictions = []

@@ -56,7 +56,19 @@ pub fn mi_mat_with_data_filter(
     ratio_min_window: f64,
     ratio_step_window: f64,
     ratio_step_sliding: f64,
+    n_threads: usize,
 ) -> Result<(), Box<dyn Error>> {
+    // Check available threads
+    let mut num_threads = std::thread::available_parallelism().unwrap().get();
+    if num_threads > n_threads && n_threads > 0 {
+        num_threads = n_threads;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .unwrap();
+    println!("\n⚡️  Using {} threads.\n", num_threads);
+    
     // Print start time
     println!("\nStart time: {:?}\n", Local::now());
 

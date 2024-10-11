@@ -81,8 +81,20 @@ pub fn vcf2encoded(
     path_output: &str,
     strandx: &str,
     use_more_mem: bool,
+    n_threads: usize,
 ) -> Result<(), Box<dyn Error>> {
-    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict, strandx, use_more_mem)?;
+    // Check available threads
+    let mut num_threads = std::thread::available_parallelism().unwrap().get();
+    if num_threads > n_threads && n_threads > 0 {
+        num_threads = n_threads;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_threads)
+        .build_global()
+        .unwrap();
+    println!("\n⚡️  Using {} threads.\n", num_threads);
+
+    let vcf_dict = build_vcf_dict(path_vcf, path_gff_dict, strandx, use_more_mem, num_threads)?;
 
     let vcf_mat = encode_vcf(&vcf_dict);
 
@@ -147,6 +159,7 @@ fn build_vcf_dict(
     path_gff_dict: &str,
     strandx: &str,
     use_more_mem: bool,
+    n_threads: usize,
 ) -> Result<VcfInfo, Box<dyn Error>> {
     // Read gff dict
     let decompressed_data = read_gz(path_gff_dict)?;
@@ -172,21 +185,19 @@ fn build_vcf_dict(
         // Read whole VCF file into memory
         let records: Vec<vcf::Record> = reader_vcf.records().filter_map(|r| r.ok()).collect();
 
-        // Available threads
-        let num_threads = std::thread::available_parallelism().unwrap().get();
         // Chunk size
         let n_records = records.len();
-        let chunk_size = n_records / num_threads;
+        let chunk_size = n_records / n_threads;
         println!(
             "🔥 Using {} threads to process {} VCF records.\n",
-            num_threads, n_records,
+            n_threads, n_records,
         );
 
         // Multi-threading for chunks
         let par_chunks = records.par_chunks(chunk_size).map(|chunk| {
             chunk
                 .iter()
-                .map(|r| check_snp(r, &gff_dict, &block_ids, false, strandx))
+                .map(|r| check_snp(r, &gff_dict, &block_ids, false, strandx, n_threads))
                 .collect::<Vec<SnpCheckKV>>()
         });
         let snp_dict_vec: Vec<SnpCheckKV> = par_chunks
@@ -210,8 +221,14 @@ fn build_vcf_dict(
             if !result.is_ok() {
                 continue;
             } else {
-                let snp_check_kv =
-                    check_snp(&result.unwrap(), &gff_dict, &block_ids, true, strandx);
+                let snp_check_kv = check_snp(
+                    &result.unwrap(),
+                    &gff_dict,
+                    &block_ids,
+                    true,
+                    strandx,
+                    n_threads,
+                );
                 if !snp_check_kv.snp_id.is_empty() {
                     snp_dict.insert(snp_check_kv.snp_id, snp_check_kv.snp_info);
                 }
@@ -261,6 +278,7 @@ fn check_snp(
     block_ids: &[String],
     para: bool,
     strandx: &str,
+    n_threads: usize,
 ) -> SnpCheckKV {
     let mut snp_idx = String::new();
     let mut snp_info = SnpInfo {
@@ -278,7 +296,7 @@ fn check_snp(
         let seqid = record_x.reference_sequence_name().to_string();
 
         // Check position in gff dict
-        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x, para, strandx);
+        let snp_found = check_pos(gff_dict, block_ids, &seqid, pos_x, para, strandx, n_threads);
 
         if snp_found.found {
             let ref_base = record_x.reference_bases().to_string();
@@ -316,6 +334,7 @@ fn check_pos(
     pos: usize,
     para: bool,
     strandx: &str,
+    n_threads: usize,
 ) -> SnpFound {
     let mut snp_found = SnpFound {
         found: false,
@@ -328,8 +347,9 @@ fn check_pos(
         //     let gene_info = gff_dict.get(&block_ids[i]).unwrap();
         //     *isf = check_pos_single(gene_info, seq_name, pos);
         // });
-        let num_threads = std::thread::available_parallelism().unwrap().get();
-        let chunk_size = n_genome_block / num_threads;
+
+        // let num_threads = std::thread::available_parallelism().unwrap().get();
+        let chunk_size = n_genome_block / n_threads;
         // println!(
         //     "🔥 Using {} threads to process {} genome blocks.\n",
         //     num_threads, n_genome_block,
