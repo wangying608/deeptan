@@ -7,7 +7,7 @@ from lightning import Trainer
 from frn.dem.model import DEMLTN
 import frn.constants as MC
 from frn.utils.data_ncv import MyDataModule4Uni, read_omics_names
-from frn.utils.uni import get_map_location, get_avail_nvgpu, CollectFitLog
+from frn.utils.uni import get_map_location, get_avail_nvgpu, CollectFitLog, time_string
 
 
 class DEMFeatureRanking:
@@ -73,6 +73,8 @@ class DEMFeatureRanking:
         
         """
         _filename = os.path.splitext(output_path)[0]
+        dir_save_pred = _filename + "_pred"
+        os.makedirs(dir_save_pred, exist_ok=True)
 
         # Load model
         self.load_model(model_path)
@@ -86,8 +88,7 @@ class DEMFeatureRanking:
         
         # Shuffle features and get shuffled prediction loss.
         omics_names, omics_feat_paths = read_omics_names(litdata_dir, True)
-        importance_scores_list: List[float] = []
-        predicted_labels: Dict[str, np.ndarray] = {}
+        importance_scores: List[float] = []
         feature_names: List[str] = []
         which_omics = []
         for x_om in range(len(omics_names)):
@@ -96,27 +97,28 @@ class DEMFeatureRanking:
             for x_feat in range(n_features):
                 feature_names.append(_feat_names[x_feat])
                 which_omics.append(omics_names[x_om])
-                _avg_loss, _avg_pred = self.run_a_feat(x_om, x_feat, random_states)
-                importance_scores_list.append(_avg_loss)
-                predicted_labels[f"{omics_names[x_om]}+{_feat_names[x_feat]}"] = _avg_pred
+                _loss, _pred = self.run_a_feat(x_om, x_feat, random_states)
+                _score = np.mean([np.abs(_iv - loss) for _iv in _loss]).item() / loss
+                print(f"\nAverage impact of {_feat_names[x_feat]} on {omics_names[x_om]} : {_score:.4f}\n")
+                importance_scores.append(_score)
 
-        # Write predicted labels to pickle file
-        path_pkl = _filename + ".pkl"
-        with open(path_pkl, "wb") as f:
-            pickle.dump(predicted_labels, f)
+                # Write predicted labels `_pred` (List[np.ndarray]) to npz file
+                _path_npz = os.path.join(dir_save_pred, f"om+{x_om}_feat+{x_feat}.npz")
+                np.savez(_path_npz, _pred)
+
+                # Save/Append omics name and feature name to a text file
+                with open(os.path.join(dir_save_pred, "_log.txt"), "a") as f:
+                    f.write(f"{x_om}\t{x_feat}\t{omics_names[x_om]}\t{_feat_names[x_feat]}\t{_score}\t{time_string()}\n")
 
         # Rank features by their importance scores
-        importance_scores = np.array(importance_scores_list).flatten().astype(np.float64) * -1.0 / loss + 1.0
-        importance_scores_abs = np.absolute(importance_scores).flatten().tolist()
-        _sortperm = np.argsort(importance_scores_abs)
+        _sortperm = np.argsort(importance_scores).tolist()
 
-        importance_scores = importance_scores[_sortperm].tolist()
-        importance_scores_abs = importance_scores_abs[_sortperm]
-        feature_names = [feature_names[i] for i in _sortperm.astype(int).tolist()]
-        which_omics = [which_omics[i] for i in _sortperm.astype(int).tolist()]
+        importance_scores = [importance_scores[i] for i in _sortperm]
+        feature_names = [feature_names[i] for i in _sortperm]
+        which_omics = [which_omics[i] for i in _sortperm]
 
         # Save feature ranking results as CSV and Parquet
-        df_o = pl.DataFrame({MC.dkey.omics: which_omics, MC.dkey.feature: feature_names, MC.dkey.feat_importance: importance_scores, MC.dkey.feat_importance_abs: importance_scores_abs})
+        df_o = pl.DataFrame({MC.dkey.omics: which_omics, MC.dkey.feature: feature_names, MC.dkey.feat_importance: importance_scores})
         df_o.write_csv(_filename + ".csv")
         df_o.write_parquet(_filename + ".parquet")
     
@@ -135,7 +137,7 @@ class DEMFeatureRanking:
                 raise ValueError("Please specify model_path.")
         
         losses: List[float] = []
-        predictions = []
+        predictions: List[np.ndarray] = []
         for random_state in random_states:
             _dataloader = self._datamodule.shuffle_a_feat(which_omics, which_feature, random_state)
             losses_shuffled = self.trainer.test(self._model, _dataloader)[0][MC.title_tst_loss]
@@ -147,12 +149,12 @@ class DEMFeatureRanking:
             #
             losses.append(losses_shuffled)
             predictions.append(pred_array_shuffled)
-        losses_avg = np.mean(losses).item()
-        predictions_avg = np.mean(predictions, axis=0)
-        print(f"\nAverage loss: {losses_avg}")
+        # losses_avg = np.mean(losses).item()
+        # predictions_avg = np.mean(predictions, axis=0)
+        # print(f"\nAverage loss: {losses_avg}")
         # print(f"Average prediction: {predictions_avg}\n")
         # print(f"Shape of average prediction: {predictions_avg.shape}\n")
-        return losses_avg, predictions_avg
+        return losses, predictions
         
     def load_model(self, model_path: str):
         r"""Load a model's checkpoint to specified device and define a trainer.
