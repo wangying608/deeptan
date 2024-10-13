@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import Optional, Union, List, Dict
+from typing import Optional, Union, List, Dict, Tuple
 import numpy as np
 import polars as pl
 from lightning import Trainer
@@ -65,7 +65,7 @@ class DEMFeatureRanking:
         r"""Rank features.
 
         Args:
-            litdata_dir: Path to the directory containing the nested cross-validation litdata.
+            litdata_dir: Path to the directory containing litdata.
 
             output_path: Path to the file to save the results.
 
@@ -81,10 +81,17 @@ class DEMFeatureRanking:
 
         # Load data
         self._datamodule = MyDataModule4Uni(litdata_dir, self.batch_size, self.n_workers)
+        self._datamodule.setup()
 
         # Get original prediction loss
-        self._datamodule.setup()
-        loss = self.trainer.test(self._model, self._datamodule)[0][MC.title_tst_loss]
+        # loss = self.trainer.test(self._model, self._datamodule)[0][MC.title_tst_loss]
+        prediction_and_loss_values = self.trainer.predict(model=self._model, datamodule=self._datamodule)
+        assert prediction_and_loss_values is not None
+        predictions, loss = self.prep_pred_and_loss(prediction_and_loss_values)
+        print(f"\nOriginal loss: {loss:.4f}\n")
+        # Write original prediction and loss
+        _path_npz = os.path.join(dir_save_pred, "_original.npz")
+        np.savez(_path_npz, predictions, loss)
         
         # Shuffle features and get shuffled prediction loss.
         omics_names, omics_feat_paths = read_omics_names(litdata_dir, True)
@@ -100,11 +107,11 @@ class DEMFeatureRanking:
                 _loss, _pred = self.run_a_feat(x_om, x_feat, random_states)
                 _score = np.mean([np.abs(_iv - loss) for _iv in _loss]).item() / loss
                 print(f"\nAverage impact of {_feat_names[x_feat]} on {omics_names[x_om]} : {_score:.4f}\n")
-                importance_scores.append(_score)
+                importance_scores.append(_score.item())
 
                 # Write predicted labels `_pred` (List[np.ndarray]) to npz file
                 _path_npz = os.path.join(dir_save_pred, f"om+{x_om}_feat+{x_feat}.npz")
-                np.savez(_path_npz, _pred)
+                np.savez(_path_npz, _pred, _loss)
 
                 # Save/Append omics name and feature name to a text file
                 with open(os.path.join(dir_save_pred, "_log.txt"), "a") as f:
@@ -138,22 +145,17 @@ class DEMFeatureRanking:
         
         losses: List[float] = []
         predictions: List[np.ndarray] = []
+        
         for random_state in random_states:
             _dataloader = self._datamodule.shuffle_a_feat(which_omics, which_feature, random_state)
-            losses_shuffled = self.trainer.test(self._model, _dataloader)[0][MC.title_tst_loss]
-            #
-            predictions_shuffled = self.trainer.predict(self._model, _dataloader)
-            assert predictions_shuffled is not None
-            pred_array_shuffled = np.concatenate(predictions_shuffled)
-            # print(f"Shape of prediction results: {pred_array_shuffled.shape}")
-            #
-            losses.append(losses_shuffled)
-            predictions.append(pred_array_shuffled)
-        # losses_avg = np.mean(losses).item()
-        # predictions_avg = np.mean(predictions, axis=0)
-        # print(f"\nAverage loss: {losses_avg}")
-        # print(f"Average prediction: {predictions_avg}\n")
-        # print(f"Shape of average prediction: {predictions_avg.shape}\n")
+            
+            prediction_and_loss_shuffled = self.trainer.predict(self._model, _dataloader)
+            assert prediction_and_loss_shuffled is not None
+            predictions_shuffled, losses_shuffled = self.prep_pred_and_loss(prediction_and_loss_shuffled)
+            print(f"\nShuffled loss: {losses_shuffled:.4f}\n")
+            losses.append(losses_shuffled.item())
+            predictions.append(predictions_shuffled)
+        
         return losses, predictions
         
     def load_model(self, model_path: str):
@@ -171,3 +173,20 @@ class DEMFeatureRanking:
         self._model.freeze()
         self.available_devices = get_avail_nvgpu()
         self.trainer = Trainer(accelerator=self.accelerator, devices=self.available_devices, default_root_dir=None, logger=False)
+
+    def prep_pred_and_loss(self, _pred):
+        r"""Prepare the output of "predict" step.
+        """
+        _predicted_each_batch = [np.array(i[0]) for i in _pred]
+        _predicted = np.concatenate(_predicted_each_batch, axis=0)
+        print(f"Shape of predicted: {_predicted.shape}")
+        
+        # Get actual batch sizes (The last batch may be smaller than others)
+        _batch_sizes = [len(i) for i in _predicted_each_batch]
+
+        _loss_each_batch = np.concatenate([np.array(i[1], ndmin=1) for i in _pred])
+
+        # Weight the loss by batch size
+        _loss = np.average(_loss_each_batch, weights=_batch_sizes)
+
+        return _predicted, _loss

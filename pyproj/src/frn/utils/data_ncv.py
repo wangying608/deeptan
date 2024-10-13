@@ -765,13 +765,16 @@ class MyDataModule4Uni(LightningDataModule):
         self.n_workers = n_workers
     
     def setup(self, stage=None):
-        self.dataloader_xxx = StreamingDataLoader(StreamingDataset(self.litdata_dir), batch_size=self.batch_size, num_workers=self.n_workers)
+        self._dataset = StreamingDataset(self.litdata_dir)
+        print(f"Length of dataset: {len(self._dataset)}")
+        self._dataloader_pred = StreamingDataLoader(self._dataset, batch_size=self.batch_size, num_workers=self.n_workers)
+        self._dataloader_test = StreamingDataLoader(self._dataset, batch_size=self.batch_size, num_workers=self.n_workers)
     
     def predict_dataloader(self):
-        return self.dataloader_xxx
+        return self._dataloader_pred
 
     def test_dataloader(self):
-        return self.dataloader_xxx
+        return self._dataloader_test
     
     def shuffle_a_feat(
             self,
@@ -834,14 +837,14 @@ class MyDataModule4Uni(LightningDataModule):
             return DataLoader(_dataset, self.batch_size, num_workers=self.n_workers)
     
     def read_mydataloader(self) -> Dict[str, Any]:
-        if not hasattr(self, "dataloader_xxx"):
+        if not hasattr(self, "_dataloader_pred"):
             self.setup()
         
         """
         Read data from dataloader.
         """
         data_all = {}
-        for batch in self.dataloader_xxx:
+        for batch in self.predict_dataloader():
             for xkey in batch.keys():
                 if xkey not in data_all:
                     data_all[xkey] = batch[xkey]

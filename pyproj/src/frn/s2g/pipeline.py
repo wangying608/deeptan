@@ -294,12 +294,12 @@ def execute_s2g(
     predictions = trainer.predict(model=model4gene, datamodule=datamodule_s2g)
     assert predictions is not None
     pred_array = np.concatenate(predictions)
-    print(f"Shape of prediction results: {pred_array.shape}")
+    print(f"\nShape of prediction results: {pred_array.shape}\n")
 
     # Rename index to sample_ids
     # - Prepare sample ids
     sample_ids = []
-    for batch in datamodule_s2g.dataloader_xxx:
+    for batch in datamodule_s2g.predict_dataloader():
         sample_ids.extend(batch[MC.dkey.litdata_id])
     print(f'Number of samples: {len(sample_ids)}')
     print(sample_ids)

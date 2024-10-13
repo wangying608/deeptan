@@ -221,7 +221,10 @@ class DEMLTN(ltn.LightningModule):
     def predict_step(self, batch, batch_idx, dataloader_idx=None):
         x = batch[MC.dkey.litdata_omics]
         y_pred = self.forward(x)
-        return y_pred
+
+        y = batch[MC.dkey.litdata_label]
+        loss = self._my_loss(MC.title_predict, y, y_pred)
+        return y_pred, loss
     
     def configure_optimizers(self):
         optimizer = Adam(self.parameters(), lr=self.learning_rate)
@@ -279,6 +282,8 @@ class DEMLTN(ltn.LightningModule):
 
         if self.output_dim == 1:
             loss = self.loss_fn(y_pred, y)
+            if which_step == MC.title_predict:
+                return loss
             self.log(f"{which_step}_loss", loss, sync_dist=True)
             self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
             if y.shape[0] < 2:
@@ -287,9 +292,9 @@ class DEMLTN(ltn.LightningModule):
             self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
         else:
             if self.is_regression:
-                loss = self.loss_fn(y_pred, y)
-                loss = loss.mean(dim=0)
-                loss = loss.sum()
+                loss = self.loss_fn(y_pred, y).mean(dim=0).sum()
+                if which_step == MC.title_predict:
+                    return loss
                 self.log(f"{which_step}_loss", loss, sync_dist=True)
                 # self.log(f"{which_step}_mae", self.mae(y_pred, y), sync_dist=True)
                 # if y.shape[0] < 2:
@@ -298,6 +303,8 @@ class DEMLTN(ltn.LightningModule):
                 # self.log(f"{which_step}_r2", self.r2(y_pred, y), sync_dist=True)
             else:
                 loss = self.loss_fn(y_pred, y)
+                if which_step == MC.title_predict:
+                    return loss
                 self.log(f"{which_step}_loss", loss, sync_dist=True)
                 
                 self.log(f"{which_step}_mcc", self.mcc(y_pred, y), sync_dist=True)
