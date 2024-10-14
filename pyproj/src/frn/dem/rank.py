@@ -1,6 +1,5 @@
 import os
-import pickle
-from typing import Optional, Union, List, Dict, Tuple
+from typing import Optional, Union, List
 import numpy as np
 import polars as pl
 from lightning import Trainer
@@ -118,7 +117,7 @@ class DEMFeatureRanking:
                     f.write(f"{x_om}\t{x_feat}\t{omics_names[x_om]}\t{_feat_names[x_feat]}\t{_score}\t{time_string()}\n")
 
         # Rank features by their importance scores
-        _sortperm = np.argsort(importance_scores).tolist()
+        _sortperm = np.argsort(importance_scores)[::-1].tolist()
 
         importance_scores = [importance_scores[i] for i in _sortperm]
         feature_names = [feature_names[i] for i in _sortperm]

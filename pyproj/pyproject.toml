@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xg2p"
+version = "0.1.0"
+description = "xxxxx."
+authors = [
+    {name = "Chenhua Wu", email = "chanhuawu@outlook.com"},
+    {name = "Yanlin Ren", email = "ryl1999@126.com"},
+]
+readme = "README.md"
+requires-python = ">=3.10, <3.13"
+license = {file = "LICENSE"}
+keywords = ["bioinformatics", "deep learning", "pytorch"]
+classifiers = [
+    "Environment :: Console",
+    "Natural Language :: English",
+    "Development Status :: 4 - Beta",
+    "Topic :: Scientific/Engineering :: Bio-Informatics",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Operating System :: POSIX :: Linux",
+]
+dependencies = [
+    "torch>=2.2",
+    "lightning>=2.4.0",
+    "litdata>=0.2.29",
+    "mosaicml-streaming>=0.8.1",
+    "pyarrow>=17.0",
+    "torchmetrics>=1.4.1",
+    "tensorboard>=2.18.0",
+    "numpy>=2.0",
+    "polars>=1.9.0",
+    "scikit-learn>=1.5.0",
+    "scipy>=1.13.0",
+    "optuna>=4.0",
+    "optuna-dashboard>=0.16.1",
+    "zstd>=1.5.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/xxxxx"
+
+[project.scripts]
