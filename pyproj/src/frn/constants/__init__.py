@@ -2,10 +2,10 @@ r"""
 Constants.
 """
 
-import frn.constants._default as default
-import frn.constants._fname as fname
-import frn.constants._dict_key as dkey
-import frn.constants._hparam_candidates as hparam_candidates
+import frn.constants.default as default
+import frn.constants.fname as fname
+import frn.constants.dict_key as dkey
+import frn.constants.hparam_candidates as hparam_candidates
 
 title_train = "train"
 title_val = "val"

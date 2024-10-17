@@ -90,7 +90,7 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(f64))
                 .long("maxwin")
                 .help("Maximum ratio of window size to the number of samples")
-                .default_value("0.97"),
+                .default_value("0.99"),
             Arg::new("ratio_min_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("minwin")
@@ -100,7 +100,7 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(f64))
                 .long("stepwin")
                 .help("Step size of window size / number of samples")
-                .default_value("0.05"),
+                .default_value("0.08"),
             Arg::new("ratio_step_sliding")
                 .value_parser(clap::value_parser!(f64))
                 .long("stepsli")
@@ -110,7 +110,7 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(usize))
                 .long("threads")
                 .short('t')
-                .help("Number of threads")
+                .help("Number of threads [default: 0, use all available threads]")
                 .default_value("0"),
         ])
 }
