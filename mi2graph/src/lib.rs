@@ -37,6 +37,7 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 /// + `ratio_min_window`: minimum (window_size / num_samples)
 /// + `ratio_step_window`: window_size_step_len / num_samples
 /// + `ratio_step_sliding`: sliding_step_len / num_samples
+/// + `n_threads`: number of threads
 ///
 /// **Output**:
 /// + NPZ file

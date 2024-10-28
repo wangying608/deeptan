@@ -5,10 +5,10 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import GATv2Conv, global_mean_pool
 from torch_geometric.nn.pool import SAGPooling
-import frn.constants as MC
+import frn.constants as const
 
 
-torch.set_float32_matmul_precision(MC.default.float32_matmul_precision)
+torch.set_float32_matmul_precision(const.default.float32_matmul_precision)
 
 
 class Backbone(nn.Module):

@@ -7,42 +7,43 @@ import numpy as np
 import polars as pl
 from litdata import StreamingDataLoader, StreamingDataset
 from torch import Tensor
+import frn.constants as const
 
 
-def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
-    r""" Auto preprocessing for features in training data.
+# def auto_proc_feat4trn(in_array: np.ndarray, threshold_ptp: float=100.0):
+#     r""" Auto preprocessing for features in training data.
 
-    Args:
-        in_array: Input array with shape ``(n_features, n_samples)``.
+#     Args:
+#         in_array: Input array with shape ``(n_features, n_samples)``.
         
-        threshold_ptp: Threshold for the range.
+#         threshold_ptp: Threshold for the range.
 
-    Steps:
-        1. Remove feature if its range is similar to zero.
-        2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
+#     Steps:
+#         1. Remove feature if its range is similar to zero.
+#         2. Apply scale and log2 transformation to each feature in the training set. (Apply log2 transformation if the range of the array is larger than the threshold.)
     
-    """
-    values_min = np.min(in_array, axis=1)
-    values_max = np.max(in_array, axis=1)
-    values_ptp = values_max - values_min
+#     """
+#     values_min = np.min(in_array, axis=1)
+#     values_max = np.max(in_array, axis=1)
+#     values_ptp = values_max - values_min
 
-    out_array = np.copy(in_array) + 1e-4
-    feat2rm = np.where(values_ptp < 1e-3)[0]
+#     out_array = np.copy(in_array) + 1e-4
+#     feat2rm = np.where(values_ptp < 1e-3)[0]
     
-    for i in range(in_array.shape[0]):
-        if i in feat2rm:
-            continue
-        if values_ptp[i] > threshold_ptp:
-            # Apply log2 transformation
-            out_array[i, :] = np.log2(out_array[i, :])
+#     for i in range(in_array.shape[0]):
+#         if i in feat2rm:
+#             continue
+#         if values_ptp[i] > threshold_ptp:
+#             # Apply log2 transformation
+#             out_array[i, :] = np.log2(out_array[i, :])
     
-    out_array = np.delete(out_array, feat2rm, axis=0)
+#     out_array = np.delete(out_array, feat2rm, axis=0)
 
-    values_min = np.min(out_array, axis=1)
-    values_max = np.max(out_array, axis=1)
-    # out_array = (out_array - values_min) / (values_max - values_min)
-    out_array = (out_array - values_min[:, None]) / (values_max[:, None] - values_min[:, None])
-    return out_array, values_min, values_max, feat2rm
+#     values_min = np.min(out_array, axis=1)
+#     values_max = np.max(out_array, axis=1)
+#     # out_array = (out_array - values_min) / (values_max - values_min)
+#     out_array = (out_array - values_min[:, None]) / (values_max[:, None] - values_min[:, None])
+#     return out_array, values_min, values_max, feat2rm
 
 
 def omics_tensor_list_to_np(batch: List[Tensor]):
@@ -75,7 +76,7 @@ def read_litdata_ncv_for_mi(
 
     # Read litdata
     dir_xoi = os.path.join(litdata_dir, f"ncv_test_{which_outer_test}_val_{which_inner_val}")
-    dataloader_trn = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, "train")))
+    dataloader_trn = StreamingDataLoader(StreamingDataset(os.path.join(dir_xoi, const.dkey.title_train)))
 
     # Run the compiled MI-based proccessing procedure on training data
     trnset_npy_dir = os.path.join(output_dir, "tmp_trnset")
