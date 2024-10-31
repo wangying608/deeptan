@@ -7,13 +7,15 @@ import torch
 import torch.nn as nn
 # from torch.optim.adam import Adam
 import lightning as ltn
-import networkx as nx
+# import networkx as nx
+import graph_tool.all as gt
 # from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
 # from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
-from torch_geometric.nn import global_mean_pool, global_max_pool
-import frn.constants as const
+# from torch_geometric.nn import global_mean_pool, global_max_pool, GAT
+from tqdm import tqdm
+# import frn.constants as const
 
-torch.set_float32_matmul_precision(const.default.matmul_precision)
+torch.set_float32_matmul_precision("high")
 
 
 class XGAT(nn.Module):
@@ -21,7 +23,7 @@ class XGAT(nn.Module):
             self,
             input_dim: int,
             output_dim: int,
-            n_heads: int,
+            # n_heads: int,
             dropout: float,
             negative_slope: float,
         ):
@@ -36,13 +38,13 @@ class XGAT(nn.Module):
         """
         super().__init__()
 
-        self.n_heads = n_heads
+        # self.n_heads = n_heads
         self.output_dim = output_dim
 
-        self.W = nn.Parameter(torch.zeros(size=(input_dim * 2, output_dim * n_heads)))
+        self.W = nn.Parameter(torch.zeros(size=(input_dim * 2, output_dim)))
         nn.init.xavier_uniform_(self.W.data, gain=1.414)
 
-        self.attn = nn.Parameter(torch.zeros(size=(output_dim * n_heads, 1)))
+        self.attn = nn.Parameter(torch.zeros(size=(output_dim, 1)))
         nn.init.xavier_uniform_(self.attn.data, gain=1.414)
         
         self.activation = nn.LeakyReLU(negative_slope)
@@ -52,9 +54,9 @@ class XGAT(nn.Module):
     def forward(self, h: torch.Tensor, adj: torch.Tensor):
         n_nodes = h.shape[0]
 
-        # Shape of W: [input_dim * 2, output_dim * n_heads]
+        # Shape of W: [input_dim * 2, output_dim]
         # Shape of h: [n_nodes, input_dim]
-        # Shape of Wh: [n_nodes, output_dim * n_heads]
+        # Shape of Wh: [n_nodes, output_dim]
 
         # Repeat h to create all pairs (h_i, h_j)
         h_repeated = h.repeat(n_nodes, 1)
@@ -66,13 +68,13 @@ class XGAT(nn.Module):
 
         # Apply linear transformation W
         Wh = torch.matmul(h_cat, self.W)
-        Wh = Wh.view(n_nodes, n_nodes, self.output_dim, self.n_heads)
+        Wh = Wh.view(n_nodes, n_nodes, self.output_dim)
 
         # Compute attention scores e_ij
         e_ = self.activation(torch.matmul(Wh, self.attn).squeeze(-1))
 
         # Mask attention scores with adjacency matrix
-        mask_ = adj.bool().unsqueeze(-1)
+        mask_ = adj.bool()#.unsqueeze(-1)
         attention = torch.where(mask_, e_, -9e15 * torch.ones_like(e_))
         
         # Apply softmax to attention scores
@@ -83,11 +85,11 @@ class XGAT(nn.Module):
         attention = self.dropout(attention)
         
         # Compute transformed node embeddings
-        h_prime = torch.matmul(attention.unsqueeze(-2), Wh.unsqueeze(-1)).squeeze(-2)
+        h_prime = torch.matmul(attention, Wh)
         
-        # Average over heads
-        h_prime = h_prime.mean(dim=-1)
-
+        # Aggregate node embeddings
+        h_prime = torch.sum(h_prime, dim=1)
+        
         return h_prime
 
 
@@ -113,15 +115,15 @@ class XGATLayers(nn.Module):
         """
         super().__init__()
 
-        assert len(output_dims) == len(n_heads), "output_dims and n_heads must have the same length."
+        # assert len(output_dims) == len(n_heads), "output_dims and n_heads must have the same length."
         self.n_layers = len(output_dims)
 
         self.layers = nn.ModuleList()
         for i in range(self.n_layers):
             if i == 0:
-                self.layers.append(XGAT(input_dim, output_dims[i], n_heads[i], dropout, negative_slope))
+                self.layers.append(XGAT(input_dim, output_dims[i], dropout, negative_slope))
             else:
-                self.layers.append(XGAT(output_dims[i-1], output_dims[i], n_heads[i], dropout, negative_slope))
+                self.layers.append(XGAT(output_dims[i-1], output_dims[i], dropout, negative_slope))
         
         if self.n_layers > 2:
             # Enable skip connections
@@ -135,7 +137,10 @@ class XGATLayers(nn.Module):
             self.Ws = None
         
     def forward(self, h: torch.Tensor, adj: torch.Tensor) -> torch.Tensor:
-        h_list = [i_layer(h, adj) for i_layer in self.layers]
+        h_list = []
+        for i in range(self.n_layers):
+            h = self.layers[i](h, adj)
+            h_list.append(h)
         
         if self.skip_connections and self.Ws is not None:
             for i in range(self.n_layers - 2):
@@ -146,40 +151,110 @@ class XGATLayers(nn.Module):
         return h_list[-1]
 
 
-def weighted_adj_to_nx(adj: torch.Tensor):
-    r"""
-    Converts weighted adjacency matrix `adj` to a NetworkX graph.
+# def weighted_adj_to_nx(adj: torch.Tensor):
+#     r"""Converts weighted adjacency matrix `adj` to a NetworkX graph.
     
+#     Args:
+#         adj: Weighted adjacency matrix of shape (num_nodes, num_nodes).
+    
+#     Returns:
+#         nx.Graph: NetworkX graph with weighted edges.
+#     """
+#     if adj.device != torch.device('cpu'):
+#         adj = adj.cpu()
+#     G = nx.Graph()
+#     G.add_nodes_from(range(adj.size(0)))
+#     # Only need to check upper triangle for undirected graph
+#     for i in range(adj.size(0)):
+#         for j in range(i + 1, adj.size(1)):
+#             weight = adj[i, j]
+#             if weight != 0:
+#                 G.add_edge(i, j, weight=weight)
+#     return G
+
+# def compute_C_BCE(G: nx.Graph) -> np.ndarray:
+#     r"""Computes the betweenness centrality, closeness centrality and eigenvector centrality of each node in the graph ``G``.
+#     """
+#     print("Computing betweenness centrality...")
+#     c_B = nx.betweenness_centrality(G, weight='weight')
+#     print("Computing closeness centrality...")
+#     c_C = nx.closeness_centrality(G, distance='weight')
+#     print("Computing eigenvector centrality...\n")
+#     c_E = nx.eigenvector_centrality(G, weight='weight')
+#     n_nodes = G.number_of_nodes()
+#     out_array = np.zeros((n_nodes, 3))
+#     for i in range(n_nodes):
+#         out_array[i, 0] = c_B[i]
+#         out_array[i, 1] = c_C[i]
+#         out_array[i, 2] = c_E[i]
+#     return out_array
+
+
+def weighted_adj_to_gt(adj: torch.Tensor):
+    r"""Converts weighted adjacency matrix ``adj`` to a graph using the ``graph-tool`` package.
+
     Args:
         adj: Weighted adjacency matrix of shape (num_nodes, num_nodes).
     
     Returns:
-        nx.Graph: NetworkX graph with weighted edges.
+        gt.Graph: Graph using the `graph-tool` package.
     """
-    if adj.device != torch.device('cpu'):
-        adj = adj.cpu()
-    G = nx.Graph()
-    G.add_nodes_from(range(adj.size(0)))
-    # Only need to check upper triangle for undirected graph
-    for i in range(adj.size(0)):
-        for j in range(i + 1, adj.size(1)):
-            weight = adj[i, j]
-            if weight != 0:
-                G.add_edge(i, j, weight=weight)
-    return G
+    if not adj.device == torch.device('cpu'):
+        adj_mat = adj.cpu().detach().numpy()
+    else:
+        adj_mat = adj.detach().numpy()
+    print(f"\nHead of adjacency matrix:\n{adj_mat[:4, :4]}\n")
+    # rows, cols = np.nonzero(adj_mat)
+    # edge_list = zip(rows, cols, adj_mat[rows, cols])
+    
+    # g = gt.Graph(directed=False)
+    # edge_weights = g.new_edge_property("double")
+    # for src, tgt, weight in edge_list:
+    #     e = g.add_edge(src, tgt)
+    #     edge_weights[e] = weight
+    
+    # return g, edge_weights
+    
+    g = gt.Graph(directed=False)
+    # Add vertices
+    num_vertices = adj_mat.shape[0]
+    g.add_vertex(num_vertices)
+    edge_weights = g.new_edge_property("double")
 
-def compute_C_BCE(G: nx.Graph) -> np.ndarray:
-    r"""Computes the betweenness centrality, closeness centrality and eigenvector centrality of each node in the graph ``G``.
+    # Add edges with weights
+    for i in range(num_vertices):
+        for j in range(i+1, num_vertices):
+            if adj_mat[i][j] != 0:  # Check if there is an edge
+                e = g.add_edge(g.vertex(i), g.vertex(j))
+                edge_weights[e] = adj_mat[i][j]
+    
+    return g, edge_weights
+
+def compute_C_BCE(g: gt.Graph, edge_w: gt.EdgePropertyMap) -> np.ndarray:
+    r"""Computes the betweenness centrality, closeness centrality and eigenvector centrality of each node in the graph ``g``.
     """
-    c_B = nx.betweenness_centrality(G, weight='weight')
-    c_C = nx.closeness_centrality(G, distance='weight')
-    c_E = nx.eigenvector_centrality(G, weight='weight')
-    n_nodes = G.number_of_nodes()
+    print("Computing betweenness centrality...")
+    c_B = np.array(gt.betweenness(g, weight=edge_w)[0])
+    print("Computing closeness centrality...")
+    c_C = np.array(gt.closeness(g, weight=edge_w))
+    print("Computing eigenvector centrality...\n")
+    c_E = np.array(gt.eigenvector(g, weight=edge_w)[1])
+    print(f"\nType of c_B: {type(c_B)}")
+    print(f"Shape of c_B: {c_B.shape}")
+    # print(c_B)
+    print(f"\nType of c_C: {type(c_C)}")
+    print(f"Shape of c_C: {c_C.shape}")
+    # print(c_C)
+    print(f"\nType of c_E: {type(c_E)}")
+    print(f"Shape of c_E: {c_E.shape}")
+    # print(c_E)
+    n_nodes = g.num_vertices()
     out_array = np.zeros((n_nodes, 3))
     for i in range(n_nodes):
         out_array[i, 0] = c_B[i]
         out_array[i, 1] = c_C[i]
         out_array[i, 2] = c_E[i]
+    print(out_array[:4])
     return out_array
 
 
@@ -211,8 +286,8 @@ class DynamicCentrality(nn.Module):
         return cs
     
     def get_c_BCE(self, adj: torch.Tensor) -> torch.Tensor:
-        G = weighted_adj_to_nx(adj)
-        c_BCE = compute_C_BCE(G)
+        G, edge_w = weighted_adj_to_gt(adj)
+        c_BCE = compute_C_BCE(G, edge_w)
         return torch.tensor(c_BCE, dtype=torch.float32)
 
 
@@ -274,18 +349,25 @@ class MSGP(nn.Module):
         # Node embedding
         h = self.xgat_layers(h, adj)
         
-        # Nodes' dynamic centrality
-        adj = self.cosine_sim(h)
+        # Nodes' dynamic centrality, normalized cosine similarity
+        adj = self.cosine_sim(h).add(1).div(2)
+
         ds = self.dynamic_centrality(h, adj)
         s_ranks = torch.argsort(ds, descending=False)
         
         # Histogram
         hist_counts = self.hist_fd(ds)
+        print(f"\nHistogram counts:\n{hist_counts}\n")
+        # Remove blank bins
+        hist_counts = hist_counts[hist_counts > 0]
+        print(f"\nHistogram counts after removing blank bins:\n{hist_counts}\n")
+        assert hist_counts.shape[0] > 3
 
         # Generate multi-scale subgraphs
         subgraphs_nodes = self.collect_subgraphs(adj, s_ranks, hist_counts)
-        # n_scales = len(subgraphs_nodes)
-        # dk_scales = subgraphs_nodes.keys()
+        n_scales = len(subgraphs_nodes)
+        dk_scales = subgraphs_nodes.keys()
+        assert n_scales > 2
 
         # Extract subgraphs for each scale
         subgraphs_nodes = [subgraphs_nodes[i][j] for i in subgraphs_nodes.keys() for j in range(len(subgraphs_nodes[i]))]
@@ -331,11 +413,13 @@ class MSGP(nn.Module):
         half_n_bins = n_bins // 2
         subgraphs_nodes: Dict[int, List[torch.Tensor]] = {}
         nodes_in_subg = torch.tensor([], dtype=torch.long)
-        for i in range(half_n_bins):
+        for i in tqdm(range(half_n_bins)):
             # Get the subgraphs with low-centrality central nodes.
             subgraphs_nodes[i] = self.get_subgraphs(adj, slice(i, i+1), s_ranks, hist_counts, self.n_orders)
+            assert len(subgraphs_nodes[i]) > 0
             # Get the subgraphs with high-centrality central nodes.
             subgraphs_nodes[-i-1] = self.get_subgraphs(adj, slice(-i-1, -i), s_ranks, hist_counts, self.n_orders)
+            assert len(subgraphs_nodes[-i-1]) > 0
             
             # Check if the subgraphs cover all nodes.
             nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
@@ -368,13 +452,17 @@ class MSGP(nn.Module):
         subgraphs_nodes: List[torch.Tensor] = []
         for central_node in central_nodes_index:
             assert central_node.dim() == 0
-            subgraphs_nodes.append(self.find_n_order_neighbors(adj, central_node.long(), n))
-        
+            _nodes = self.find_n_order_neighbors(adj, central_node.long(), n)
+            # assert _nodes.shape[0] > 0
+            subgraphs_nodes.append(_nodes)
+            print(f"\nNumber of neighbors of central node {central_node}: {_nodes.shape[0]}")
+
         # Check the coverage.
         # self.get_subgraphs_coverage(adj.shape[0], subgraphs_nodes)
 
         # Check the overlap between subgraphs.
         # If any two subgraphs have more than threshold_subgraph_overlap nodes in common, merge them.
+        print(f"\nChecking the overlap between subgraphs.\n")
         subgraphs_nodes_o: List[torch.Tensor] = []
         n_subgraphs = len(subgraphs_nodes)
         for i in range(n_subgraphs):
@@ -387,7 +475,7 @@ class MSGP(nn.Module):
                     subgraphs_nodes_o.append(_tmp_graph)
                 else:
                     subgraphs_nodes_o.append(subgraphs_nodes[i])
-        
+        assert len(subgraphs_nodes_o) > 0
         return subgraphs_nodes_o
     
     def get_subgraphs_coverage(self, n_nodes: int, subgraphs_nodes: List[torch.Tensor] | torch.Tensor) -> float:
@@ -439,6 +527,7 @@ class MSGP(nn.Module):
             all_neighbors_set.update(current_neighbors.tolist())
         
         all_neighbors = torch.tensor(list(all_neighbors_set), dtype=torch.long)
+        assert all_neighbors.shape[0] > 0
         return all_neighbors
     
     def get_central_nodes_index(self, s_ranks: torch.Tensor, hist_counts: torch.Tensor, bins: slice) -> torch.Tensor:
@@ -488,3 +577,28 @@ class MSGP(nn.Module):
         hist_counts = torch.histc(tensor1d, bins=num_bins)
         # bin_edges = torch.linspace(tensor1d.min(), tensor1d.max(), steps=num_bins + 1)
         return hist_counts
+
+
+if __name__ == "__main__":
+    h = torch.randn(743, 1)
+    adj = torch.triu(torch.randn(743, 743))
+    adj = adj + adj.T
+    adj = torch.pow(adj, 2)#.to_sparse()
+
+    print(f"Shape of h: {h.shape}")
+    print(f"Shape of adj: {adj.shape}")
+
+    _msgp = MSGP(
+        input_dim=1,
+        output_dims_nd=[8, 16],
+        output_dim_g_emb=32,
+        n_heads=[2, 3],
+        n_orders=2,
+        threshold_subgraph_overlap=0.9,
+        dropout=0.3,
+        negative_slope=0.2,
+    )
+
+    g_emb = _msgp(h, adj)
+    print(f"Shape of graph-level embedding: {g_emb.shape}")
+    print(g_emb)
