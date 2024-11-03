@@ -306,26 +306,41 @@ class MSGP(nn.Module):
             threshold_subgraph_overlap: float,
             dropout: float,
             negative_slope: float,
-            use_all_subg: Optional[bool] = True,
+            use_all_subgraphs: bool = False,
         ):
         r"""Multi-Scale Graph Pooling for graph-level representation learning.
 
         Args:
             input_dim: Input node embedding dimension.
+
             output_dims_nd: Output node embedding dimensions for each layer.
                 The length denotes the number of layers.
+            
             output_dim_g_emb: Output graph embedding dimension.
+            
             n_heads: Number of attention heads for each layer.
                 The length must be the same as output_dims.
+            
             n_orders: Number of orders of neighbors to find for central nodes.
+            
             threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
+            
             dropout: Dropout rate.
+            
             negative_slope: LeakyReLU negative slope.
+            
+            use_all_subgraphs: Whether to use all subgraphs.
+                If ``False``, only the largest and smallest subgraphs cover all nodes will be used.
+        
+        Returns:
+            Graph representation.
+        
         """
         super().__init__()
 
         self.n_orders = n_orders
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
+        self.use_all_subgraphs = use_all_subgraphs
 
         # Increasing dimensions
         self.xgat_layers = XGATLayers(input_dim, output_dims_nd, n_heads, dropout, negative_slope)
@@ -344,13 +359,9 @@ class MSGP(nn.Module):
         
         # Nodes' dynamic centrality, normalized cosine similarity
         adj = self.cosine_sim(h).add(1).div(2).mul(adj).to_sparse()
-        # print(f"\nNumber of zeros in adjancency matrix: {torch.sum(adj == 0)}")
 
         ds = self.dynamic_centrality(h, adj)
         s_ranks = torch.argsort(ds, dim=0, descending=False)
-        # print("\nCentrality scores and ranks:\n")
-        # print(torch.cat([ds, s_ranks], dim=1))
-        # raise NotImplementedError
         
         # Histogram
         hist_counts = self.hist_fd(ds)
@@ -398,9 +409,7 @@ class MSGP(nn.Module):
         _s = _softmax(ds[subgraph_nodes])
         assert _s.shape[0] == len(subgraph_nodes)
         # Assigns attention weights to nodes and computes a weighted sum of node features
-        # pooled = torch.mean(torch.matmul(_s, h[subgraph_nodes]), dim=0)
         pooled = torch.matmul(_s.T, h[subgraph_nodes])
-        # print(f"\nShape of pooled: {pooled.shape}")
         return pooled
 
     def collect_subgraphs(self, adj: torch.Tensor, s_ranks: torch.Tensor, hist_counts: torch.Tensor) -> Dict[int, List[torch.Tensor]]:
@@ -415,28 +424,44 @@ class MSGP(nn.Module):
             A dictionary of multi-scale subgraphs.
         """
         n_bins = hist_counts.shape[0]
-        # half_n_bins = n_bins // 2
+        assert n_bins > 2
         subgraphs_nodes: Dict[int, List[torch.Tensor]] = {}
         nodes_in_subg = torch.tensor([], dtype=torch.long)
-        for i in range(n_bins):
-            # Get the subgraphs with low-centrality central nodes.
-            subgraphs_nodes[i] = self.get_subgraphs(adj, slice(i, i+1), s_ranks, hist_counts, self.n_orders)
-            assert len(subgraphs_nodes[i]) > 0
-            # Get the subgraphs with high-centrality central nodes.
-            subgraphs_nodes[n_bins - i - 1] = self.get_subgraphs(adj, slice(n_bins - i - 1, n_bins - i), s_ranks, hist_counts, self.n_orders)
-            assert len(subgraphs_nodes[n_bins - i - 1]) > 0
+
+        if self.use_all_subgraphs:
+            for i in range(n_bins):
+                subgraphs_nodes[i] = self.get_subgraphs(adj, slice(i, i+1), s_ranks, hist_counts, self.n_orders)
+                assert len(subgraphs_nodes[i]) > 0
+        else:
+            # Add small subgraphs that are not connected to the main subgraph
+            for i in range(n_bins // 3):
+                subgraphs_nodes[i] = self.get_subgraphs(adj, slice(i, i+1), s_ranks, hist_counts, self.n_orders)
+                assert len(subgraphs_nodes[i]) > 0
+                nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
             
-            # Check if the subgraphs cover all nodes.
-            nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
-            nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[n_bins - i - 1])])
-            if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) < 1 - 1e-5:
-                continue
-            else:
-                break
-        # print(list(subgraphs_nodes.keys()))
+            # Add "skeletons"
+            for i in range(n_bins):
+
+                # Get the subgraphs with high-centrality central nodes.
+                i_desc = n_bins - i - 1
+                if i_desc not in subgraphs_nodes.keys():
+                    subgraphs_nodes[i_desc] = self.get_subgraphs(adj, slice(i_desc, n_bins - i), s_ranks, hist_counts, self.n_orders)
+                    assert len(subgraphs_nodes[i_desc]) > 0
+                    nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i_desc])])
+                    
+                # Check if the subgraphs cover all nodes.
+                if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
+                    break
+
+                # Get the subgraphs with low-centrality central nodes.
+                if i not in subgraphs_nodes.keys():
+                    subgraphs_nodes[i] = self.get_subgraphs(adj, slice(i, i+1), s_ranks, hist_counts, self.n_orders)
+                    assert len(subgraphs_nodes[i]) > 0
+                    nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
+                
         return subgraphs_nodes
 
-    def get_subgraphs(self, adj: torch.Tensor, bins: slice, s_ranks: torch.Tensor, hist_counts: torch.Tensor, n: int) -> List[torch.Tensor]:
+    def get_subgraphs(self, adj: torch.Tensor, bins: slice, s_ranks: torch.Tensor, hist_counts: torch.Tensor, n: int, central_nodes_as_subg: bool=False) -> List[torch.Tensor]:
         r"""Get the subgraphs based on the central nodes in the top bins.
 
         Args:
@@ -456,8 +481,12 @@ class MSGP(nn.Module):
         
         # Get the subgraphs.
         subgraphs_nodes: Dict[int, torch.Tensor] = {}
-        for i in range(central_nodes_index.shape[0]):
-            subgraphs_nodes[i] = self.find_n_order_neighbors(adj, central_nodes_index[i], n)
+        if central_nodes_as_subg:
+            # subgraphs_nodes[0] = central_nodes_index
+            return [central_nodes_index]
+        else:
+            for i in range(central_nodes_index.shape[0]):
+                subgraphs_nodes[i] = self.find_n_order_neighbors(adj, central_nodes_index[i], n)
         
         # Check the coverage.
         # self.get_subgraphs_coverage(adj.shape[0], subgraphs_nodes)
@@ -614,9 +643,10 @@ if __name__ == "__main__":
         output_dim_g_emb=32,
         n_heads=[2, 3],
         n_orders=1,
-        threshold_subgraph_overlap=0.95,
+        threshold_subgraph_overlap=0.98,
         dropout=0.3,
         negative_slope=0.2,
+        use_all_subgraphs=False,
     )
 
     g_emb = _msgp(h, adj)
