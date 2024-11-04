@@ -4,7 +4,7 @@ DSAR model definition.
 from typing import List
 import torch
 import torch.nn as nn
-# from torch.optim.adam import Adam
+from torch.optim.adam import Adam
 import lightning as ltn
 # from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
 # from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
@@ -173,7 +173,7 @@ class DSAR(ltn.LightningModule):
         return [total_loss, recon]
     
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optimizer = Adam(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.2, patience=20, min_lr=1e-5)
         return {"optimizer": optimizer, "lr_scheduler": scheduler, "monitor": const.dkey.title_val_loss}
     
