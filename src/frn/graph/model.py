@@ -111,6 +111,11 @@ class MSGPSSL(ltn.LightningModule):
                     }
                 }
     
+    def _loss_mtl(self, x_recon: torch.Tensor, x_label: torch.Tensor, h: torch.Tensor, true_label: torch.Tensor):
+        targets = {"Reconstruction": h, "Label": true_label}
+        preds = {"Reconstruction": x_recon, "Label": x_label}
+        metrics = MultitaskWrapper({"Reconstruction": , "Label": MeanSquaredError})
+    
     def _define_metrics(self, output_dim: int, regression: bool):
         r"""Define the loss function and the metrics.
         """
