@@ -5,9 +5,11 @@ from typing import List, Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
+from torch_geometric.nn import MessagePassing
 from torch_geometric.data import Data as GData
-from torch_geometric.utils import k_hop_subgraph
+from torch_geometric.utils import k_hop_subgraph, softmax
 import graph_tool.all as gt
+from tqdm import tqdm
 import frn.constants as const
 
 
@@ -16,7 +18,6 @@ class XGAT(nn.Module):
             self,
             input_dim: int,
             output_dim: int,
-            dropout: float,
             negative_slope: float,
         ):
         r"""XGAT layer.
@@ -38,7 +39,6 @@ class XGAT(nn.Module):
         nn.init.xavier_uniform_(self.attn.data, gain=1.414)
         
         self.activation = nn.LeakyReLU(negative_slope)
-        self.dropout = nn.Dropout(dropout)
 
     def forward(self, g: GData):
         assert g.x is not None
@@ -55,30 +55,31 @@ class XGAT(nn.Module):
         h_cat = torch.cat([h_i, h_j], dim=-1)
 
         # Apply linear transformation W
-        Wh = torch.matmul(h_cat, self.W)
+        Wh = h_cat @ self.W
         Wh = Wh.view(n_nodes, n_nodes, self.output_dim)
 
         # Compute attention scores e_ij
-        e_: torch.Tensor = self.activation(torch.matmul(Wh, self.attn).squeeze(-1))
+        e_: torch.Tensor = self.activation(Wh.matmul(self.attn).squeeze(-1))
 
         if g.edge_index is None:
             self.attention: torch.Tensor = e_.softmax(dim=1)
         else:
             assert g.edge_attr is not None
             # Generate sparse adjacency matrix from edge_index
-            weighted_adj_mat = torch.sparse_coo_tensor(g.edge_index, g.edge_attr, size=(n_nodes, n_nodes))
-
             # Mask attention scores with adjacency matrix (MIC)
-            self.attention = weighted_adj_mat.mul(e_).to_dense().softmax(dim=1)
+            e_ = e_.mul(torch.sparse_coo_tensor(g.edge_index, g.edge_attr, size=(n_nodes, n_nodes))).coalesce()
+            self.attention = torch.sparse_coo_tensor(
+                indices=e_.indices(),
+                values=softmax(src=e_.values(), index=e_.indices()[0], num_nodes=n_nodes),
+                size=(n_nodes, n_nodes),
+            )
 
-        # Apply dropout to attention scores
-        attention = self.dropout(self.attention)
-        
         # Compute transformed node embeddings
-        h_prime = torch.matmul(attention, Wh)
+        h_prime = self.attention @ Wh
         
         # Aggregate node embeddings
         h_prime = torch.mean(h_prime, dim=1)
+        # h_prime_var = torch.var(h_prime, dim=1)
         
         return h_prime
 
@@ -89,7 +90,6 @@ class XGATLayers(nn.Module):
             input_dim: int,
             output_dims: List[int],
             n_heads: List[int],
-            dropout: float,
             negative_slope: float,
         ):
         r"""XGAT layers with skip connections.
@@ -102,9 +102,7 @@ class XGATLayers(nn.Module):
             
             n_heads: Number of attention heads for each layer.
                 The length must be the same as output_dims.
-            
-            dropout: Dropout rate.
-            
+                        
             negative_slope: LeakyReLU negative slope.
         
         """
@@ -115,9 +113,9 @@ class XGATLayers(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(self.n_layers):
             if i == 0:
-                self.layers.append(XGAT(input_dim, output_dims[i], dropout, negative_slope))
+                self.layers.append(XGAT(input_dim, output_dims[i], negative_slope))
             else:
-                self.layers.append(XGAT(output_dims[i-1], output_dims[i], dropout, negative_slope))
+                self.layers.append(XGAT(output_dims[i-1], output_dims[i], negative_slope))
         
         if self.n_layers > 2:
             # Enable skip connections
@@ -241,7 +239,7 @@ class AttPool(nn.Module):
             Pooled representation of shape ``(output_dim_g_emb,)``.
         """
         weight_per_subg = self.attention(multiscale_subg_emb).softmax(dim=0)
-        pooled = torch.mul(multiscale_subg_emb, weight_per_subg).sum(dim=0)
+        pooled = multiscale_subg_emb.mul(weight_per_subg).sum(dim=0)
         return pooled
 
 
@@ -254,7 +252,6 @@ class MSGP(nn.Module):
             n_heads: List[int],
             n_hop: int,
             threshold_subgraph_overlap: float,
-            dropout: float,
             negative_slope: float,
             use_all_subgraphs: bool = False,
         ):
@@ -275,9 +272,7 @@ class MSGP(nn.Module):
                 ``n_hop >= 2`` is necessary to graph attention.
             
             threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
-            
-            dropout: Dropout rate.
-            
+                        
             negative_slope: LeakyReLU negative slope.
             
             use_all_subgraphs: Whether to use all subgraphs.
@@ -288,21 +283,21 @@ class MSGP(nn.Module):
         
         """
         super().__init__()
-        if n_hop < 2:
-            raise Warning("n_hop < 2")
+        # if n_hop < 2:
+        #     raise Warning("n_hop < 2")
         self.n_hop = n_hop
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.use_all_subgraphs = use_all_subgraphs
 
         # Increasing dimensions
-        self.xgat_layers = XGATLayers(input_dim, output_dims_nd, n_heads, dropout, negative_slope)
+        self.xgat_layers = XGATLayers(input_dim, output_dims_nd, n_heads, negative_slope)
         self.dynamic_centrality = DynamicCentrality(output_dims_nd[-1])
 
         # Decreasing dimensions
-        self.xgat_pool = XGAT(output_dims_nd[-1], output_dim_g_emb, dropout, negative_slope)
+        self.xgat_pool = XGAT(output_dims_nd[-1], output_dim_g_emb, negative_slope)
         self.att_pool = AttPool(output_dim_g_emb)
 
-        self.global_xgat_pool = XGAT(output_dim_g_emb, output_dim_g_emb, dropout, negative_slope)
+        self.global_xgat_pool = XGAT(output_dim_g_emb, output_dim_g_emb, negative_slope)
         self.global_att_pool = AttPool(output_dim_g_emb)
     
     def forward(self, g: GData):
@@ -314,7 +309,7 @@ class MSGP(nn.Module):
         h = self.xgat_layers(g)
         
         # Nodes' dynamic centrality: normalized cosine similarity
-        adj = self.cosine_sim(h).add(1).div(2).mul(torch.sparse_coo_tensor(indices=g.edge_index, values=g.edge_attr, size=(h.shape[0], h.shape[1]))).to_sparse(layout=torch.sparse_coo)
+        adj = self.cosine_sim(h).add(1).div(2).mul(torch.sparse_coo_tensor(indices=g.edge_index, values=g.edge_attr, size=(h.shape[0], h.shape[0]))).to_sparse(layout=torch.sparse_coo).coalesce()
 
         g = GData(x=h, edge_index=adj.indices(), edge_attr=adj.values())
 
@@ -335,6 +330,7 @@ class MSGP(nn.Module):
         keys_scales = list(subgraphs_nodes.keys())
         n_scales = len(keys_scales)
         # dk_scales = subgraphs_nodes.keys()
+        print(f"\nNumber of scales: {n_scales}\n")
         assert n_scales > 1
 
         # Extract subgraphs for each scale
@@ -345,10 +341,19 @@ class MSGP(nn.Module):
         g.edge_attr = None
         g.edge_index = None
 
+        print("\nEmbedding subgraphs...")
         # Embedding subgraphs
-        multiscale_subg_emb = torch.stack([self.att_pool(self.xgat_pool(g.subgraph(subgraphs_nodes_flat[i]))) for i in range(len(subgraphs_nodes_flat))])
-        # print(f"\nShape of subgraphs pooling: {multiscale_subg_emb.shape}")
+        # multiscale_subg_emb = torch.stack([self.att_pool(self.xgat_pool(g.subgraph(subgraphs_nodes_flat[i]))) for i in range(len(subgraphs_nodes_flat))])
+        
+        # Optimized version for less memory usage
+        _tmp_pooled: List[torch.Tensor] = []
+        for i in tqdm(range(len(subgraphs_nodes_flat))):
+            _tmp_pooled.append(self.att_pool(self.xgat_pool(g.subgraph(subgraphs_nodes_flat[i]))))
+            # gc.collect()
+            # torch.cuda.empty_cache()
+        multiscale_subg_emb = torch.stack(_tmp_pooled)
 
+        print("\nPooling subgraphs...")
         # Subgraph pooling and graph-level representation via attention pooling.
         x = self.global_xgat_pool(GData(x=multiscale_subg_emb))
         x = self.global_att_pool(x)
@@ -402,7 +407,7 @@ class MSGP(nn.Module):
                     subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
                     assert len(subgraphs_nodes[i]) > 0
                     nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
-                
+        
         return subgraphs_nodes
 
     def get_subgraphs(self, g: GData, bins: slice, s_ranks: torch.Tensor, hist_counts: torch.Tensor, central_nodes_as_subg: bool=False) -> List[torch.Tensor]:
@@ -425,7 +430,9 @@ class MSGP(nn.Module):
         """
         # Find central nodes in the top bins.
         central_nodes_index = self.get_central_nodes_index(s_ranks, hist_counts, bins)
+        assert central_nodes_index.shape[0] > 0
         # print(f"\nNumber of central nodes in the bins: {central_nodes_index.shape[0]}")
+        # print(f"\nCentral nodes: {central_nodes_index}")
         
         assert g.x is not None
         assert g.edge_index is not None
@@ -438,8 +445,8 @@ class MSGP(nn.Module):
             return [central_nodes_index]
         else:
             for i in range(central_nodes_index.shape[0]):
-                # subgraphs_nodes[i] = self.find_n_order_neighbors(g, central_nodes_index[i])
-                subset, edge_index, mapping, edge_mask = k_hop_subgraph(node_idx=central_nodes_index[i], num_hops=self.n_hop, edge_index=g.edge_index, num_nodes=num_nodes)
+                subset, edge_index, mapping, edge_mask = k_hop_subgraph(node_idx=int(central_nodes_index[i].item()), num_hops=self.n_hop, edge_index=g.edge_index, num_nodes=num_nodes)
+                # print(f"  ---- Subgraph {i}: {subset.shape[0]} nodes")
                 subgraphs_nodes[i] = subset
         
         # Check the coverage.
@@ -448,7 +455,7 @@ class MSGP(nn.Module):
         # Check the overlap between subgraphs. If any two subgraphs have more than threshold_subgraph_overlap nodes in common, merge them.
         # print(f"\nChecking the overlap between subgraphs...")
         n_subgraphs = len(subgraphs_nodes)
-        # print(f"  {n_subgraphs} subgraphs before merging.")
+        # print(f"\n  {n_subgraphs} subgraphs before merging.")
         
         subg2remove: List[int] = []
         tmp_merged_subgraphs: List[torch.Tensor] = []
@@ -465,7 +472,8 @@ class MSGP(nn.Module):
         subg2remove = list(set(subg2remove))
         subgraphs_nodes_o: List[torch.Tensor] = [subgraphs_nodes[i] for i in range(n_subgraphs) if i not in subg2remove]
         subgraphs_nodes_o.extend(tmp_merged_subgraphs)
-        # print(f"  {len(subgraphs_nodes_o)} subgraphs after merging.\n")
+        # print(f"  Removing {len(subg2remove)} subgraphs.")
+        print(f"  {len(subgraphs_nodes_o)} subgraphs after merging.\n")
         assert len(subgraphs_nodes_o) > 0
         return subgraphs_nodes_o
     
@@ -505,7 +513,6 @@ class MSGP(nn.Module):
         # Find indices of s_ranks that elements are in the range of rank_start and rank_end.
         central_nodes_index = torch.where((s_ranks >= rank_start) & (s_ranks < rank_end), s_ranks, -1)
         central_nodes_index = central_nodes_index[central_nodes_index != -1]
-        # print(central_nodes_index)
         return central_nodes_index.long()
 
     def cosine_sim(self, h: torch.Tensor) -> torch.Tensor:
@@ -518,7 +525,7 @@ class MSGP(nn.Module):
             Cosine similarity matrix.
         """
         norm_h = nn.functional.normalize(h, p=2, dim=1)
-        cosine_simi = torch.matmul(norm_h, norm_h.T)
+        cosine_simi = norm_h @ norm_h.T
         # upper_triangular = torch.triu(torch.mm(norm_h, norm_h.T), diagonal=1)
         return cosine_simi
     
