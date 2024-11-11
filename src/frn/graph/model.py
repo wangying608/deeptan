@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 from torch.optim.adam import Adam
 import lightning as ltn
+from torch_geometric.data import Data as GData
 from torchmetrics.wrappers import MultitaskWrapper, MultioutputWrapper
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
@@ -17,16 +18,17 @@ torch.set_float32_matmul_precision(const.default.matmul_precision)
 
 
 class VGAE_Decoder(nn.Module):
-    def __init__(self, graph_embedding_dim: int, node_embedding_dim: int, num_nodes: int):
+    def __init__(self, graph_embedding_dim: int, node_embedding_dim: int):
         super().__init__()
         self.graph_embedding_dim = graph_embedding_dim
         self.node_embedding_dim = node_embedding_dim
-        self.num_nodes = num_nodes
         
+        self.guess_num_nodes = nn.Sequential(nn.Linear(graph_embedding_dim, 1))
         self.decoder = nn.Linear(graph_embedding_dim, node_embedding_dim)
     
     def forward(self, graph_embedding: torch.Tensor):
-        graph_embedding_expanded = graph_embedding.unsqueeze(0).expand(self.num_nodes, -1)
+        num_nodes = self.guess_num_nodes(graph_embedding).detach().round().long()
+        graph_embedding_expanded = graph_embedding.unsqueeze(0).expand(num_nodes, -1)
         # Shape of graph_embedding_expanded: (num_nodes, graph_embedding_dim)
         node_embeddings = self.decoder(graph_embedding_expanded)
         
@@ -88,13 +90,12 @@ class MSGPSSL(ltn.LightningModule):
 
         self._define_metrics(output_dim, is_regression)
 
-        self.msgp = MSGP(input_dim, output_dims_nd, output_dim_g_emb, n_heads, n_hop, threshold_subgraph_overlap, dropout, negative_slope)
+        self.msgp = MSGP(input_dim, output_dims_nd, output_dim_g_emb, n_heads, n_hop, threshold_subgraph_overlap, negative_slope)
         self.ge_decoder = VGAE_Decoder(output_dim_g_emb, input_dim)
         self.label_predictor = GLabelPredictor(output_dim_g_emb, output_dim)
 
-    def forward(self, h: torch.Tensor, adj: torch.Tensor):
-        # x, edge_index, edge_attr = data.x, data.edge_index, data.edge_attr
-        x = self.msgp(h, adj)
+    def forward(self, g: GData):
+        x = self.msgp(g)
         x_recon = self.ge_decoder(x)
         x_label = self.label_predictor(x)
         return x, x_recon, x_label

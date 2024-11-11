@@ -25,7 +25,6 @@ class XGAT(nn.Module):
         Args:
             input_dim: Input node embedding dimension.
             output_dim: Output node embedding dimension.
-            dropout: Dropout rate.
             negative_slope: LeakyReLU negative slope.
         """
         super().__init__()
@@ -84,6 +83,65 @@ class XGAT(nn.Module):
         return h_prime
 
 
+class XGATLayer(MessagePassing):
+    def __init__(
+            self,
+            input_dim: int,
+            output_dim: int,
+            negative_slope: float,
+        ):
+        r"""XGAT layer.
+
+        Args:
+            input_dim: Input node embedding dimension.
+            output_dim: Output node embedding dimension.
+            negative_slope: LeakyReLU negative slope.
+        """
+        super().__init__(aggr="add")
+
+        self.output_dim = output_dim
+
+        self.trans = nn.Sequential(
+            nn.Linear(input_dim, input_dim),
+            nn.Sigmoid(),
+            nn.Linear(input_dim, output_dim),
+            nn.Sigmoid(),
+        )
+        self.W = nn.Parameter(torch.zeros(size=(input_dim * 2, output_dim)))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+
+        self.attn = nn.Parameter(torch.zeros(size=(output_dim, 1)))
+        nn.init.xavier_uniform_(self.attn.data, gain=1.414)
+        
+        self.activation = nn.LeakyReLU(negative_slope)
+    
+    def forward(self, g: GData):
+        assert g.x is not None
+        assert g.edge_index is not None
+        assert g.edge_attr is not None
+        n_nodes = g.num_nodes
+        assert n_nodes is not None
+
+        out = self.propagate(g.edge_index, x=g.x, edge_attr=g.edge_attr.view(-1,1))
+        return out
+    
+    def message(self, x_i: torch.Tensor, x_j: torch.Tensor, edge_attr: torch.Tensor):
+        # edge_attr has shape: torch.Size([35003, 1])
+        h_cat = torch.cat([x_i, x_j], dim=-1)
+        # Shape of h_cat: (E, 2 * input_dim)
+        Wh = (h_cat @ self.W)
+        # Shape of Wh: (E, output_dim)
+        e_ij: torch.Tensor = self.activation(Wh.matmul(self.attn))
+        if edge_attr is None:
+            e_ij = e_ij.softmax(dim=0)
+        else:
+            e_ij = e_ij.mul(edge_attr).softmax(dim=0)
+        # Shape of e_ij: (E, 1)
+        # Output shape: (E, output_dim)
+        output: torch.Tensor = self.trans(x_j) * e_ij
+        return output
+
+
 class XGATLayers(nn.Module):
     def __init__(
             self,
@@ -113,9 +171,9 @@ class XGATLayers(nn.Module):
         self.layers = nn.ModuleList()
         for i in range(self.n_layers):
             if i == 0:
-                self.layers.append(XGAT(input_dim, output_dims[i], negative_slope))
+                self.layers.append(XGATLayer(input_dim, output_dims[i], negative_slope))
             else:
-                self.layers.append(XGAT(output_dims[i-1], output_dims[i], negative_slope))
+                self.layers.append(XGATLayer(output_dims[i-1], output_dims[i], negative_slope))
         
         if self.n_layers > 2:
             # Enable skip connections
