@@ -14,3 +14,6 @@ title_tst_loss = "test_loss"
 abbr_train = "trn"
 abbr_val = "val"
 abbr_test = "tst"
+
+graph_ = "g"
+# label_ = "y"
