@@ -7,10 +7,80 @@ import torch
 import torch.nn as nn
 from torch_geometric.nn import MessagePassing
 from torch_geometric.data import Data as GData
-from torch_geometric.utils import k_hop_subgraph, to_undirected
+from torch_geometric.utils import k_hop_subgraph, softmax, to_undirected
 import graph_tool.all as gt
 from tqdm import tqdm
 import frn.constants as const
+
+
+class XGAT(nn.Module):
+    def __init__(
+            self,
+            input_dim: int,
+            output_dim: int,
+            negative_slope: float,
+        ):
+        r"""XGAT layer.
+
+        Args:
+            input_dim: Input node embedding dimension.
+            output_dim: Output node embedding dimension.
+            negative_slope: LeakyReLU negative slope.
+        """
+        super().__init__()
+
+        self.output_dim = output_dim
+
+        self.W = nn.Parameter(torch.zeros(size=(input_dim * 2, output_dim)))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+
+        self.attn = nn.Parameter(torch.zeros(size=(output_dim, 1)))
+        nn.init.xavier_uniform_(self.attn.data, gain=1.414)
+        
+        self.activation = nn.LeakyReLU(negative_slope)
+
+    def forward(self, g: GData):
+        assert g.x is not None
+
+        n_nodes = g.num_nodes
+        assert n_nodes is not None
+
+        # Repeat h to create all pairs (h_i, h_j)
+        h_repeated = g.x.repeat(n_nodes, 1)
+        h_i = h_repeated.view(n_nodes, n_nodes, -1)
+        h_j = h_i.transpose(0, 1)
+
+        # Concatenate h_i and h_j
+        h_cat = torch.cat([h_i, h_j], dim=-1)
+
+        # Apply linear transformation W
+        Wh = h_cat @ self.W
+        Wh = Wh.view(n_nodes, n_nodes, self.output_dim)
+
+        # Compute attention scores e_ij
+        e_: torch.Tensor = self.activation(Wh.matmul(self.attn).squeeze(-1))
+
+        if g.edge_index is None:
+            self.attention: torch.Tensor = e_.softmax(dim=1)
+        else:
+            assert g.edge_attr is not None
+            # Generate sparse adjacency matrix from edge_index
+            # Mask attention scores with adjacency matrix (MIC)
+            e_ = e_.mul(torch.sparse_coo_tensor(g.edge_index, g.edge_attr, size=(n_nodes, n_nodes))).coalesce()
+            self.attention = torch.sparse_coo_tensor(
+                indices=e_.indices(),
+                values=softmax(src=e_.values(), index=e_.indices()[0], num_nodes=n_nodes),
+                size=(n_nodes, n_nodes),
+            )
+
+        # Compute transformed node embeddings
+        h_prime = self.attention @ Wh
+        
+        # Aggregate node embeddings
+        h_prime = torch.mean(h_prime, dim=1)
+        # h_prime_var = torch.var(h_prime, dim=1)
+        
+        return h_prime
 
 
 class XGATLayer(MessagePassing):
@@ -48,7 +118,10 @@ class XGATLayer(MessagePassing):
     def forward(self, g: GData):
         assert g.x is not None
         assert g.edge_index is not None
-
+        # assert g.edge_attr is not None
+        n_nodes = g.num_nodes
+        assert n_nodes is not None
+        
         if g.edge_attr is None:
             out = self.propagate(g.edge_index, x=g.x, edge_attr=None)
         else:
@@ -56,7 +129,7 @@ class XGATLayer(MessagePassing):
         return out
     
     def message(self, x_i: torch.Tensor, x_j: torch.Tensor, edge_attr: Optional[torch.Tensor]):
-        # edge_attr has shape: torch.Size([E, 1])
+        # edge_attr has shape: torch.Size([35003, 1])
         h_cat = torch.cat([x_i, x_j], dim=-1)
         # Shape of h_cat: (E, 2 * input_dim)
         Wh = (h_cat @ self.W)
@@ -65,11 +138,9 @@ class XGATLayer(MessagePassing):
         if edge_attr is None:
             e_ij = e_ij.softmax(dim=0)
         else:
-            # Mask attention scores with adjacency matrix (MIC)
             e_ij = e_ij.mul(edge_attr).softmax(dim=0)
         # Shape of e_ij: (E, 1)
         # Output shape: (E, output_dim)
-        # Compute transformed node embeddings
         output: torch.Tensor = self.trans(x_j) * e_ij
         return output
 
@@ -262,7 +333,7 @@ class MSGP(nn.Module):
                 ``n_hop >= 2`` is necessary to graph attention.
             
             threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
-            
+                        
             negative_slope: LeakyReLU negative slope.
             
             use_all_subgraphs: Whether to use all subgraphs.
@@ -275,7 +346,6 @@ class MSGP(nn.Module):
         super().__init__()
         # if n_hop < 2:
         #     raise Warning("n_hop < 2")
-        self.output_dim_g_emb = output_dim_g_emb
         self.n_hop = n_hop
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.use_all_subgraphs = use_all_subgraphs
@@ -292,12 +362,9 @@ class MSGP(nn.Module):
         self.global_att_pool = AttPool(output_dim_g_emb)
     
     def forward(self, g: GData):
-        if g.x is None:
-            raise ValueError("g.x cannot be None")
-        if g.edge_attr is None:
-            raise ValueError("g.edge_attr cannot be None")
-        if g.edge_index is None:
-            raise ValueError("g.edge_index cannot be None")
+        assert g.x is not None
+        assert g.edge_attr is not None
+        assert g.edge_index is not None
 
         # Node embedding
         h = self.xgat_layers(g)
@@ -312,66 +379,51 @@ class MSGP(nn.Module):
         
         # Histogram
         hist_counts = self.hist_fd(ds)
+        # print(f"\nHistogram counts:\n{hist_counts}")
+
         # Remove blank bins
         hist_counts = hist_counts[hist_counts > 0]
-        if hist_counts.shape[0] < 4:
-            raise ValueError("hist_counts must have more than 3 elements.")
+        # print(f"\nHistogram counts after removing blank bins:\n{hist_counts}\n")
+        assert hist_counts.shape[0] > 3
 
         # Generate multi-scale subgraphs
         subgraphs_nodes = self.collect_subgraphs(g, s_ranks, hist_counts)
         keys_scales = list(subgraphs_nodes.keys())
         n_scales = len(keys_scales)
-        if n_scales < 2:
-            raise ValueError("n_scales must be greater than 1.")
         # dk_scales = subgraphs_nodes.keys()
-        # print(f"\nNumber of scales: {n_scales}\n")
+        print(f"\nNumber of scales: {n_scales}\n")
+        assert n_scales > 1
 
         # Extract subgraphs for each scale
-        # subgraphs_nodes_flat = [subgraphs_nodes[i][j] for i in keys_scales for j in range(len(subgraphs_nodes[i]))]
-        subgraphs_nodes_flat = [node for sublist in subgraphs_nodes.values() for node in sublist]
+        subgraphs_nodes_flat = [subgraphs_nodes[i][j] for i in keys_scales for j in range(len(subgraphs_nodes[i]))]
         # print(f"\nNumber of subgraphs: {len(subgraphs_nodes_flat)}")
 
         # Set edge indices and edge weights to None for flexible graph embedding
         g.edge_attr = None
+        # g.edge_index = None
 
+        print("\nEmbedding subgraphs...")
         # Embedding subgraphs
         # multiscale_subg_emb = torch.stack([self.att_pool(self.xgat_pool(g.subgraph(subgraphs_nodes_flat[i]))) for i in range(len(subgraphs_nodes_flat))])
         
-        num_subg = len(subgraphs_nodes_flat)
-        # multiscale_subg_emb = torch.zeros(size=(num_subg, self.output_dim_g_emb), dtype=torch.float32)
-        # subgraphs = [g.subgraph(nodes) for nodes in subgraphs_nodes_flat]
+        # Optimized version for less memory usage
+        _tmp_pooled: List[torch.Tensor] = []
+        for i in tqdm(range(len(subgraphs_nodes_flat))):
+            _tmp_pooled.append(self.att_pool(self.xgat_pool(g.subgraph(subgraphs_nodes_flat[i]))))
+            # gc.collect()
+            # torch.cuda.empty_cache()
+        multiscale_subg_emb = torch.stack(_tmp_pooled)
 
-        # multiscale_subg_emb = torch.stack([self.att_pool(self.xgat_pool(subgraph)) for subgraph in subgraphs])
-
-        # for i in tqdm(range(num_subg)):
-        #     with torch.no_grad():
-        #         multiscale_subg_emb[i] = self.att_pool(self.xgat_pool(subgraphs[i]))
-        
-        # _tmp: List[torch.Tensor] = []
-        # for i in range(num_subg):
-        #     with torch.no_grad():
-        #         _tmp.append(self.xgat_pool(subgraphs[i]))
-        # for i in tqdm(range(num_subg)):
-        #     multiscale_subg_emb[i] = self.att_pool(_tmp[i])
-        
-        _pooled: List[torch.Tensor] = []
-
-        for i in tqdm(range(num_subg)):
-            subgraph = g.subgraph(subgraphs_nodes_flat[i])
-            subgraph = self.xgat_pool(subgraph)
-            subgraph = self.att_pool(subgraph)
-            _pooled.append(subgraph.detach())
-            del subgraph
-        torch.cuda.empty_cache()
-        multiscale_subg_emb = torch.stack(_pooled)
-
+        print("\nPooling subgraphs...")
         # Subgraph pooling and graph-level representation via attention pooling.
-        g_super_nodes = GData(x=multiscale_subg_emb, edge_index=to_undirected(torch.combinations(torch.arange(num_subg)).t()))
+        # Generate undirected fully connected graph edge indices based on multiscale_subg_emb
+        g_super_nodes = GData(x=multiscale_subg_emb, edge_index=to_undirected(torch.combinations(torch.arange(multiscale_subg_emb.shape[0])).t()))
         x = self.global_xgat_pool(g_super_nodes)
         x = self.global_att_pool(x)
-        
-        return x
+        # print(f"\nShape of graph-level embedding: {x.shape}")
 
+        return x
+    
     def collect_subgraphs(self, g: GData, s_ranks: torch.Tensor, hist_counts: torch.Tensor) -> Dict[int, List[torch.Tensor]]:
         r"""Generate multi-scale subgraphs.
         

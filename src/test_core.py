@@ -3,7 +3,7 @@ from frn.graph.core import MSGP, GData
 
 
 if __name__ == "__main__":
-    num_nodes = 307
+    num_nodes = 2003
 
     h = torch.randn(num_nodes, 1)
     adj = torch.triu(torch.randn(num_nodes, num_nodes))
