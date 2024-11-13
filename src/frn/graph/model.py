@@ -6,7 +6,6 @@ import torch
 from torch.optim.adam import Adam
 import lightning as ltn
 from torch_geometric.data import Data as GData
-from torch_geometric.data import DataLoader as GDataLoader
 # from torchmetrics.wrappers import MultitaskWrapper#, MultioutputWrapper
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
@@ -18,7 +17,7 @@ from frn.graph.modules import VGAE_Decoder, GLabelPredictor, AttPool
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 
 
-class MSGPSSL(ltn.LightningModule):
+class MSGPMTL(ltn.LightningModule):
     def __init__(
             self,
             input_dim: int,
@@ -33,7 +32,7 @@ class MSGPSSL(ltn.LightningModule):
             lr: float,
             negative_slope: float,
         ):
-        r"""MSGP for supervised learning.
+        r"""Multi-task learning model.
 
         Args:
             input_dim: Input node embedding dimension.
@@ -41,10 +40,24 @@ class MSGPSSL(ltn.LightningModule):
             output_dim: Number of output classes. If it is 1, the model will be a regression model. Otherwise, it should be at least 3 (3 for binary classification) for classification tasks.
             
             is_regression: Whether the task is a regression task or not.
+
+            output_dims_nd: Output node embedding dimensions for each layer.
+                The length denotes the number of layers.
+            
+            output_dim_g_emb: Output graph embedding dimension.
+
+            n_hop: Maximum number of hops for searching central nodes' neighbors.
+                ``n_hop >= 2`` is necessary to graph attention.
+
+            threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
+
+            n_heads: Number of attention heads.
             
             dropout: Dropout rate.
             
             lr: Learning rate for the optimizer.
+
+            negative_slope: Negative slope for leaky ReLU.
         
         """
         super().__init__()
@@ -68,7 +81,27 @@ class MSGPSSL(ltn.LightningModule):
         self.pool_for_g_compare = AttPool(output_dims_nd[-1])
 
     def forward(self, g: GData):
-        x, g_ = self.msgp(g)
+        r"""
+        Args:
+            g: Graph data.
+        
+        Returns:
+            x: Graph embedding.
+
+            x_recon: Reconstructed node embeddings.
+
+            x_label: Predicted graph label.
+
+            g_: Graph data of aggregated and pooled ``g``. The size is same as ``g``.
+            
+            g_ms: Graph data that nodes are embedded multi-scale subgraphs. Its size is smaller than ``g``.
+            
+            x_recon_emb: Embedding of reconstructed node embeddings.
+            
+            g_emb: Embedding of graph ``g_`` nodes.
+            
+        """
+        x, g_, g_ms = self.msgp(g)
         x_recon = self.ge_decoder(x)
         x_label = self.label_predictor(x)
 
@@ -76,7 +109,7 @@ class MSGPSSL(ltn.LightningModule):
         x_recon_emb = self.pool_for_g_compare(x_recon)
         g_emb = self.pool_for_g_compare(g_.x)
 
-        return x, x_recon, x_label, g_, x_recon_emb, g_emb
+        return x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb
     
     def configure_optimizers(self):
         optimizer = Adam(self.parameters(), lr=self.lr)
@@ -93,9 +126,9 @@ class MSGPSSL(ltn.LightningModule):
     def training_step(self, batch, batch_idx):
         prefix = const.dkey.abbr_train + '_'
 
-        g = batch[const.dkey.graph_]
+        g = batch#[const.dkey.graph_]
         y = g.y
-        x, x_recon, x_label, g_, x_recon_emb, g_emb = self(g)
+        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
 
         loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
 
@@ -110,9 +143,9 @@ class MSGPSSL(ltn.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         prefix = const.dkey.abbr_val + '_'
-        g = batch[const.dkey.graph_]
+        g = batch#[const.dkey.graph_]
         y = g.y
-        x, x_recon, x_label, g_, x_recon_emb, g_emb = self(g)
+        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
         loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
         if y is None:
             loss = loss_recon
@@ -124,9 +157,9 @@ class MSGPSSL(ltn.LightningModule):
     
     def test_step(self, batch, batch_idx):
         prefix = const.dkey.abbr_test + '_'
-        g = batch[const.dkey.graph_]
+        g = batch#[const.dkey.graph_]
         y = g.y
-        x, x_recon, x_label, g_, x_recon_emb, g_emb = self(g)
+        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
         loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
         if y is None:
             loss = loss_recon
@@ -137,7 +170,7 @@ class MSGPSSL(ltn.LightningModule):
         return loss
     
     def predict_step(self, batch, batch_idx):
-        g = batch[const.dkey.graph_]
+        g = batch#[const.dkey.graph_]
         return self(g)
     
     def _loss_recon(self, prefix: str, x_recon_emb: torch.Tensor, g_emb: torch.Tensor):
@@ -168,11 +201,13 @@ class MSGPSSL(ltn.LightningModule):
         output_dim = self.output_dim
         if output_dim == 1:
             # The task is regression
-            self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(), "MAE": MeanAbsoluteError(), "R2": R2Score(), "PCC": PearsonCorrCoef()}, prefix=prefix)
+            # self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(), "MAE": MeanAbsoluteError(), "R2": R2Score(), "PCC": PearsonCorrCoef()}, prefix=prefix)
+            self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(), "MAE": MeanAbsoluteError()}, prefix=prefix)
         else:
             if self.is_regression:
                 # The task is multi-trait regression. Compute loss and metrics per trait instead of average over all traits.
-                self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(num_outputs=output_dim), "MAE": MeanAbsoluteError(num_outputs=output_dim), "R2": R2Score(num_outputs=output_dim), "PCC": PearsonCorrCoef(num_outputs=output_dim)}, prefix=prefix)
+                # self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(num_outputs=output_dim), "MAE": MeanAbsoluteError(num_outputs=output_dim), "R2": R2Score(num_outputs=output_dim), "PCC": PearsonCorrCoef(num_outputs=output_dim)}, prefix=prefix)
+                self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(num_outputs=output_dim), "MAE": MeanAbsoluteError(num_outputs=output_dim)}, prefix=prefix)
             else:
                 # The task is classification
                 self.metrics_label_pred = MetricCollection({
@@ -193,4 +228,5 @@ class MSGPSSL(ltn.LightningModule):
                     "MCC": MatthewsCorrCoef(task='multiclass', num_classes=output_dim),
                     "MSE": MeanSquaredError(num_outputs=output_dim),
                 }, prefix=prefix)
-
+        
+        self.metrics_label_pred.to(self.device)

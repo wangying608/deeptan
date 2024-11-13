@@ -1,5 +1,8 @@
+r"""
+MSGP: Multi-Scale Graph Pooling for Graph-Level Representation Learning.
+"""
 from typing import List, Dict
-from tqdm import tqdm
+# from tqdm import tqdm
 import torch
 from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
@@ -108,14 +111,15 @@ class MSGP(torch.nn.Module):
         # print(f"\nNumber of subgraphs: {len(subgraphs_nodes_flat)}")
 
         # Set edge indices and edge weights to None for flexible graph embedding
-        g_ = g.copy()
+        g_ = g
         g.edge_attr = None
 
         # Embedding subgraphs        
         num_subg = len(subgraphs_nodes_flat)
         _pooled: List[torch.Tensor] = []
         
-        for i in tqdm(range(num_subg)):
+        # for i in tqdm(range(num_subg)):
+        for i in range(num_subg):
             subgraph = g.subgraph(subgraphs_nodes_flat[i])
             
             def forward_fn(subgraph):
@@ -133,11 +137,11 @@ class MSGP(torch.nn.Module):
         multiscale_subg_emb = torch.stack(_pooled)
 
         # Subgraph pooling and graph-level representation via attention pooling.
-        g_super_nodes = GData(x=multiscale_subg_emb, edge_index=to_undirected(torch.combinations(torch.arange(num_subg)).t()))
+        g_super_nodes = GData(x=multiscale_subg_emb, edge_index=to_undirected(torch.combinations(torch.arange(num_subg, device=g_.x.device)).t()))
         x = self.global_xgat_pool(g_super_nodes)
         x = self.global_att_pool(x)
         
-        return x, g_
+        return x, g_, g_super_nodes
 
     def collect_subgraphs(self, g: GData, s_ranks: torch.Tensor, hist_counts: torch.Tensor) -> Dict[int, List[torch.Tensor]]:
         r"""Generate multi-scale subgraphs.
@@ -153,7 +157,7 @@ class MSGP(torch.nn.Module):
         n_bins = hist_counts.shape[0]
         assert n_bins > 2
         subgraphs_nodes: Dict[int, List[torch.Tensor]] = {}
-        nodes_in_subg = torch.tensor([], dtype=torch.long)
+        nodes_in_subg = torch.tensor([], dtype=torch.long, device=g.x.device)
 
         if self.use_all_subgraphs:
             for i in range(n_bins):
@@ -161,13 +165,21 @@ class MSGP(torch.nn.Module):
                 assert len(subgraphs_nodes[i]) > 0
         else:
             # Add small subgraphs that are not connected to the main subgraph
-            for i in range(n_bins // 3):
-                subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
-                assert len(subgraphs_nodes[i]) > 0
-                nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
+            # for i in range(n_bins // 3):
+            #     subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
+            #     assert len(subgraphs_nodes[i]) > 0
+            #     nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
+
+            #     # Check if the subgraphs cover all nodes.
+            #     if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
+            #         break
             
             # Add "skeletons"
             for i in range(n_bins):
+
+                # Check if the subgraphs cover all nodes.
+                if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
+                    break
 
                 # Get the subgraphs with high-centrality central nodes.
                 i_desc = n_bins - i - 1
@@ -177,14 +189,14 @@ class MSGP(torch.nn.Module):
                     nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i_desc])])
                     
                 # Check if the subgraphs cover all nodes.
-                if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
-                    break
+                # if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
+                #     break
 
                 # Get the subgraphs with low-centrality central nodes.
-                if i not in subgraphs_nodes.keys():
-                    subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
-                    assert len(subgraphs_nodes[i]) > 0
-                    nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
+                # if i not in subgraphs_nodes.keys():
+                #     subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
+                #     assert len(subgraphs_nodes[i]) > 0
+                #     nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i])])
         
         return subgraphs_nodes
 
@@ -251,7 +263,7 @@ class MSGP(torch.nn.Module):
         subgraphs_nodes_o: List[torch.Tensor] = [subgraphs_nodes[i] for i in range(n_subgraphs) if i not in subg2remove]
         subgraphs_nodes_o.extend(tmp_merged_subgraphs)
         # print(f"  Removing {len(subg2remove)} subgraphs.")
-        print(f"  {len(subgraphs_nodes_o)} subgraphs after merging.\n")
+        # print(f"  {len(subgraphs_nodes_o)} subgraphs after merging.\n")
         assert len(subgraphs_nodes_o) > 0
         return subgraphs_nodes_o
     

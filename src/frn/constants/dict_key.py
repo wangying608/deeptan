@@ -7,13 +7,10 @@ title_val = "val"
 title_test = "test"
 title_predict = "pred"
 
-title_trn_loss = "train_loss"
-title_val_loss = "val_loss"
-title_tst_loss = "test_loss"
-
 abbr_train = "trn"
 abbr_val = "val"
 abbr_test = "tst"
 
-graph_ = "g"
-# label_ = "y"
+title_trn_loss = "trn_loss"
+title_val_loss = "val_loss"
+title_tst_loss = "tst_loss"

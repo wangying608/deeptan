@@ -1,5 +1,5 @@
 r"""
-xxx definition.
+Modules for multi-task graph learning.
 """
 from typing import List, Optional
 import numpy as np
@@ -187,7 +187,7 @@ class DynamicCentrality(nn.Module):
         g, edge_weights = self.pyg2gtg(g_pyg)
 
         c_BCE = compute_C_BCE(g, edge_weights)
-        c_BCE_o = torch.tensor(c_BCE, dtype=torch.float32)
+        c_BCE_o = torch.tensor(c_BCE, dtype=torch.float32, device=g_pyg.x.device)
         # Normalize the values per column
         max3 = torch.max(c_BCE_o, dim=0)
         min3 = torch.min(c_BCE_o, dim=0)
@@ -250,7 +250,7 @@ class VGAE_Decoder(nn.Module):
         self.guess_num_nodes = nn.Sequential(
             nn.Linear(graph_embedding_dim, graph_embedding_dim // 2),
             nn.Sigmoid(),
-            nn.Linear(graph_embedding_dim, 1),
+            nn.Linear(graph_embedding_dim // 2, 1),
             nn.Softplus(),
         )
         self.fc_mu = nn.Linear(graph_embedding_dim, graph_embedding_dim)
