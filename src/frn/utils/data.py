@@ -24,7 +24,7 @@ def random_graph_data(node_dim: int = 16, num_nodes_max: int = 233):
     adj = adj + adj.T
     adj = torch.pow(adj, 2)
     # Simulate sparse connectivity.
-    adj = adj.where(adj > 0.8, torch.zeros_like(adj)).to_sparse(layout=torch.sparse_coo)
+    adj = adj.where(adj > 0.5, torch.zeros_like(adj)).to_sparse(layout=torch.sparse_coo)
 
     x = torch.randn(num_nodes, node_dim)
     y = torch.randn(1)

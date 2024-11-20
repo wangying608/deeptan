@@ -18,9 +18,10 @@ class MSGP(torch.nn.Module):
             output_dim_g_emb: int,
             n_heads: List[int],
             n_hop: int,
+            threshold_edge_exist: float,
             threshold_subgraph_overlap: float,
             negative_slope: float,
-            use_all_subgraphs: bool = False,
+            use_all_subgraphs: bool = True,
         ):
         r"""Multi-Scale Graph Pooling for graph-level representation learning.
 
@@ -37,6 +38,8 @@ class MSGP(torch.nn.Module):
             
             n_hop: Maximum number of hops for searching central nodes' neighbors.
                 ``n_hop >= 2`` is necessary to graph attention.
+            
+            threshold_edge_exist: Threshold for the existence of edges.
             
             threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
             
@@ -57,11 +60,13 @@ class MSGP(torch.nn.Module):
 
         self.output_dim_g_emb = output_dim_g_emb
         self.n_hop = n_hop
+        self.threshold_edge_exist = threshold_edge_exist
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.use_all_subgraphs = use_all_subgraphs
 
         # Increasing dimensions
         self.xgat_layers = XGATLayers(input_dim, output_dims_nd, n_heads, negative_slope)
+        
         self.dynamic_centrality = DynamicCentrality(output_dims_nd[-1])
 
         # Decreasing dimensions
@@ -80,14 +85,26 @@ class MSGP(torch.nn.Module):
             raise ValueError("g.edge_index cannot be None")
 
         # Node embedding
-        h = self.xgat_layers(g)
+        h: torch.Tensor = self.xgat_layers(g)
         
         # Nodes' dynamic centrality: normalized cosine similarity
-        adj = self.cosine_sim(h).add(1).div(2).mul(torch.sparse_coo_tensor(indices=g.edge_index, values=g.edge_attr, size=(h.shape[0], h.shape[0]))).to_sparse(layout=torch.sparse_coo).coalesce()
+        adj = self.cosine_sim(h).relu().mul(torch.sparse_coo_tensor(indices=g.edge_index, values=g.edge_attr, size=(h.shape[0], h.shape[0]))).to_sparse(layout=torch.sparse_coo).coalesce()
+        ew_min, ew_max = adj.values().aminmax()
+        norm_ew = (adj.values() - ew_min) / (ew_max - ew_min)
 
-        g = GData(x=h, edge_index=adj.indices(), edge_attr=adj.values())
+        # Apply edge mask
+        edge_mask = norm_ew > self.threshold_edge_exist
 
-        ds = self.dynamic_centrality(g)
+        g = GData(x=h, edge_index=adj.indices()[:, edge_mask], edge_attr=norm_ew[edge_mask])
+        if g.edge_index is None:
+            raise ValueError("g.edge_index cannot be None.")
+        if g.edge_attr is None:
+            raise ValueError("g.edge_attr cannot be None.")
+        num_nodes = g.num_nodes
+        if num_nodes is None:
+            raise ValueError("Number of nodes is not provided.")
+
+        ds = self.dynamic_centrality(g.x, g.edge_attr, g.edge_index, num_nodes)
         s_ranks = torch.argsort(ds, dim=0, descending=False)
         
         # Histogram
@@ -98,7 +115,7 @@ class MSGP(torch.nn.Module):
             raise ValueError("hist_counts must have more than 3 elements.")
 
         # Generate multi-scale subgraphs
-        subgraphs_nodes = self.collect_subgraphs(g, s_ranks, hist_counts)
+        subgraphs_nodes = self.collect_subgraphs(g.edge_index, num_nodes, s_ranks, hist_counts)
         keys_scales = list(subgraphs_nodes.keys())
         n_scales = len(keys_scales)
         if n_scales < 2:
@@ -113,8 +130,10 @@ class MSGP(torch.nn.Module):
         # Set edge indices and edge weights to None for flexible graph embedding
         g_ = g
         g.edge_attr = None
+        if g_.x is None:
+            raise ValueError("g_.x cannot be None")
 
-        # Embedding subgraphs        
+        # Embedding subgraphs
         num_subg = len(subgraphs_nodes_flat)
         _pooled: List[torch.Tensor] = []
         
@@ -128,7 +147,7 @@ class MSGP(torch.nn.Module):
                 return subgraph
             
             subgraph = checkpoint(forward_fn, subgraph, use_reentrant=False)
-            if type(subgraph) is not torch.Tensor:
+            if not isinstance(subgraph, torch.Tensor):
                 raise ValueError("subgraph must be a tensor.")
             _pooled.append(subgraph)
             del subgraph
@@ -143,11 +162,12 @@ class MSGP(torch.nn.Module):
         
         return x, g_, g_super_nodes
 
-    def collect_subgraphs(self, g: GData, s_ranks: torch.Tensor, hist_counts: torch.Tensor) -> Dict[int, List[torch.Tensor]]:
+    def collect_subgraphs(self, edge_index: torch.Tensor, num_nodes: int, s_ranks: torch.Tensor, hist_counts: torch.Tensor) -> Dict[int, List[torch.Tensor]]:
         r"""Generate multi-scale subgraphs.
         
         Args:
-            g: Graph data.
+            edge_index: Edge index of the graph.
+            num_nodes: Number of nodes in the graph.
             s_ranks: Rank of nodes based on their dynamic centrality scores.
             hist_counts: Histogram of dynamic centrality scores.
         
@@ -155,14 +175,17 @@ class MSGP(torch.nn.Module):
             A dictionary of multi-scale subgraphs.
         """
         n_bins = hist_counts.shape[0]
-        assert n_bins > 2
+        if n_bins < 4:
+            raise ValueError("n_bins must be greater than 3.")
         subgraphs_nodes: Dict[int, List[torch.Tensor]] = {}
-        nodes_in_subg = torch.tensor([], dtype=torch.long, device=g.x.device)
+        nodes_in_subg = torch.tensor([], dtype=torch.long, device=edge_index.device)
 
         if self.use_all_subgraphs:
             for i in range(n_bins):
-                subgraphs_nodes[i] = self.get_subgraphs(g, slice(i, i+1), s_ranks, hist_counts)
-                assert len(subgraphs_nodes[i]) > 0
+                central_nodes_indices = self.get_central_nodes_indices(s_ranks, hist_counts, slice(i, i+1))
+                subgraphs_nodes[i] = self.get_subgraphs(edge_index, num_nodes, central_nodes_indices)
+                if len(subgraphs_nodes[i]) == 0:
+                    raise ValueError("subgraphs_nodes[i] must not be empty.")
         else:
             # Add small subgraphs that are not connected to the main subgraph
             # for i in range(n_bins // 3):
@@ -173,6 +196,12 @@ class MSGP(torch.nn.Module):
             #     # Check if the subgraphs cover all nodes.
             #     if self.get_subgraphs_coverage(s_ranks.shape[0], nodes_in_subg) > 1 - 1e-5:
             #         break
+
+            central_nodes_indices = self.get_central_nodes_indices(s_ranks, hist_counts, slice(0, 1))
+            subgraphs_nodes[0] = self.get_subgraphs(edge_index, num_nodes, central_nodes_indices)
+            if len(subgraphs_nodes[0]) == 0:
+                raise ValueError("subgraphs_nodes[0] must not be empty.")
+            nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[0])])
             
             # Add "skeletons"
             for i in range(n_bins):
@@ -184,8 +213,10 @@ class MSGP(torch.nn.Module):
                 # Get the subgraphs with high-centrality central nodes.
                 i_desc = n_bins - i - 1
                 if i_desc not in subgraphs_nodes.keys():
-                    subgraphs_nodes[i_desc] = self.get_subgraphs(g, slice(i_desc, n_bins - i), s_ranks, hist_counts)
-                    assert len(subgraphs_nodes[i_desc]) > 0
+                    central_nodes_indices = self.get_central_nodes_indices(s_ranks, hist_counts, slice(i_desc, n_bins - i))
+                    subgraphs_nodes[i_desc] = self.get_subgraphs(edge_index, num_nodes, central_nodes_indices)
+                    if len(subgraphs_nodes[i_desc]) == 0:
+                        raise ValueError("subgraphs_nodes[i_desc] must not be empty.")
                     nodes_in_subg = torch.cat([nodes_in_subg, torch.cat(subgraphs_nodes[i_desc])])
                     
                 # Check if the subgraphs cover all nodes.
@@ -200,43 +231,30 @@ class MSGP(torch.nn.Module):
         
         return subgraphs_nodes
 
-    def get_subgraphs(self, g: GData, bins: slice, s_ranks: torch.Tensor, hist_counts: torch.Tensor, central_nodes_as_subg: bool=False) -> List[torch.Tensor]:
+    def get_subgraphs(self, edge_index: torch.Tensor, num_nodes: int, central_nodes_indices: torch.Tensor, central_nodes_as_subg: bool=False) -> List[torch.Tensor]:
         r"""Get the subgraphs based on the central nodes in the top bins.
 
         Args:
-            g: Graph data.
-
-            bins: bins to consider.
-                e.g. ``slice(-top_n_bins, None)`` to consider the top bins.
-            
-            s_ranks: Ranks of the nodes based on their centrality.
-            
-            hist_counts: Counts of the nodes in each bin.
-
+            edge_index: Edge index of the graph.
+            num_nodes: Number of nodes in the graph.
+            central_nodes_indices: Indices of the central nodes.
             central_nodes_as_subg: If True, return the central nodes as subgraphs.
         
         Returns:
             List of subgraphs' nodes.
         """
         # Find central nodes in the top bins.
-        central_nodes_index = self.get_central_nodes_index(s_ranks, hist_counts, bins)
-        assert central_nodes_index.shape[0] > 0
-        # print(f"\nNumber of central nodes in the bins: {central_nodes_index.shape[0]}")
-        # print(f"\nCentral nodes: {central_nodes_index}")
+        num_central_nodes = central_nodes_indices.shape[0]
+        if num_central_nodes < 1:
+            raise ValueError("No central nodes found.")
         
-        assert g.x is not None
-        assert g.edge_index is not None
-        num_nodes = g.num_nodes
-        assert num_nodes is not None
-
         # Get the subgraphs.
         subgraphs_nodes: Dict[int, torch.Tensor] = {}
         if central_nodes_as_subg:
-            return [central_nodes_index]
+            return [central_nodes_indices]
         else:
-            for i in range(central_nodes_index.shape[0]):
-                subset, edge_index, mapping, edge_mask = k_hop_subgraph(node_idx=int(central_nodes_index[i].item()), num_hops=self.n_hop, edge_index=g.edge_index, num_nodes=num_nodes)
-                # print(f"  ---- Subgraph {i}: {subset.shape[0]} nodes")
+            for i in range(num_central_nodes):
+                subset, edge_index, mapping, edge_mask = k_hop_subgraph(node_idx=int(central_nodes_indices[i].item()), num_hops=self.n_hop, edge_index=edge_index, num_nodes=num_nodes)
                 subgraphs_nodes[i] = subset
         
         # Check the coverage.
@@ -264,7 +282,8 @@ class MSGP(torch.nn.Module):
         subgraphs_nodes_o.extend(tmp_merged_subgraphs)
         # print(f"  Removing {len(subg2remove)} subgraphs.")
         # print(f"  {len(subgraphs_nodes_o)} subgraphs after merging.\n")
-        assert len(subgraphs_nodes_o) > 0
+        if len(subgraphs_nodes_o) == 0:
+            raise ValueError("subgraphs_nodes_o must not be empty.")
         return subgraphs_nodes_o
     
     def get_subgraphs_coverage(self, n_nodes: int, subgraphs_nodes: List[torch.Tensor] | torch.Tensor) -> float:
@@ -287,7 +306,7 @@ class MSGP(torch.nn.Module):
         # print(f"\n-------- Node coverage: {coverage_ratio:.4f} --------\n")
         return coverage_ratio
         
-    def get_central_nodes_index(self, s_ranks: torch.Tensor, hist_counts: torch.Tensor, bins: slice) -> torch.Tensor:
+    def get_central_nodes_indices(self, s_ranks: torch.Tensor, hist_counts: torch.Tensor, bins: slice) -> torch.Tensor:
         r"""Get the indices of the central nodes in the specific bins.
 
         Args:

@@ -26,6 +26,7 @@ class MSGPMTL(ltn.LightningModule):
             output_dims_nd: List[int],
             output_dim_g_emb: int,
             n_hop: int,
+            threshold_edge_exist: float,
             threshold_subgraph_overlap: float,
             n_heads: List[int],
             dropout: float,
@@ -49,6 +50,8 @@ class MSGPMTL(ltn.LightningModule):
             n_hop: Maximum number of hops for searching central nodes' neighbors.
                 ``n_hop >= 2`` is necessary to graph attention.
 
+            threshold_edge_exist: Threshold for the existence of edges.
+
             threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
 
             n_heads: Number of attention heads.
@@ -69,13 +72,14 @@ class MSGPMTL(ltn.LightningModule):
         self.output_dims_nd = output_dims_nd
         self.output_dim_g_emb = output_dim_g_emb
         self.n_hop = n_hop
+        self.threshold_edge_exist = threshold_edge_exist
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.n_heads = n_heads
         self.dropout = dropout
         self.lr = lr
         self.negative_slope = negative_slope
 
-        self.msgp = MSGP(input_dim, output_dims_nd, output_dim_g_emb, n_heads, n_hop, threshold_subgraph_overlap, negative_slope)
+        self.msgp = MSGP(input_dim, output_dims_nd, output_dim_g_emb, n_heads, n_hop, threshold_edge_exist, threshold_subgraph_overlap, negative_slope)
         self.ge_decoder = VGAE_Decoder(output_dim_g_emb, output_dims_nd[-1])
         self.label_predictor = GLabelPredictor(output_dim_g_emb, output_dim)
         self.pool_for_g_compare = AttPool(output_dims_nd[-1])

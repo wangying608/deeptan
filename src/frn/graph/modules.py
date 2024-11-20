@@ -1,7 +1,7 @@
 r"""
 Modules for multi-task graph learning.
 """
-from typing import List, Optional
+from typing import List, Dict, Optional
 import numpy as np
 import torch
 import torch.nn as nn
@@ -44,20 +44,23 @@ class XGATLayer(MessagePassing):
         self.activation = nn.LeakyReLU(negative_slope)
     
     def forward(self, g: GData):
-        assert g.x is not None
-        assert g.edge_index is not None
+        if g.x is None:
+            raise ValueError("Node embeddings are not provided.")
+        if g.edge_index is None:
+            raise ValueError("Edge index is not provided.")
 
         if g.edge_attr is None:
-            out = self.propagate(g.edge_index, x=g.x, edge_attr=None)
+            h = self.propagate(g.edge_index, x=g.x, edge_attr=None)
         else:
-            out = self.propagate(g.edge_index, x=g.x, edge_attr=g.edge_attr.view(-1,1))
-        return out
+            h = self.propagate(g.edge_index, x=g.x, edge_attr=g.edge_attr.view(-1,1))
+        
+        return h
     
     def message(self, x_i: torch.Tensor, x_j: torch.Tensor, edge_attr: Optional[torch.Tensor]):
         # edge_attr has shape: torch.Size([E, 1])
         h_cat = torch.cat([x_i, x_j], dim=-1)
         # Shape of h_cat: (E, 2 * input_dim)
-        Wh = (h_cat @ self.W)
+        Wh = h_cat @ self.W
         # Shape of Wh: (E, output_dim)
         e_ij: torch.Tensor = self.activation(Wh.matmul(self.attn))
         if edge_attr is None:
@@ -72,11 +75,14 @@ class XGATLayer(MessagePassing):
         return output
 
 
-class XGATLayers(nn.Module):
+class NodeEmbedding(nn.Module):
     def __init__(
             self,
             input_dim: int,
-            output_dims: List[int],
+            num_embeddings: int,
+            embedding_dim: int,
+            fusion_dims: List[int],
+            dict_node_names: Dict[str, int],
             n_heads: List[int],
             negative_slope: float,
         ):
@@ -84,52 +90,75 @@ class XGATLayers(nn.Module):
 
         Args:
             input_dim: Input node embedding dimension.
-
-            output_dims: Output node embedding dimensions for each layer.
-                The length denotes the number of layers.
-            
-            n_heads: Number of attention heads for each layer.
-                The length must be the same as output_dims.
-                        
+            embedding_dim: Target node embedding dimension.
+            fusion_dims: Node embedding dimensions after embedding_dims achiving.
+            n_heads: Number of attention heads for each layer. The length must be the same as output_dims.            
             negative_slope: LeakyReLU negative slope.
         
         """
         super().__init__()
+        self.node_embedding = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim, padding_idx=None)
+        self.dict_node_names = dict_node_names
 
-        self.n_layers = len(output_dims)
+        # Feature encoding layers (Part 1)
+        self.raiseQuaDim = nn.Sequential(
+            nn.Linear(input_dim, embedding_dim // 2),# Input: quantitative features (e.g., gene expression)
+            nn.Tanh(),
+            nn.Linear(embedding_dim // 2, embedding_dim),
+            nn.Tanh(),
+        )
+        self.quaEncoder = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.Tanh(),
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.Tanh(),
+        )
 
+        # Feature encoding layers (Part 2) for fusing node embeddings and their quantitative features
+        self.n_layers_fusion = len(fusion_dims)
         self.layers = nn.ModuleList()
-        for i in range(self.n_layers):
+        for i in range(self.n_layers_fusion):
             if i == 0:
-                self.layers.append(XGATLayer(input_dim, output_dims[i], negative_slope))
+                self.layers.append(XGATLayer(embedding_dim, fusion_dims[i], negative_slope))
             else:
-                self.layers.append(XGATLayer(output_dims[i-1], output_dims[i], negative_slope))
+                self.layers.append(XGATLayer(fusion_dims[i-1], fusion_dims[i], negative_slope))
         
-        if self.n_layers > 2:
+        if self.n_layers_fusion > 2:
             # Enable skip connections
             self.skip_connections = True
             self.Ws = nn.ModuleList()
-            for i in range(self.n_layers - 2):
-                self.Ws.append(nn.Linear(output_dims[i], output_dims[-1]))
+            for i in range(self.n_layers_fusion - 2):
+                self.Ws.append(nn.Linear(fusion_dims[i], fusion_dims[-1]))
                 nn.init.xavier_uniform_(self.Ws[-1].weight.data, gain=1.414)
         else:
             self.skip_connections = False
             self.Ws = None
         
     def forward(self, g: GData) -> torch.Tensor:
-        assert g.x is not None
-        assert g.edge_attr is not None
-        assert g.edge_index is not None
+        if g.x is None:
+            raise ValueError("Node embeddings are not provided.")
+        if g.edge_attr is None:
+            raise ValueError("Edge attributes are not provided.")
+        if g.edge_index is None:
+            raise ValueError("Edge index is not provided.")
+        
+        indices_embedding = torch.tensor([self.dict_node_names[node] for node in g.node_attrs()], dtype=torch.long, device=g.x.device)
+
+        qua_encoding = self.raiseQuaDim(g.x)
+        node_encoding = self.quaEncoder(torch.cat([self.node_embedding(indices_embedding), qua_encoding], dim=-1))
+        node_encoding = indices_embedding + node_encoding
 
         _g = g.clone()
+        _g.x = node_encoding
+
         h_list = []
-        for i in range(self.n_layers):
+        for i in range(self.n_layers_fusion):
             h = self.layers[i](_g)
             h_list.append(h)
             _g.x = h
         
         if self.skip_connections and self.Ws is not None:
-            for i in range(self.n_layers - 2):
+            for i in range(self.n_layers_fusion - 2):
                 h_list[i] = self.Ws[i](h_list[i])
             
             h_list[-1] = h_list[-1] + torch.mean(torch.stack(h_list[:-2]), dim=0)
@@ -167,47 +196,40 @@ class DynamicCentrality(nn.Module):
         nn.init.xavier_uniform_(self.Q_BCE[0].weight.data, gain=1.414)
         nn.init.xavier_uniform_(self.Q_BCE[2].weight.data, gain=1.414)
     
-    def forward(self, g_pyg: GData) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_attr: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
         r"""
         Returns:
             Dynamic centrality scores of shape ``(num_nodes, 1)``.
         """
-        assert g_pyg.x is not None
-
-        c_BCE = self.get_c_BCE(g_pyg)
-        w_BCE = self.Q_BCE(g_pyg.x)
+        c_BCE = self.get_c_BCE(edge_attr, edge_index, num_nodes)
+        w_BCE = self.Q_BCE(x)
         cs = torch.mul(w_BCE, c_BCE).sum(dim=1).unsqueeze(1)
-        assert cs.shape == (g_pyg.x.shape[0], 1)
+        # if cs.shape != (g_pyg.x.shape[0], 1):
+        #     raise ValueError("Dynamic centrality scores have the wrong shape.")
 
         # Square the values to avoid negative values and change the distribution to be more scale-free
         cs = torch.pow(cs, 2)
         return cs
     
-    def get_c_BCE(self, g_pyg: GData) -> torch.Tensor:
-        g, edge_weights = self.pyg2gtg(g_pyg)
+    def get_c_BCE(self, edge_attr: torch.Tensor, edge_index: torch.Tensor, num_nodes: int) -> torch.Tensor:
+        g, edge_weights = self.pyg2gtg(edge_attr, edge_index, num_nodes)
 
         c_BCE = compute_C_BCE(g, edge_weights)
-        c_BCE_o = torch.tensor(c_BCE, dtype=torch.float32, device=g_pyg.x.device)
+        c_BCE_o = torch.tensor(c_BCE, dtype=torch.float32, device=edge_attr.device)
         # Normalize the values per column
         max3 = torch.max(c_BCE_o, dim=0)
         min3 = torch.min(c_BCE_o, dim=0)
         c_BCE_o = (c_BCE_o - min3[0]) / (max3[0] - min3[0])
         return c_BCE_o
 
-    def pyg2gtg(self, g_pyg: GData):
-        assert g_pyg.x is not None
-        assert g_pyg.edge_attr is not None
-        assert g_pyg.edge_index is not None
-        num_nodes = g_pyg.num_nodes
-        assert num_nodes is not None
-
+    def pyg2gtg(self, edge_attr: torch.Tensor, edge_index: torch.Tensor, num_nodes: int):
         g = gt.Graph(directed=False)
         g.add_vertex(num_nodes)
         edge_weights = g.new_edge_property("double")
         
-        for i in range(g_pyg.edge_attr.shape[0]):
-            e = g.add_edge(g.vertex(g_pyg.edge_index[0][i].item()), g.vertex(g_pyg.edge_index[1][i].item()))
-            edge_weights[e] = g_pyg.edge_attr[i].item()
+        for i in range(edge_attr.shape[0]):
+            e = g.add_edge(g.vertex(edge_index[0][i].item()), g.vertex(edge_index[1][i].item()))
+            edge_weights[e] = edge_attr[i].item()
         
         return g, edge_weights
 
