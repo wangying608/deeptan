@@ -62,6 +62,19 @@ pub fn std_dev_2d_array(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>
             // Calculate standard deviation of the complete feature.
             std_dev_vec_tmp[n_windows] = Array1::from_vec(sorted_feat_i).std(1.0);
 
+            // Check if None value exists.
+            // if std_dev_vec_tmp.iter().any(|x| x.is_nan()) {
+            //     panic!("NaN value detected in std_dev_vec_tmp.");
+            // }
+            
+            // Substitude None with zero.
+            std_dev_vec_tmp.iter_mut().for_each(|x| {
+                if x.is_nan() {
+                    *x = 0.0;
+                }
+            });
+            // println!("std_dev_vec_tmp: {:?}", std_dev_vec_tmp);
+
             // Save the maximum standard deviation of the feature's sliding windows.
             *std_dev = *std_dev_vec_tmp
                 .iter()

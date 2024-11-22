@@ -97,7 +97,7 @@ class NodeEmbedding(nn.Module):
         
         """
         super().__init__()
-        self.node_embedding = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim, padding_idx=None)
+        self.node_embedding = nn.Embedding(num_embeddings=num_embeddings, embedding_dim=embedding_dim, padding_idx=None, sparse=True)
         self.dict_node_names = dict_node_names
 
         # Feature encoding layers (Part 1)

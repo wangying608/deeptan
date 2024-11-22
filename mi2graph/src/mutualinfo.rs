@@ -1,7 +1,9 @@
 use crate::slidingwindow::init_windows_from_ratio;
-use crate::sortf64::{get_sort_indices_vecf64, sort_vecs_by_first, sort_vec_f64};
+use crate::sortf64::{get_sort_indices_vecf64, sort_vec_f64, sort_vecs_by_first};
 use ndarray::prelude::*;
 use rayon::prelude::*;
+use std::error::Error;
+// use std::io::ErrorKind;
 
 /// Iterates over all feature pairs and applies the mutual information algorithm.
 /// + Accepts a 2D array of f64 values.
@@ -145,8 +147,20 @@ pub fn mi_optimal(feat_1: &Vec<f64>, feat_2: &Vec<f64>, sliding_windows: &Vec<Ve
 /// RectangularBinning (the adaptive partitioning approach): Freedman-Diaconis' rule (no assumption on the distribution).
 fn mi_fd(feat_1: &Vec<f64>, feat_2: &Vec<f64>, normalized: bool) -> f64 {
     // Generate the bins.
-    let (n_bins_f1, bin_width_f1, quantiles_f1) = bins_fd(feat_1);
-    let (n_bins_f2, bin_width_f2, quantiles_f2) = bins_fd(feat_2);
+    let Ok((n_bins_f1, bin_width_f1, quantiles_f1)) = bins_fd(feat_1) else {
+        // return Err(Box::new(std::io::Error::new(
+        //     std::io::ErrorKind::Other,
+        //     "Failed to generate bins.",
+        // )));
+        return 0.0;
+    };
+    let Ok((n_bins_f2, bin_width_f2, quantiles_f2)) = bins_fd(feat_2) else {
+        // return Err(Box::new(std::io::Error::new(
+        //     std::io::ErrorKind::Other,
+        //     "Failed to generate bins.",
+        // )));
+        return 0.0;
+    };
 
     // Calculate the mutual information.
     let mi = hist2mi(
@@ -166,7 +180,7 @@ fn mi_fd(feat_1: &Vec<f64>, feat_2: &Vec<f64>, normalized: bool) -> f64 {
 
 /// RectangularBinning (the adaptive partitioning approach): Freedman-Diaconis' rule (no assumption on the distribution)
 /// + Returns the number of bins, the bin width, and the quantiles.
-fn bins_fd(vec_x: &Vec<f64>) -> (usize, f64, Vec<f64>) {
+fn bins_fd(vec_x: &Vec<f64>) -> Result<(usize, f64, Vec<f64>), Box<dyn Error>> {
     let sort_indices = get_sort_indices_vecf64(vec_x);
     let len_vec = vec_x.len();
     let len_vec_f64 = len_vec as f64;
@@ -185,16 +199,24 @@ fn bins_fd(vec_x: &Vec<f64>) -> (usize, f64, Vec<f64>) {
     let bin_width = 2.0 * iqr / (len_vec_f64).cbrt();
 
     let n_bins = ((quantiles[3] - quantiles[0]) / bin_width).ceil() as usize;
-    if n_bins < 2 {
-        // Throw an error
-        panic!("The number of bins is less than 2.");
+
+    if n_bins < 3 {
+        // panic!("The number of bins is less than 3.");
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The number of bins is less than 3.",
+        )));
     }
 
     if n_bins > len_vec {
-        panic!("The number of bins is greater than the length of the vector.");
+        // panic!("The number of bins is greater than the length of the vector.");
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "The number of bins is greater than the length of the vector.",
+        )));
     }
 
-    (n_bins, bin_width, quantiles)
+    Ok((n_bins, bin_width, quantiles))
 }
 
 /// Calculate the mutual information value between two vectors using the histogram method.

@@ -6,3 +6,4 @@ target/
 *.whl
 profile*.svg
 logs/
+test_*/

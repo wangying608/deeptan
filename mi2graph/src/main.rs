@@ -1,5 +1,5 @@
 use clap::{Arg, ArgAction, Command};
-use mi2graph::{mi_mat_with_data_filter, read_npy_to_array2d};
+use mi2graph::{mic_mat_with_data_filter, read_parquet_to_array2d};
 
 fn main() {
     let matches = cli().get_matches();
@@ -34,12 +34,16 @@ fn main() {
         .get_one("nthreads")
         .expect("Error in reading number of threads");
 
-    // let rand_2d_array = read_npz_to_array2d(path_in).expect("Failed to read file");
-    let rand_2d_array = read_npy_to_array2d(path_in).expect("Failed to read file");
+    // let array_2d = read_npz_to_array2d(path_in).expect("Failed to read file");
+    // let array_2d = read_npy_to_array2d(path_in).expect("Failed to read file");
+    let (array_2d, obs_names, var_names) =
+        read_parquet_to_array2d(path_in).expect("Failed to read file");
 
-    mi_mat_with_data_filter(
+    mic_mat_with_data_filter(
         path_out,
-        &rand_2d_array,
+        &array_2d,
+        &obs_names,
+        &var_names,
         thre_sd,
         thre_pcc,
         thre_mi,

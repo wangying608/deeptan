@@ -1,7 +1,7 @@
 [package]
 name = "mi2graph"
 authors = ["Chenhua Wu <chanhuawu@outlook.com>"]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -11,4 +11,5 @@ clap = "4.5.7"
 ndarray = "0.15.6"
 ndarray-npy = "0.8.1"
 ndarray-rand = "0.14.0"
+polars = { version = "0.44.2", features = ["lazy", "ndarray", "strings", "parquet", "decompress"] }
 rayon = "1.10.0"

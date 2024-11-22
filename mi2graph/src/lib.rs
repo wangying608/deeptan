@@ -2,6 +2,7 @@ use chrono::Local;
 use ndarray::prelude::*;
 use ndarray_npy::{read_npy, NpzReader, NpzWriter};
 use ndarray_rand::rand;
+use polars::prelude::*;
 use rand::Rng;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -29,7 +30,9 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 ///
 /// **Input**:
 /// + `path_output_npz`: path to save the output NPZ files
-/// + `data`: input data with shape (n_feat, n_samp)
+/// + `data`: input data with shape (n_var, n_obs)
+/// + `obs_names`: observation names
+/// + `var_names`: variable names
 /// + `thre_sd`: threshold for removing features with low standard deviation
 /// + `thre_pcc`: threshold for removing redundant features
 /// + `thre_mi`: threshold for removing feature pairs with low mutual information
@@ -47,9 +50,14 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 ///     + `mat_feat_indices`: The feature indices of the processed matrix
 ///     + `mat_simi_feat_pairs`: Similar feature pairs given by *Step 3*
 ///     + input_args: The input arguments
-pub fn mi_mat_with_data_filter(
+/// + Parquet file
+///     + The named dataframe of `processed_mat`
+/// 
+pub fn mic_mat_with_data_filter(
     path_output_npz: &str,
     data: &Array2<f64>,
+    obs_names: &DataFrame,
+    var_names: &Vec<String>,
     thre_sd: f64,
     thre_pcc: f64,
     thre_mi: f64,
@@ -69,7 +77,7 @@ pub fn mi_mat_with_data_filter(
         .build_global()
         .unwrap();
     println!("\n⚡️  Using {} threads.\n", num_threads);
-    
+
     // Print start time
     println!("\nStart time: {:?}\n", Local::now());
 
@@ -150,7 +158,11 @@ pub fn mi_mat_with_data_filter(
     let data_1_feat_indices_o: Array1<i64> =
         Array1::from_vec(feat_indices_1.par_iter().map(|&i| i as i64).collect());
 
-    // 6. Save data to NPZ file
+    // Print end time
+    println!("\nEnd time:   {:?}\n", Local::now());
+
+    // 6. Save results
+    // 6.1 Save results to a NPZ file
     save_npz(
         path_output_npz,
         &mi_values_o,
@@ -166,9 +178,14 @@ pub fn mi_mat_with_data_filter(
         ratio_step_window,
         ratio_step_sliding,
     )?;
-
-    // Print end time
-    println!("\nEnd time:   {:?}\n", Local::now());
+    // 6.2 Save processed matrix to a parquet file
+    save_parquet(
+        &format!("{}.parquet", path_output_npz),
+        &data_1,
+        obs_names,
+        var_names,
+        &feat_indices_1,
+    )?;
 
     Ok(())
 }
@@ -240,6 +257,55 @@ fn save_npz(
     Ok(())
 }
 
+/// Save processed matrix to a parquet file
+fn save_parquet(
+    path_output_parquet: &str,
+    processed_mat: &Array2<f64>,
+    obs_names: &DataFrame,
+    var_names: &Vec<String>,
+    feat_indices: &Vec<usize>,
+) -> Result<(), Box<dyn Error>> {
+    // Check if path_output_parquet ends with .parquet
+    let mut path_parquet = format!("{}.parquet", path_output_parquet);
+    if path_output_parquet.ends_with(".parquet") {
+        path_parquet = path_output_parquet.to_string();
+    }
+    // Check if the file exists. If it does, add timestamp to the file name.
+    if Path::new(&path_parquet).exists() {
+        let timestamp = Local::now().format("%Y%m%d%H%M%S");
+        if path_output_parquet.ends_with(".parquet") {
+            path_parquet =
+                path_output_parquet.replace(".parquet", &format!("_{}.parquet", timestamp));
+        } else {
+            path_parquet = format!("{}_{}.parquet", path_output_parquet, timestamp);
+        }
+    }
+    let path_parquet_c = &path_parquet.clone();
+
+    // Pick saved var (feature) names based on feat_indices
+    let saved_var_names = var_names
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| feat_indices.contains(i))
+        .map(|(_, x)| x.clone())
+        .collect::<Vec<_>>();
+
+    // Create a new DataFrame with processed_mat, obs_names and the selected var_names
+    let vec_columns: Vec<Column> = saved_var_names
+        .iter()
+        .zip(processed_mat.outer_iter())
+        .map(|(name, values)| Column::new(name.into(), values.to_vec()))
+        .collect();
+
+    let mut df1 = obs_names.hstack(&vec_columns)?;
+
+    let mut file = File::create(path_parquet_c)?;
+    ParquetWriter::new(&mut file).finish(&mut df1)?;
+
+    println!("Processed matrix has been saved as a dataframe with obs names and feature names \"{}\"", path_parquet_c);
+    Ok(())
+}
+
 /// Random 2D ndarray generator
 pub fn random_2d_array(n_feat: usize, n_samp: usize) -> Array2<f64> {
     let mut rng = rand::thread_rng();
@@ -284,6 +350,28 @@ pub fn read_npz_to_array2d(path_npz: &str) -> Result<Array2<f64>, Box<dyn Error>
 pub fn read_npy_to_array2d(path_npy: &str) -> Result<Array2<f64>, Box<dyn Error>> {
     let mat: Array2<f64> = read_npy(path_npy)?;
     Ok(mat)
+}
+
+/// Read parquet file into ndarray (n_obs x n_vars)
+pub fn read_parquet_to_array2d(
+    path_parquet: &str,
+) -> Result<(Array2<f64>, DataFrame, Vec<String>), Box<dyn Error>> {
+    let mut file = std::fs::File::open(path_parquet).unwrap();
+    let df = ParquetReader::new(&mut file).finish().unwrap();
+    // let mat = df.to_ndarray::<f64>().unwrap();
+    // let lf1 = LazyFrame::scan_parquet(path_parquet, Default::default())?;
+    let obs_names = df.select(["obs_names"])?;
+    let binding = df.drop("obs_names")?;
+    let var_names_0 = binding.get_column_names();
+    // Convert Vec<&PlSmallStr> to Vec<String>
+    let var_names: Vec<String> = var_names_0.iter().map(|x| x.to_string()).collect();
+    let mat = df
+        .drop("obs_names")?
+        .to_ndarray::<Float64Type>(IndexOrder::Fortran)
+        .unwrap()
+        .t()
+        .to_owned();
+    Ok((mat, obs_names, var_names))
 }
 
 /// mi_values and feat_pairs have been sorted. We can check elements from the end.

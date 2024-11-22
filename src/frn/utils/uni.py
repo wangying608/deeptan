@@ -192,10 +192,7 @@ def train_model(
         monitor=const.dkey.title_val_loss,
     )
 
-    logger_tr = TensorBoardLogger(
-        save_dir=log_dir,
-        name='',
-    )
+    logger_tr = TensorBoardLogger(save_dir=log_dir, name='')
 
     trainer = Trainer(
         fast_dev_run=in_dev,
