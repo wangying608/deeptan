@@ -13,3 +13,9 @@ ndarray-npy = "0.8.1"
 ndarray-rand = "0.14.0"
 polars = { version = "0.44.2", features = ["lazy", "ndarray", "strings", "parquet", "decompress"] }
 rayon = "1.10.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = 3

@@ -30,6 +30,9 @@ fn main() {
     let ratio_step_sliding: f64 = *matches
         .get_one("ratio_step_sliding")
         .expect("Error in reading step size of sliding window / number of samples");
+    let skip_rm_simi: bool = *matches
+        .get_one("skip_rm_simi")
+        .expect("Error in reading whether to skip removing similar features");
     let n_threads: usize = *matches
         .get_one("nthreads")
         .expect("Error in reading number of threads");
@@ -44,6 +47,7 @@ fn main() {
         &array_2d,
         &obs_names,
         &var_names,
+        skip_rm_simi,
         thre_sd,
         thre_pcc,
         thre_mi,
@@ -59,7 +63,7 @@ fn main() {
 /// Define the CLI interface
 fn cli() -> Command {
     Command::new("mi2graph")
-        .version("0.1.0")
+        .version("0.2.0")
         .author("Chenhua Wu, chanhuawu@outlook.com")
         .about("A Rust implementation of generating a mutual information matrix with dynamic data filtering for the graph initialization.")
         .args([
@@ -110,6 +114,12 @@ fn cli() -> Command {
                 .long("stepsli")
                 .help("Step size of sliding window / number of samples")
                 .default_value("0.05"),
+            Arg::new("skip_rm_simi")
+                .short('s')
+                .long("skipsimi")
+                .help("Skip removing similar features")
+                .required(false)
+                .action(ArgAction::SetTrue),
             Arg::new("nthreads")
                 .value_parser(clap::value_parser!(usize))
                 .long("threads")

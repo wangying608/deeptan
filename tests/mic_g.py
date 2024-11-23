@@ -4,10 +4,10 @@ Read single-cell h5ad file and save it to a NPY file.
 import os
 import sys
 import numpy as np
-import pandas as pd
+# import pandas as pd
 import scanpy as sc
 import anndata
-import h5py
+# import h5py
 import polars as pl
 
 
@@ -68,7 +68,7 @@ def adata_to_parquet(adata: anndata.AnnData, output_dir: str, output_prefix: str
     # Create a Polars DataFrame with obs_names and var_names.
     obs_names = adata.obs_names.astype(str).to_list()
     var_names = adata.var_names.astype(str).to_list()
-    df = pl.DataFrame({"obs_names": obs_names}).hstack(pl.DataFrame(X[:, :500], schema=var_names[:500]))
+    df = pl.DataFrame({"obs_names": obs_names}).hstack(pl.DataFrame(X, schema=var_names))
     print(f"DataFrame shape: {df.shape}")
     print(f"Head of DataFrame:\n{df.head()}\n")
 
@@ -78,9 +78,20 @@ def adata_to_parquet(adata: anndata.AnnData, output_dir: str, output_prefix: str
     df.write_parquet(os.path.join(output_dir, f"{output_prefix}.parquet"))
 
 
+def h5ad_to_parquet(input_dir: str, output_dir: str):
+    r"""Read h5ad file and save it to a Parquet file.
+    Args:
+        input_dir (str): Input directory.
+        output_dir (str): Output directory.
+    """
+    h5ad_files = [f for f in os.listdir(input_dir) if f.endswith(".h5ad")]
+    for h5ad_file in h5ad_files:
+        adata = read_h5ad(os.path.join(input_dir, h5ad_file))
+        adata_to_parquet(adata, output_dir, h5ad_file)
+
+
 if __name__ == "__main__":
-    h5ad_file = sys.argv[1]
-    adata = read_h5ad(h5ad_file)
-    # adata_to_npy(adata, "data/test_mic_g_init", "scRNAseq")
-    adata_to_parquet(adata, "data/test_mic_g_init", "scRNAseq")
-    print("Done.")
+    input_dir_h5ad_files = sys.argv[1]
+    output_dir = sys.argv[2]
+
+    h5ad_to_parquet(input_dir_h5ad_files, output_dir)

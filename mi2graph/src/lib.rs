@@ -52,12 +52,13 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 ///     + input_args: The input arguments
 /// + Parquet file
 ///     + The named dataframe of `processed_mat`
-/// 
+///
 pub fn mic_mat_with_data_filter(
     path_output_npz: &str,
     data: &Array2<f64>,
     obs_names: &DataFrame,
     var_names: &Vec<String>,
+    skip_rm_similar: bool,
     thre_sd: f64,
     thre_pcc: f64,
     thre_mi: f64,
@@ -94,23 +95,32 @@ pub fn mic_mat_with_data_filter(
         ratio_step_sliding,
     );
     println!(
-        "Shape of data after removing features with low standard deviation: {:?}",
+        "Shape of data after removing features with low standard deviation: {:?} (n_feat x n_obs)",
         data_0.shape()
     );
 
     // 3. Detect similar features pairs and remove redundant features
-    let (data_1, mut feat_indices_1, mut simi_feat_pairs) = remove_feat_similar(
-        &data_0,
-        thre_pcc,
-        ratio_max_window,
-        ratio_min_window,
-        ratio_step_window,
-        ratio_step_sliding,
-    );
-    println!(
-        "Shape of data after removing similar features: {:?}",
-        data_1.shape()
-    );
+    let mut data_1 = data_0.clone();
+    let mut feat_indices_1 = feat_indices_0.clone();
+    let mut simi_feat_pairs = Array2::<i64>::zeros((0, 2));
+
+    if skip_rm_similar {
+        println!("Skip removing similar features.");
+    } else {
+        println!("Start removing similar features.");
+        (data_1, feat_indices_1, simi_feat_pairs) = remove_feat_similar(
+            &data_0,
+            thre_pcc,
+            ratio_max_window,
+            ratio_min_window,
+            ratio_step_window,
+            ratio_step_sliding,
+        );
+        println!(
+            "Shape of data after removing similar features: {:?}",
+            data_1.shape()
+        );
+    }
 
     // Print time
     println!("\nStart calculating mutual information: {:?}", Local::now());
@@ -302,7 +312,10 @@ fn save_parquet(
     let mut file = File::create(path_parquet_c)?;
     ParquetWriter::new(&mut file).finish(&mut df1)?;
 
-    println!("Processed matrix has been saved as a dataframe with obs names and feature names \"{}\"", path_parquet_c);
+    println!(
+        "Processed matrix has been saved as a dataframe with obs names and feature names \"{}\"",
+        path_parquet_c
+    );
     Ok(())
 }
 
