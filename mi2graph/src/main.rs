@@ -70,13 +70,13 @@ fn cli() -> Command {
             Arg::new("in")
                 .short('i')
                 .long("input")
-                .help("Input NumPy NPY file path (A matrix with a shape of n_feat x n_samp)")
+                .help("Input a Parquet file path (a dataframe (`n_obs x (1 + n_vars)`), where the first column \"obs_names\" list sample IDs )")
                 .required(true)
                 .action(ArgAction::Set),
             Arg::new("out")
                 .short('o')
                 .long("output")
-                .help("Output Numpy NPZ file path")
+                .help("Output path")
                 .required(true)
                 .action(ArgAction::Set),
             Arg::new("thre_sd")
@@ -93,22 +93,22 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(f64))
                 .long("thremi")
                 .help("Threshold of mutual information for removing edges (feature pairs)")
-                .default_value("0.05"),
+                .default_value("0.1"),
             Arg::new("ratio_max_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("maxwin")
                 .help("Maximum ratio of window size to the number of samples")
-                .default_value("0.99"),
+                .default_value("0.97"),
             Arg::new("ratio_min_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("minwin")
                 .help("Minimum ratio of window size to the number of samples")
-                .default_value("0.8"),
+                .default_value("0.33"),
             Arg::new("ratio_step_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("stepwin")
                 .help("Step size of window size / number of samples")
-                .default_value("0.08"),
+                .default_value("0.05"),
             Arg::new("ratio_step_sliding")
                 .value_parser(clap::value_parser!(f64))
                 .long("stepsli")
@@ -124,7 +124,7 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(usize))
                 .long("threads")
                 .short('t')
-                .help("Number of threads [default: 0, use all available threads]")
+                .help("Number of threads (use all available threads - 1 by default)")
                 .default_value("0"),
         ])
 }

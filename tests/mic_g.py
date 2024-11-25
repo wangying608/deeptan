@@ -51,7 +51,7 @@ def adata_to_npy(adata: anndata.AnnData, output_dir: str, output_prefix: str) ->
     # print(f"Saved obs to {os.path.join(output_dir, f'{output_prefix}_obs.npy')}")
 
 
-def adata_to_parquet(adata: anndata.AnnData, output_dir: str, output_prefix: str) -> None:
+def adata_to_parquet(adata: anndata.AnnData, output_dir: str, output_prefix: str, randomly_select_features: int | None = None) -> None:
     r"""Save AnnData object to Parquet files.
     Args:
         adata (anndata.AnnData): AnnData object.
@@ -68,6 +68,10 @@ def adata_to_parquet(adata: anndata.AnnData, output_dir: str, output_prefix: str
     # Create a Polars DataFrame with obs_names and var_names.
     obs_names = adata.obs_names.astype(str).to_list()
     var_names = adata.var_names.astype(str).to_list()
+    if randomly_select_features is not None:
+        rands = np.random.choice(X.shape[1], randomly_select_features, replace=False)
+        var_names = [var_names[i] for i in rands.tolist()]
+        X = X[:, rands]
     df = pl.DataFrame({"obs_names": obs_names}).hstack(pl.DataFrame(X, schema=var_names))
     print(f"DataFrame shape: {df.shape}")
     print(f"Head of DataFrame:\n{df.head()}\n")
@@ -93,5 +97,10 @@ def h5ad_to_parquet(input_dir: str, output_dir: str):
 if __name__ == "__main__":
     input_dir_h5ad_files = sys.argv[1]
     output_dir = sys.argv[2]
+    randomly_select_features = int(sys.argv[3]) if len(sys.argv) > 3 else None
 
-    h5ad_to_parquet(input_dir_h5ad_files, output_dir)
+    if randomly_select_features is None:
+        h5ad_to_parquet(input_dir_h5ad_files, output_dir)
+    else:
+        adata = read_h5ad(input_dir_h5ad_files)
+        adata_to_parquet(adata, output_dir, f"randpart_{randomly_select_features}", randomly_select_features)

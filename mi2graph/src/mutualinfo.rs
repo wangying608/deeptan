@@ -48,15 +48,40 @@ pub fn iter_feat_pairs_mi(
         }
     }
     assert_eq!(pos_v, n_pairs);
-    // Iterate over all feature pairs.
-    mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
-        // Extract feature values.
-        let feat_1 = data.select(Axis(0), &[feat_pairs[[i, 0]] as usize]);
-        let feat_2 = data.select(Axis(0), &[feat_pairs[[i, 1]] as usize]);
 
-        // Calculate mutual information.
-        *mi = mi_optimal(&feat_1.into_raw_vec(), &feat_2.into_raw_vec(), &sld_windows);
-    });
+    // Pre-extract all feature values to avoid repeated indexing.
+    let features: Vec<Vec<f64>> = (0..n_feat)
+        // .into_par_iter()
+        .map(|i| data.row(i).to_vec())
+        .collect();
+
+    // Iterate over all feature pairs.
+    // mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
+    //     // Extract feature values.
+    //     let feat_1 = &features[feat_pairs[[i, 0]] as usize];
+    //     let feat_2 = &features[feat_pairs[[i, 1]] as usize];
+    //     // Calculate mutual information.
+    //     *mi = mi_optimal(feat_1, feat_2, &sld_windows);
+    // });
+
+    // Split the mi_vec into chunks for parallel processing.
+    let chunk_size = (n_pairs + rayon::current_num_threads() - 1) / rayon::current_num_threads();
+    let chunks: Vec<&mut [f64]> = mi_vec.chunks_mut(chunk_size).collect();
+    // Iterate over all feature pairs in parallel.
+    chunks
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(chunk_index, chunk)| {
+            let start_index = chunk_index * chunk_size;
+            let end_index = std::cmp::min(start_index + chunk_size, n_pairs);
+            for i in start_index..end_index {
+                // Extract feature values.
+                let feat_1 = &features[feat_pairs[[i, 0]] as usize];
+                let feat_2 = &features[feat_pairs[[i, 1]] as usize];
+                // Calculate mutual information.
+                chunk[i - start_index] = mi_optimal(feat_1, feat_2, &sld_windows);
+            }
+        });
 
     // Sort the vector of mutual information values in descending order. feat_pairs are also sorted.
     if sort_results {
@@ -107,7 +132,8 @@ pub fn mi_optimal(feat_1: &Vec<f64>, feat_2: &Vec<f64>, sliding_windows: &Vec<Ve
     let mut mi_vec: Vec<f64> = vec![0.0; n_windows];
 
     // Iterate over all sliding windows. PARALLELIZED.
-    mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
+    // mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
+    mi_vec.iter_mut().enumerate().for_each(|(i, mi)| {
         // Extract the sliding window.
         let window = &sliding_windows[i];
         let tmp_sta = window[0];

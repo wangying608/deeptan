@@ -5,7 +5,7 @@ use ndarray_rand::rand;
 use polars::prelude::*;
 use rand::Rng;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fs::File;
 use std::path::Path;
@@ -29,7 +29,7 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 /// 6. Save sorted MI values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
 ///
 /// **Input**:
-/// + `path_output_npz`: path to save the output NPZ files
+/// + `path_output`: path to save the result files
 /// + `data`: input data with shape (n_var, n_obs)
 /// + `obs_names`: observation names
 /// + `var_names`: variable names
@@ -54,7 +54,7 @@ use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remov
 ///     + The named dataframe of `processed_mat`
 ///
 pub fn mic_mat_with_data_filter(
-    path_output_npz: &str,
+    path_output: &str,
     data: &Array2<f64>,
     obs_names: &DataFrame,
     var_names: &Vec<String>,
@@ -70,6 +70,9 @@ pub fn mic_mat_with_data_filter(
 ) -> Result<(), Box<dyn Error>> {
     // Check available threads
     let mut num_threads = std::thread::available_parallelism().unwrap().get();
+    if num_threads > 2 {
+        num_threads -= 1;
+    }
     if num_threads > n_threads && n_threads > 0 {
         num_threads = n_threads;
     }
@@ -123,7 +126,8 @@ pub fn mic_mat_with_data_filter(
     }
 
     // Print time
-    println!("\nStart calculating mutual information: {:?}", Local::now());
+    let time_start = Local::now();
+    println!("\nStart calculating mutual information: {:?}", time_start);
 
     // 4. Calculate mutual information for each feature pair
     let (mi_values, feat_pairs) = iter_feat_pairs_mi(
@@ -134,6 +138,11 @@ pub fn mic_mat_with_data_filter(
         ratio_step_sliding,
         true,
     );
+
+    // Print end time
+    let time_end = Local::now();
+    println!("End time:   {:?}", time_end);
+    println!("Time cost:  {:?}\n", time_end - time_start);
 
     // 5. Remove feature pairs with low mutual information.
     // mi_values and feat_pairs have been sorted. We check elements from the end.
@@ -146,35 +155,62 @@ pub fn mic_mat_with_data_filter(
         last2keep + 1
     );
 
-    // Convert feature indices to original indices.
-    // Create a map from new indices (feat_indices_1) to original indices (feat_indices_0).
-    let mut map_new2orig: HashMap<usize, usize> = HashMap::new();
-    feat_indices_1.iter().for_each(|&i| {
-        map_new2orig.insert(i, *feat_indices_0.get(i).unwrap());
-    });
+    // Get sorted unique features in pairs
+    let flattened: Array1<i64> = feat_pairs_o.iter().copied().collect();
+    let uniq_features: HashSet<i64> = flattened.into_iter().collect();
+    let mut sorted_uniq_features: Vec<usize> = uniq_features.iter().map(|&x| x as usize).collect();
+    sorted_uniq_features.sort();
 
-    // Update indices
+    // Convert feat_pairs_o based on feat_indices_1
+    let mut map_1: HashMap<usize, usize> = HashMap::new();
+    sorted_uniq_features.iter().for_each(|&i| {
+        map_1.insert(i, *feat_indices_1.get(i).unwrap());
+    });
     feat_pairs_o.outer_iter_mut().for_each(|mut row| {
-        row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
-        row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
+        row[0] = *map_1.get(&(row[0] as usize)).unwrap() as i64;
+        row[1] = *map_1.get(&(row[1] as usize)).unwrap() as i64;
     });
-    simi_feat_pairs.outer_iter_mut().for_each(|mut row| {
-        row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
-        row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
-    });
-    feat_indices_1.par_iter_mut().for_each(|i| {
-        *i = *map_new2orig.get(i).unwrap();
-    });
-    let data_1_feat_indices_o: Array1<i64> =
-        Array1::from_vec(feat_indices_1.par_iter().map(|&i| i as i64).collect());
 
-    // Print end time
-    println!("\nEnd time:   {:?}\n", Local::now());
+    // Remove features of data_1 that are not in sorted_uniq_features
+    data_1 = data_1.select(Axis(0), &sorted_uniq_features);
+
+    // Convert features indices after MIC filtering
+    sorted_uniq_features.par_iter_mut().for_each(|i| {
+        *i = *map_1.get(&(*i)).unwrap();
+    });
+
+    // Convert feature indices to original indices.
+    if skip_rm_similar {
+    } else {
+        // Create a map from new indices (feat_indices_1) to original indices (feat_indices_0).
+        let mut map_new2orig: HashMap<usize, usize> = HashMap::new();
+        sorted_uniq_features.iter().for_each(|&i| {
+            map_new2orig.insert(i, *feat_indices_0.get(i).unwrap());
+        });
+        // unwrap() is not safe because of the possibility of a None value.
+        // if None occurs, the program will panic.
+
+        // Update indices
+        feat_pairs_o.outer_iter_mut().for_each(|mut row| {
+            row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
+            row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
+        });
+        sorted_uniq_features.par_iter_mut().for_each(|i| {
+            *i = *map_new2orig.get(i).unwrap();
+        });
+        simi_feat_pairs.outer_iter_mut().for_each(|mut row| {
+            row[0] = *map_new2orig.get(&(row[0] as usize)).unwrap() as i64;
+            row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
+        });
+    }
+
+    let data_1_feat_indices_o: Array1<i64> =
+        Array1::from_vec(sorted_uniq_features.par_iter().map(|&i| i as i64).collect());
 
     // 6. Save results
     // 6.1 Save results to a NPZ file
     save_npz(
-        path_output_npz,
+        path_output,
         &mi_values_o,
         &feat_pairs_o,
         &data_1,
@@ -190,11 +226,11 @@ pub fn mic_mat_with_data_filter(
     )?;
     // 6.2 Save processed matrix to a parquet file
     save_parquet(
-        &format!("{}.parquet", path_output_npz),
+        &format!("{}.parquet", path_output),
         &data_1,
         obs_names,
         var_names,
-        &feat_indices_1,
+        &sorted_uniq_features,
     )?;
 
     Ok(())
@@ -313,7 +349,7 @@ fn save_parquet(
     ParquetWriter::new(&mut file).finish(&mut df1)?;
 
     println!(
-        "Processed matrix has been saved as a dataframe with obs names and feature names \"{}\"",
+        "Processed matrix has been saved as a dataframe with obs names and feature names: \"{}\"",
         path_parquet_c
     );
     Ok(())
@@ -365,7 +401,7 @@ pub fn read_npy_to_array2d(path_npy: &str) -> Result<Array2<f64>, Box<dyn Error>
     Ok(mat)
 }
 
-/// Read parquet file into ndarray (n_obs x n_vars)
+/// Read parquet file (n_obs x (1 + n_vars)) into ndarray (n_obs x n_vars)
 pub fn read_parquet_to_array2d(
     path_parquet: &str,
 ) -> Result<(Array2<f64>, DataFrame, Vec<String>), Box<dyn Error>> {
@@ -378,8 +414,7 @@ pub fn read_parquet_to_array2d(
     let var_names_0 = binding.get_column_names();
     // Convert Vec<&PlSmallStr> to Vec<String>
     let var_names: Vec<String> = var_names_0.iter().map(|x| x.to_string()).collect();
-    let mat = df
-        .drop("obs_names")?
+    let mat = binding
         .to_ndarray::<Float64Type>(IndexOrder::Fortran)
         .unwrap()
         .t()
