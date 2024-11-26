@@ -1,3 +1,5 @@
+use rayon::slice::ParallelSliceMut;
+
 /// Sort two Vec<f64> in ascending order based on the sortperm of the first vector.
 pub fn sort_vecs_by_first(
     vec_1: &Vec<f64>,
@@ -25,6 +27,7 @@ pub fn sort_vec_f64(vec_f64: &Vec<f64>) -> Vec<f64> {
 pub fn get_sort_indices_vecf64(vec_x: &Vec<f64>) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..vec_x.len()).collect();
     // Sort the indices based on the values in vec_x
-    indices.sort_by(|&i, &j| vec_x[i].partial_cmp(&vec_x[j]).unwrap());
+    // indices.sort_unstable_by(|&i, &j| vec_x[i].partial_cmp(&vec_x[j]).unwrap());
+    indices.par_sort_unstable_by(|&i, &j| vec_x[i].partial_cmp(&vec_x[j]).unwrap());
     indices
 }
