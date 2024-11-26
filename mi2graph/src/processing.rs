@@ -1,5 +1,5 @@
 use crate::slidingwindow::init_windows_from_ratio;
-use crate::sortf64::{sort_vec_f64, sort_vecs_by_first};
+use crate::sortf64::{get_sort_indices_vecf64, sort_vec_f64, sort_vecs_by_first};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 
@@ -66,7 +66,7 @@ pub fn std_dev_2d_array(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>
             // if std_dev_vec_tmp.iter().any(|x| x.is_nan()) {
             //     panic!("NaN value detected in std_dev_vec_tmp.");
             // }
-            
+
             // Substitude None with zero.
             std_dev_vec_tmp.iter_mut().for_each(|x| {
                 if x.is_nan() {
@@ -128,7 +128,8 @@ pub fn check_similarity_2d(
     sliding_windows: &Vec<Vec<usize>>,
     thre_pcc: f64,
 ) -> bool {
-    let (sorted_feat1, sorted_feat2) = sort_vecs_by_first(&feat1, &feat2);
+    let sort_ind_f1 = get_sort_indices_vecf64(&feat1);
+    let (sorted_feat1, sorted_feat2) = sort_vecs_by_first(&feat1, &feat2, &sort_ind_f1);
     let n_windows = sliding_windows.len();
 
     let mut pcc_vec: Vec<f64> = vec![0.0; n_windows];

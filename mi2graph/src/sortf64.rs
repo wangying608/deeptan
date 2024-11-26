@@ -1,9 +1,14 @@
 /// Sort two Vec<f64> in ascending order based on the sortperm of the first vector.
-pub fn sort_vecs_by_first(vec_1: &Vec<f64>, vec_2: &Vec<f64>) -> (Vec<f64>, Vec<f64>) {
-    let indices = get_sort_indices_vecf64(vec_1);
+pub fn sort_vecs_by_first(
+    vec_1: &Vec<f64>,
+    vec_2: &Vec<f64>,
+    sort_ind_f1: &Vec<usize>,
+) -> (Vec<f64>, Vec<f64>) {
+    // let sort_ind_f1 = get_sort_indices_vecf64(vec_1);
+
     // Sort the vectors based on the sorted indices
-    let sorted_vec_1 = indices.iter().map(|&i| vec_1[i]).collect();
-    let sorted_vec_2 = indices.iter().map(|&i| vec_2[i]).collect();
+    let sorted_vec_1 = sort_ind_f1.iter().map(|&i| vec_1[i]).collect();
+    let sorted_vec_2 = sort_ind_f1.iter().map(|&i| vec_2[i]).collect();
 
     // return sorted vectors
     (sorted_vec_1, sorted_vec_2)
