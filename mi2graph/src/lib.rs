@@ -16,24 +16,25 @@ mod slidingwindow;
 mod sortf64;
 
 use mutualinfo::iter_feat_pairs_mi;
-use processing::{normalize_2d_array, normalize_vecf64, remove_feat_low_sd, remove_feat_similar};
+use processing::{normalize_vecf64, remove_feat_similar, rm_feat_low_cv};
+use slidingwindow::init_windows_from_ratio;
+use sortf64::get_sort_indices_vecf64;
 
-/// Generate a mutual information matrix with dynamic data filtering for the next graph initialization.
+/// Generate MIC relations between features with dynamic feature filtering for the next graph initialization.
 ///
 /// **Steps**:
-/// 1. Scale features to `[0,1]`.
-/// 2. Remove features with low standard deviation (using dynamic sliding windows).
-/// 3. Detect similar features pairs (using dynamic 2D sliding windows for optimal PCC(`abs=true`) calculation) then remove redundant features.
-/// 4. Calculate mutual information for each feature pair.
-/// 5. Filter mutual information values and feature pairs.
-/// 6. Save sorted MI values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
+/// 1. Remove features with low coefficients of variation (using dynamic sliding windows).
+/// 2. Detect similar features pairs [Optional] (using dynamic 2D sliding windows for maxmizing PCC(`abs=true`)) then remove redundant features.
+/// 3. Compute MIC for each feature pair (using dynamic sliding windows).
+/// 4. Filter weak MIC values and corresponding feature pairs.
+/// 5. Save sorted MIC values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
 ///
 /// **Input**:
 /// + `path_output`: path to save the result files
 /// + `data`: input data with shape (n_var, n_obs)
 /// + `obs_names`: observation names
 /// + `var_names`: variable names
-/// + `thre_sd`: threshold for removing features with low standard deviation
+/// + `thre_cv`: threshold for removing features with low coefficients of variation
 /// + `thre_pcc`: threshold for removing redundant features
 /// + `thre_mi`: threshold for removing feature pairs with low mutual information
 /// + `ratio_max_window`: maximum (window_size / num_samples)
@@ -59,7 +60,7 @@ pub fn mic_mat_with_data_filter(
     obs_names: &DataFrame,
     var_names: &Vec<String>,
     skip_rm_similar: bool,
-    thre_sd: f64,
+    thre_cv: f64,
     thre_pcc: f64,
     thre_mi: f64,
     ratio_max_window: f64,
@@ -82,28 +83,35 @@ pub fn mic_mat_with_data_filter(
         .unwrap();
     println!("\n⚡️  Using {} threads.\n", num_threads);
 
-    // Print start time
-    println!("\nStart time: {:?}\n", Local::now());
-
-    // 1. Scale features to [0,1]
-    let data_scaled = normalize_2d_array(data);
-
-    // 2. Remove features with low standard deviation
-    let (data_0, feat_indices_0) = remove_feat_low_sd(
-        &data_scaled,
-        thre_sd,
-        ratio_max_window,
+    // Initialize various sliding windows
+    let sliding_windows = init_windows_from_ratio(
+        data.ncols(),
         ratio_min_window,
+        ratio_max_window,
         ratio_step_window,
         ratio_step_sliding,
     );
+
+    // Pre-compute the sort indices for each feature.
+    let features: Vec<Vec<f64>> = (0..data.nrows()).map(|i| data.row(i).to_vec()).collect();
+    let mut features_sort_indices: Vec<Vec<usize>> = features
+        .par_iter()
+        .map(|feat| get_sort_indices_vecf64(feat))
+        .collect();
+
+    // Print start time
+    println!("\nStart time: {:?}\n", Local::now());
+
+    // 1. Remove low-CV features
+    let (mut data_0, feat_indices_0, tmp_features_sort_indices) =
+        rm_feat_low_cv(data, thre_cv, &sliding_windows, &features_sort_indices);
+    features_sort_indices = tmp_features_sort_indices;
     println!(
-        "Shape of data after removing features with low standard deviation: {:?} (n_feat x n_obs)",
+        "Shape of data after removing features with low CV (coefficient of variation) values: {:?} (n_feat x n_obs)",
         data_0.shape()
     );
 
-    // 3. Detect similar features pairs and remove redundant features
-    let mut data_1 = data_0.clone();
+    // 2. Detect similar features pairs and remove redundant features
     let mut feat_indices_1 = feat_indices_0.clone();
     let mut simi_feat_pairs = Array2::<i64>::zeros((0, 2));
 
@@ -111,47 +119,39 @@ pub fn mic_mat_with_data_filter(
         println!("Skip removing similar features.");
     } else {
         println!("Start removing similar features.");
-        (data_1, feat_indices_1, simi_feat_pairs) = remove_feat_similar(
-            &data_0,
-            thre_pcc,
-            ratio_max_window,
-            ratio_min_window,
-            ratio_step_window,
-            ratio_step_sliding,
-        );
+        (
+            data_0,
+            feat_indices_1,
+            simi_feat_pairs,
+            features_sort_indices,
+        ) = remove_feat_similar(&data_0, thre_pcc, &sliding_windows, &features_sort_indices);
         println!(
             "Shape of data after removing similar features: {:?}",
-            data_1.shape()
+            data_0.shape()
         );
     }
 
     // Print time
     let time_start = Local::now();
-    println!("\nStart calculating mutual information: {:?}", time_start);
+    println!("\nStart computing MIC relations: {:?}", time_start);
 
-    // 4. Calculate mutual information for each feature pair
-    let (mi_values, feat_pairs) = iter_feat_pairs_mi(
-        &data_1,
-        ratio_max_window,
-        ratio_min_window,
-        ratio_step_window,
-        ratio_step_sliding,
-        true,
-    );
+    // 3. Compute MIC for each feature pair
+    let (mi_values, feat_pairs) =
+        iter_feat_pairs_mi(&data_0, &sliding_windows, &features_sort_indices, true);
 
     // Print end time
     let time_end = Local::now();
     println!("End time:   {:?}", time_end);
     println!("Time cost:  {:?}\n", time_end - time_start);
 
-    // 5. Remove feature pairs with low mutual information.
+    // 4. Remove low-MIC feature pairs.
     // mi_values and feat_pairs have been sorted. We check elements from the end.
     let last2keep = check_sorted_vals(&mi_values, thre_mi);
     // Keep pairs that idx >= last2keep
     let mi_values_o: Array1<f64> = mi_values.slice(s![..last2keep]).to_owned();
     let mut feat_pairs_o: Array2<i64> = feat_pairs.slice(s![..last2keep, ..]).to_owned();
     println!(
-        "Number of feature pairs after removing low mutual information: {}",
+        "Number of feature pairs after removing weak MIC values: {}",
         last2keep + 1
     );
 
@@ -172,7 +172,7 @@ pub fn mic_mat_with_data_filter(
     });
 
     // Remove features of data_1 that are not in sorted_uniq_features
-    data_1 = data_1.select(Axis(0), &sorted_uniq_features);
+    data_0 = data_0.select(Axis(0), &sorted_uniq_features);
 
     // Convert features indices after MIC filtering
     sorted_uniq_features.par_iter_mut().for_each(|i| {
@@ -207,16 +207,16 @@ pub fn mic_mat_with_data_filter(
     let data_1_feat_indices_o: Array1<i64> =
         Array1::from_vec(sorted_uniq_features.par_iter().map(|&i| i as i64).collect());
 
-    // 6. Save results
-    // 6.1 Save results to a NPZ file
+    // 5. Save results
+    // 5.1 Save results to a NPZ file
     save_npz(
         path_output,
         &mi_values_o,
         &feat_pairs_o,
-        &data_1,
+        &data_0,
         &data_1_feat_indices_o,
         &simi_feat_pairs,
-        thre_sd,
+        thre_cv,
         thre_pcc,
         thre_mi,
         ratio_max_window,
@@ -224,10 +224,10 @@ pub fn mic_mat_with_data_filter(
         ratio_step_window,
         ratio_step_sliding,
     )?;
-    // 6.2 Save processed matrix to a parquet file
+    // 5.2 Save processed matrix to a parquet file
     save_parquet(
         &format!("{}.parquet", path_output),
-        &data_1,
+        &data_0,
         obs_names,
         var_names,
         &sorted_uniq_features,

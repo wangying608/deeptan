@@ -9,9 +9,9 @@ fn main() {
         .get_one::<String>("out")
         .map(|s| s.as_str())
         .unwrap();
-    let thre_sd: f64 = *matches
-        .get_one("thre_sd")
-        .expect("Error in reading threshold of standard deviation");
+    let thre_cv: f64 = *matches
+        .get_one("thre_cv")
+        .expect("Error in reading threshold of coefficient of variation");
     let thre_pcc: f64 = *matches
         .get_one("thre_pcc")
         .expect("Error in reading threshold of PCC");
@@ -48,7 +48,7 @@ fn main() {
         &obs_names,
         &var_names,
         skip_rm_simi,
-        thre_sd,
+        thre_cv,
         thre_pcc,
         thre_mi,
         ratio_max_window,
@@ -65,7 +65,7 @@ fn cli() -> Command {
     Command::new("mi2graph")
         .version("0.2.0")
         .author("Chenhua Wu, chanhuawu@outlook.com")
-        .about("A Rust implementation of generating a mutual information matrix with dynamic data filtering for the graph initialization.")
+        .about("Generate MIC relations between features with dynamic feature filtering for the graph initialization.")
         .args([
             Arg::new("in")
                 .short('i')
@@ -79,11 +79,11 @@ fn cli() -> Command {
                 .help("Output path")
                 .required(true)
                 .action(ArgAction::Set),
-            Arg::new("thre_sd")
+            Arg::new("thre_cv")
                 .value_parser(clap::value_parser!(f64))
-                .long("thresd")
-                .help("Threshold of standard deviation for removing features")
-                .default_value("0.01"),
+                .long("threcv")
+                .help("Threshold of coefficient of variation for removing features")
+                .default_value("0.1"),
             Arg::new("thre_pcc")
                 .value_parser(clap::value_parser!(f64))
                 .long("threpcc")

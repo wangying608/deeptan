@@ -1,4 +1,3 @@
-use crate::slidingwindow::init_windows_from_ratio;
 use crate::sortf64::{get_sort_indices_vecf64, sort_vec_f64, sort_vecs_by_first};
 use ndarray::prelude::*;
 use rayon::prelude::*;
@@ -14,25 +13,13 @@ use std::error::Error;
 /// + Each row in input `feat_pairs` is a feature pair.
 pub fn iter_feat_pairs_mi(
     data: &Array2<f64>,
-    ratio_max_window: f64,
-    ratio_min_window: f64,
-    ratio_step_window: f64,
-    ratio_step_sliding: f64,
+    sliding_windows: &Vec<Vec<usize>>,
+    features_sort_indices: &Vec<Vec<usize>>,
     sort_results: bool,
 ) -> (Array1<f64>, Array2<i64>) {
     let n_feat = data.nrows();
-    let n_samp = data.ncols();
 
-    // Init sliding windows.
-    let sld_windows = init_windows_from_ratio(
-        n_samp,
-        ratio_min_window,
-        ratio_max_window,
-        ratio_step_window,
-        ratio_step_sliding,
-    );
-
-    //
+    // Calculate the number of feature pairs.
     let n_pairs = n_feat * (n_feat - 1) / 2;
     // Initialize a vector to store mutual information values. (size = n_pairs)
     let mut mi_vec: Vec<f64> = vec![0.0; n_pairs];
@@ -51,12 +38,6 @@ pub fn iter_feat_pairs_mi(
 
     // Pre-extract all feature values to avoid repeated indexing.
     let features: Vec<Vec<f64>> = (0..n_feat).map(|i| data.row(i).to_vec()).collect();
-
-    // Pre-compute the sort indices for each feature.
-    let features_sort_indices: Vec<Vec<usize>> = features
-        .par_iter()
-        .map(|feat| get_sort_indices_vecf64(feat))
-        .collect();
 
     // Iterate over all feature pairs.
     // mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
@@ -87,7 +68,7 @@ pub fn iter_feat_pairs_mi(
                 chunk[i - start_index] = mi_optimal(
                     feat_1,
                     feat_2,
-                    &sld_windows,
+                    sliding_windows,
                     &features_sort_indices[tmp_ind_f1],
                     &features_sort_indices[tmp_ind_f2],
                 );

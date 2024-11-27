@@ -1,5 +1,4 @@
-use crate::slidingwindow::init_windows_from_ratio;
-use crate::sortf64::{get_sort_indices_vecf64, sort_vec_f64, sort_vecs_by_first};
+use crate::sortf64::{sort_vec_f64, sort_vecs_by_first};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 
@@ -38,98 +37,159 @@ pub fn normalize_2d_array(array_2d: &Array2<f64>) -> Array2<f64> {
 /// Calculate standard deviation of a 2D array for each row(feature).
 /// Note:
 /// + Features are rows, samples are columns. Features must be normalized before input.
-pub fn std_dev_2d_array(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>>) -> Vec<f64> {
+fn stddev_array2d(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>>) -> Vec<f64> {
     let n_feat = array_2d.nrows();
-    // let n_samp = array_2d.ncols();
     let n_windows = sliding_windows.len();
-
-    let mut std_dev_opt: Vec<f64> = vec![0.0; n_feat];
+    let mut stddev_opt: Vec<f64> = vec![0.0; n_feat];
 
     // (Parallelized) Calculate the standard deviation for each feature, for each feature's sliding windows.
-    std_dev_opt
+    stddev_opt
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, std_dev)| {
             let sorted_feat_i = sort_vec_f64(&array_2d.row(i).to_vec());
 
             // Calculate the optimal standard deviation for each feature, through sliding windows.
-            let mut std_dev_vec_tmp: Vec<f64> = vec![0.0; n_windows + 1];
+            let mut tmp_stddev_vals: Vec<f64> = vec![0.0; n_windows + 1];
             for (j, window) in sliding_windows.iter().enumerate() {
                 let part_j = sorted_feat_i[window[0]..window[1]].to_vec();
                 // Calculate standard deviation of the feature's part.
-                std_dev_vec_tmp[j] = Array1::from_vec(part_j).std(1.0);
+                tmp_stddev_vals[j] = Array1::from_vec(part_j).std(1.0);
             }
             // Calculate standard deviation of the complete feature.
-            std_dev_vec_tmp[n_windows] = Array1::from_vec(sorted_feat_i).std(1.0);
+            tmp_stddev_vals[n_windows] = Array1::from_vec(sorted_feat_i).std(1.0);
 
             // Check if None value exists.
-            // if std_dev_vec_tmp.iter().any(|x| x.is_nan()) {
-            //     panic!("NaN value detected in std_dev_vec_tmp.");
+            // if tmp_stddev_vals.iter().any(|x| x.is_nan()) {
+            //     panic!("NaN value detected in tmp_stddev_vals.");
             // }
 
             // Substitude None with zero.
-            std_dev_vec_tmp.iter_mut().for_each(|x| {
+            tmp_stddev_vals.iter_mut().for_each(|x| {
                 if x.is_nan() {
                     *x = 0.0;
                 }
             });
-            // println!("std_dev_vec_tmp: {:?}", std_dev_vec_tmp);
+            // println!("tmp_stddev_vals: {:?}", tmp_stddev_vals);
 
             // Save the maximum standard deviation of the feature's sliding windows.
-            *std_dev = *std_dev_vec_tmp
+            *std_dev = *tmp_stddev_vals
                 .iter()
                 .max_by(|x, y| x.partial_cmp(y).unwrap())
                 .unwrap();
         });
 
-    std_dev_opt
+    stddev_opt
+}
+
+fn cv_array2d(
+    array_2d: &Array2<f64>,
+    sliding_windows: &Vec<Vec<usize>>,
+    feat_sort_indices: &Vec<Vec<usize>>,
+) -> Vec<f64> {
+    let n_feat = array_2d.nrows();
+    let n_windows = sliding_windows.len();
+    let mut cv_opt: Vec<f64> = vec![0.0; n_feat];
+
+    // Compute CV for each feature, for each feature's sliding windows.
+    cv_opt.par_iter_mut().enumerate().for_each(|(i, cv)| {
+        let f_i = array_2d.row(i).to_vec();
+        let sorted_feat_i = feat_sort_indices[i]
+            .iter()
+            .map(|&i| f_i[i])
+            .collect::<Vec<f64>>();
+
+        // Compute the optimal CV for each feature through sliding windows.
+        let mut tmp_cv_vals: Vec<f64> = vec![0.0; n_windows + 1];
+        for (j, window) in sliding_windows.iter().enumerate() {
+            let part_j = sorted_feat_i[window[0]..window[1]].to_vec();
+
+            // CV of the feature's part.
+            let tmp_array = Array1::from(part_j);
+            let part_j_sd = &tmp_array.std(1.0);
+            let part_j_mean = &tmp_array.mean().unwrap().abs();
+            if *part_j_mean < 0.0001 {
+                tmp_cv_vals[j] = 0.0;
+            } else {
+                tmp_cv_vals[j] = part_j_sd / part_j_mean;
+            }
+        }
+
+        // Compute CV of the complete feature.
+        let tmp_array = Array1::from(sorted_feat_i);
+        let complete_feat_sd = &tmp_array.std(1.0);
+        let complete_feat_mean = &tmp_array.mean().unwrap().abs();
+        if *complete_feat_mean < 0.0001 {
+            tmp_cv_vals[n_windows] = 0.0;
+        } else {
+            tmp_cv_vals[n_windows] = complete_feat_sd / complete_feat_mean;
+        }
+
+        *cv = *tmp_cv_vals
+            .iter()
+            .max_by(|x, y| x.partial_cmp(y).unwrap())
+            .unwrap();
+    });
+
+    cv_opt
 }
 
 /// Remove features with low standard deviation (using dynamic sliding windows).
 pub fn remove_feat_low_sd(
     array_2d: &Array2<f64>,
     thre_stddev: f64,
-    ratio_max_window: f64,
-    ratio_min_window: f64,
-    ratio_step_window: f64,
-    ratio_step_sliding: f64,
+    sliding_windows: &Vec<Vec<usize>>,
 ) -> (Array2<f64>, Vec<usize>) {
-    // Init sliding windows
-    let len_vec = array_2d.ncols();
-    let sld_windows = init_windows_from_ratio(
-        len_vec,
-        ratio_min_window,
-        ratio_max_window,
-        ratio_step_window,
-        ratio_step_sliding,
-    );
-
     // Calculate standard deviation for each feature
-    let sd_feats = std_dev_2d_array(array_2d, &sld_windows);
+    let sd_vals = stddev_array2d(array_2d, sliding_windows);
 
     // Filter features with low standard deviation
-    let mut feat_idxs_filtered: Vec<usize> = Vec::new();
-    for (i, sd) in sd_feats.iter().enumerate() {
+    let mut feat_idxs_saved: Vec<usize> = Vec::new();
+    for (i, sd) in sd_vals.iter().enumerate() {
         if *sd >= thre_stddev {
-            feat_idxs_filtered.push(i);
+            feat_idxs_saved.push(i);
         }
     }
-    let data_ = array_2d.select(Axis(0), &feat_idxs_filtered);
+    let data_ = array_2d.select(Axis(0), &feat_idxs_saved);
 
-    (data_, feat_idxs_filtered)
+    (data_, feat_idxs_saved)
+}
+
+pub fn rm_feat_low_cv(
+    array_2d: &Array2<f64>,
+    thre_cv: f64,
+    sliding_windows: &Vec<Vec<usize>>,
+    feat_sort_indices: &Vec<Vec<usize>>,
+) -> (Array2<f64>, Vec<usize>, Vec<Vec<usize>>) {
+    // Calculate coefficient of variation for each feature
+    let cv_vals = cv_array2d(array_2d, sliding_windows, feat_sort_indices);
+
+    // Filter features with low CV
+    let mut feat_idxs_saved: Vec<usize> = Vec::new();
+    for (i, cv) in cv_vals.iter().enumerate() {
+        if *cv >= thre_cv {
+            feat_idxs_saved.push(i);
+        }
+    }
+    let data_ = array_2d.select(Axis(0), &feat_idxs_saved);
+    let feat_sort_indices_: Vec<Vec<usize>> = feat_idxs_saved
+        .iter()
+        .map(|&i| feat_sort_indices[i].clone())
+        .collect();
+    (data_, feat_idxs_saved, feat_sort_indices_)
 }
 
 /// Check the similarity of two features (using dynamic 2D sliding windows for optimal PCC calculation).
 /// + Accepets two vectors, sliding windows, and a threshold.
 /// + Returns a bool (true if the features are similar, false otherwise).
-pub fn check_similarity_2d(
+fn check_similarity_2d(
     feat1: &Vec<f64>,
     feat2: &Vec<f64>,
     sliding_windows: &Vec<Vec<usize>>,
     thre_pcc: f64,
+    sort_ind_f1: &Vec<usize>,
 ) -> bool {
-    let sort_ind_f1 = get_sort_indices_vecf64(&feat1);
-    let (sorted_feat1, sorted_feat2) = sort_vecs_by_first(&feat1, &feat2, &sort_ind_f1);
+    let (sorted_feat1, sorted_feat2) = sort_vecs_by_first(&feat1, &feat2, sort_ind_f1);
     let n_windows = sliding_windows.len();
 
     let mut pcc_vec: Vec<f64> = vec![0.0; n_windows];
@@ -158,21 +218,9 @@ pub fn check_similarity_2d(
 pub fn remove_feat_similar(
     array_2d: &Array2<f64>,
     thre_pcc: f64,
-    ratio_max_window: f64,
-    ratio_min_window: f64,
-    ratio_step_window: f64,
-    ratio_step_sliding: f64,
-) -> (Array2<f64>, Vec<usize>, Array2<i64>) {
-    // Init sliding windows
-    let len_vec = array_2d.ncols();
-    let sld_windows = init_windows_from_ratio(
-        len_vec,
-        ratio_min_window,
-        ratio_max_window,
-        ratio_step_window,
-        ratio_step_sliding,
-    );
-
+    sliding_windows: &Vec<Vec<usize>>,
+    feat_sort_indices: &Vec<Vec<usize>>,
+) -> (Array2<f64>, Vec<usize>, Array2<i64>, Vec<Vec<usize>>) {
     // Calculate optimal PCC for each feature pair
     // Iter over all pairs of features (combinations of 2 rows)
     let mut similar_feat_pair_indices: Vec<Vec<usize>> = Vec::new();
@@ -189,8 +237,13 @@ pub fn remove_feat_similar(
                 .for_each(|(j, feat2)| {
                     if i < j {
                         let feat2_vec = feat2.to_vec();
-                        let similar_feat_pair =
-                            check_similarity_2d(&feat1_vec, &feat2_vec, &sld_windows, thre_pcc);
+                        let similar_feat_pair = check_similarity_2d(
+                            &feat1_vec,
+                            &feat2_vec,
+                            sliding_windows,
+                            thre_pcc,
+                            &feat_sort_indices[i],
+                        );
                         if similar_feat_pair {
                             similar_feat_pair_indices.push(vec![i, j]);
                             feat_indices_to_remove.push(i);
@@ -200,6 +253,7 @@ pub fn remove_feat_similar(
         });
 
     let mut array_new = array_2d.clone();
+    let mut feat_sort_indices_new: Vec<Vec<usize>> = feat_sort_indices.clone();
 
     if !feat_indices_to_remove.is_empty() {
         // Remove duplicated features from feat_indices_to_remove
@@ -225,6 +279,11 @@ pub fn remove_feat_similar(
                         .assign(&feat);
                 }
             });
+
+        feat_sort_indices_new = feat_indices_to_keep
+            .iter()
+            .map(|&i| feat_sort_indices[i].clone())
+            .collect();
     } else {
         // If there are no similar features, return the original array_2d
         feat_indices_to_keep = (0..array_2d.nrows()).collect();
@@ -238,7 +297,12 @@ pub fn remove_feat_similar(
         }
     }
 
-    (array_new, feat_indices_to_keep, nda_simi_feat_pairs)
+    (
+        array_new,
+        feat_indices_to_keep,
+        nda_simi_feat_pairs,
+        feat_sort_indices_new,
+    )
 }
 
 /// Pearson Correlation Coefficient
