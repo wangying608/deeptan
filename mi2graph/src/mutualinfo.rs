@@ -1,8 +1,7 @@
-use crate::sortf64::{get_sort_indices_vecf64, sort_vec_f64, sort_vecs_by_first};
+use crate::sortf64::{get_sort_indices_vecf64, get_sort_indices_vecf64_slice, sort_vec_f64};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 use std::error::Error;
-// use std::io::ErrorKind;
 
 /// Iterates over all feature pairs and applies the mutual information algorithm.
 /// + Accepts a 2D array of f64 values.
@@ -36,9 +35,6 @@ pub fn iter_feat_pairs_mi(
     }
     assert_eq!(pos_v, n_pairs);
 
-    // Pre-extract all feature values to avoid repeated indexing.
-    let features: Vec<Vec<f64>> = (0..n_feat).map(|i| data.row(i).to_vec()).collect();
-
     // Iterate over all feature pairs.
     // mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
     //     // Extract feature values.
@@ -59,15 +55,11 @@ pub fn iter_feat_pairs_mi(
             let start_index = chunk_index * chunk_size;
             let end_index = std::cmp::min(start_index + chunk_size, n_pairs);
             for i in start_index..end_index {
-                // Extract feature values.
                 let tmp_ind_f1 = feat_pairs[[i, 0]] as usize;
                 let tmp_ind_f2 = feat_pairs[[i, 1]] as usize;
-                let feat_1 = &features[tmp_ind_f1];
-                let feat_2 = &features[tmp_ind_f2];
-                // Calculate mutual information.
                 chunk[i - start_index] = mi_optimal(
-                    feat_1,
-                    feat_2,
+                    data.row(tmp_ind_f1).as_slice().unwrap(),
+                    data.row(tmp_ind_f2).as_slice().unwrap(),
                     sliding_windows,
                     &features_sort_indices[tmp_ind_f1],
                     &features_sort_indices[tmp_ind_f2],
@@ -83,8 +75,7 @@ pub fn iter_feat_pairs_mi(
     }
 
     // Return the vector of mutual information values.
-    let nda_mi = Array1::from(mi_vec);
-    (nda_mi, feat_pairs)
+    (Array1::from(mi_vec), feat_pairs)
 }
 
 /// Sort mutual information values in descending order.
@@ -116,31 +107,32 @@ fn sort_mi_results(mi_vec: &Vec<f64>, feat_pairs: &Array2<i64>) -> (Vec<f64>, Ar
 /// + Accepts two 1D arrays of floating-point values and parameters of sliding window.
 /// + Returns the optimal mutual information value.
 pub fn mi_optimal(
-    f1: &Vec<f64>,
-    f2: &Vec<f64>,
+    f1: &[f64],
+    f2: &[f64],
     sliding_windows: &Vec<Vec<usize>>,
-    sorted_ind_f1: &Vec<usize>,
-    sorted_ind_f2: &Vec<usize>,
+    sort_ind_f1: &Vec<usize>,
+    sort_ind_f2: &Vec<usize>,
 ) -> f64 {
     // Sort feature_1 and feature_2 in ascending order based on the sortperm of feature_1.
-    let (sorted_f1, sorted_f2) = sort_vecs_by_first(f1, f2, sorted_ind_f1);
+    let sorted_f1: Vec<f64> = sort_ind_f1.iter().map(|&i| f1[i]).collect();
+    let sorted_f2: Vec<f64> = sort_ind_f1.iter().map(|&i| f2[i]).collect();
 
     // Initialize a vector to store mutual information values.
     let n_windows = sliding_windows.len();
     let mut mi_vec: Vec<f64> = vec![0.0; n_windows];
 
     // Iterate over all sliding windows.
-    mi_vec.iter_mut().enumerate().for_each(|(i, mi)| {
+    mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
         // Extract the sliding window.
         let window = &sliding_windows[i];
         let tmp_sta = window[0];
         let tmp_end = window[1];
 
-        let tmp_sorted_f1 = &sorted_f1[tmp_sta..tmp_end].to_vec();
-        let tmp_sorted_f2 = &sorted_f2[tmp_sta..tmp_end].to_vec();
+        let tmp_sorted_f1 = &sorted_f1[tmp_sta..tmp_end];
+        let tmp_sorted_f2 = &sorted_f2[tmp_sta..tmp_end];
 
         let tmp_sorted_ind_f1: Vec<usize> = (0..(tmp_end - tmp_sta)).map(|i| i).collect();
-        let tmp_sorted_ind_f2: Vec<usize> = get_sort_indices_vecf64(tmp_sorted_f2);
+        let tmp_sorted_ind_f2: Vec<usize> = get_sort_indices_vecf64_slice(tmp_sorted_f2);
 
         // Calculate the mutual information.
         *mi = mi_fd(
@@ -159,7 +151,7 @@ pub fn mi_optimal(
     let mut mi_opt = sorted_mi_vec[sorted_mi_vec.len() - 1];
 
     // Calculate the MI for the complete data.
-    let mi_complete = mi_fd(f1, f2, sorted_ind_f1, sorted_ind_f2, true);
+    let mi_complete = mi_fd(f1, f2, sort_ind_f1, sort_ind_f2, true);
 
     if mi_complete > mi_opt {
         mi_opt = mi_complete;
@@ -177,30 +169,22 @@ pub fn mi_optimal(
 ///
 /// RectangularBinning (the adaptive partitioning approach): Freedman-Diaconis' rule (no assumption on the distribution).
 fn mi_fd(
-    feat_1: &Vec<f64>,
-    feat_2: &Vec<f64>,
+    feat_1: &[f64],
+    feat_2: &[f64],
     sort_ind_f1: &Vec<usize>,
     sort_ind_f2: &Vec<usize>,
     normalized: bool,
 ) -> f64 {
     // Generate the bins.
     let Ok((n_bins_f1, bin_width_f1, quantiles_f1)) = bins_fd(feat_1, sort_ind_f1) else {
-        // return Err(Box::new(std::io::Error::new(
-        //     std::io::ErrorKind::Other,
-        //     "Failed to generate bins.",
-        // )));
         return 0.0;
     };
     let Ok((n_bins_f2, bin_width_f2, quantiles_f2)) = bins_fd(feat_2, sort_ind_f2) else {
-        // return Err(Box::new(std::io::Error::new(
-        //     std::io::ErrorKind::Other,
-        //     "Failed to generate bins.",
-        // )));
         return 0.0;
     };
 
     // Calculate the mutual information.
-    let mi = hist2mi(
+    hist2mi(
         feat_1,
         feat_2,
         n_bins_f1,
@@ -210,26 +194,19 @@ fn mi_fd(
         &quantiles_f1,
         &quantiles_f2,
         normalized,
-    );
-
-    mi
+    )
 }
 
 /// RectangularBinning (the adaptive partitioning approach): Freedman-Diaconis' rule (no assumption on the distribution)
 /// + Returns the number of bins, the bin width, and the quantiles.
 fn bins_fd(
-    vec_x: &Vec<f64>,
+    vec_x: &[f64],
     sort_indices: &Vec<usize>,
 ) -> Result<(usize, f64, Vec<f64>), Box<dyn Error>> {
-    // let sort_indices = get_sort_indices_vecf64(vec_x);
     let len_vec = vec_x.len();
     let len_vec_f64 = len_vec as f64;
-    let qs = &[0.0, 0.25, 0.75, 1.0];
-    let mut quantiles: Vec<f64> = vec![0.0; qs.len()];
-    // Calculate the quantiles
-    // for (i, q) in qs.iter().enumerate() {
-    //     quantiles[i] = vec_x[sort_indices[((len_vec as f64 * q).round() as usize) - 1]];
-    // }
+    let mut quantiles: Vec<f64> = vec![0.0; 4];
+
     quantiles[1] = vec_x[sort_indices[((len_vec_f64 * 0.5).round() as usize) - 1]];
     quantiles[2] = vec_x[sort_indices[((len_vec_f64 * 0.75).round() as usize) - 1]];
     quantiles[0] = vec_x[sort_indices[0]];
@@ -237,22 +214,12 @@ fn bins_fd(
 
     let iqr = quantiles[2] - quantiles[1];
     let bin_width = 2.0 * iqr / (len_vec_f64).cbrt();
-
     let n_bins = ((quantiles[3] - quantiles[0]) / bin_width).ceil() as usize;
 
-    if n_bins < 3 {
-        // panic!("The number of bins is less than 3.");
+    if n_bins < 3 || n_bins > len_vec {
         return Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "The number of bins is less than 3.",
-        )));
-    }
-
-    if n_bins > len_vec {
-        // panic!("The number of bins is greater than the length of the vector.");
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "The number of bins is greater than the length of the vector.",
+            "Invalid number of bins.",
         )));
     }
 
@@ -261,8 +228,8 @@ fn bins_fd(
 
 /// Calculate the mutual information value between two vectors using the histogram method.
 fn hist2mi(
-    vec_1: &Vec<f64>,
-    vec_2: &Vec<f64>,
+    vec_1: &[f64],
+    vec_2: &[f64],
     n_bins_v1: usize,
     n_bins_v2: usize,
     bin_width_v1: f64,

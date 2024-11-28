@@ -1,5 +1,5 @@
-f_i=/mnt/bank/scPlantDB/ath/mic_g_init/randpart_151.parquet
-f_o=/mnt/bank/scPlantDB/ath/mic_g_init/.mic.randpart_151.parquet
+f_i=/mnt/bank/scPlantDB/ath/mic_g_init/randpart_1007.parquet
+f_o=/mnt/bank/scPlantDB/ath/mic_g_init/.mic.randpart_1007.parquet
 stackcollapse=/home/wuch/.local/FlameGraph/stackcollapse-perf.pl
 flamegraph=/home/wuch/.local/FlameGraph/flamegraph.pl
 

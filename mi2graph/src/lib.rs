@@ -115,7 +115,7 @@ pub fn mic_mat_with_data_filter(
     let mut simi_feat_pairs = Array2::<i64>::zeros((0, 2));
 
     if check_sim {
-        println!("Start removing similar features.");
+        println!("\nStart removing similar features.");
         (
             data_0,
             feat_indices_1,
@@ -127,7 +127,7 @@ pub fn mic_mat_with_data_filter(
             data_0.shape()
         );
     } else {
-        println!("Skip removing similar features.");
+        println!("\nSkip removing similar features.");
     }
 
     // Print time

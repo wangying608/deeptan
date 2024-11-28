@@ -91,12 +91,12 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(f64))
                 .long("thremi")
                 .help("Threshold of mutual information for removing edges (feature pairs)")
-                .default_value("0.1"),
+                .default_value("0.05"),
             Arg::new("ratio_max_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("maxwin")
                 .help("Maximum ratio of window size to the number of samples")
-                .default_value("0.97"),
+                .default_value("0.98"),
             Arg::new("ratio_min_window")
                 .value_parser(clap::value_parser!(f64))
                 .long("minwin")
@@ -106,12 +106,12 @@ fn cli() -> Command {
                 .value_parser(clap::value_parser!(f64))
                 .long("stepwin")
                 .help("Step size of window size / number of samples")
-                .default_value("0.05"),
+                .default_value("0.07"),
             Arg::new("ratio_step_sliding")
                 .value_parser(clap::value_parser!(f64))
                 .long("stepsli")
                 .help("Step size of sliding window / number of samples")
-                .default_value("0.05"),
+                .default_value("0.07"),
             Arg::new("check_sim")
                 .short('s')
                 .long("chksim")
