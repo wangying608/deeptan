@@ -30,15 +30,13 @@ fn main() {
     let ratio_step_sliding: f64 = *matches
         .get_one("ratio_step_sliding")
         .expect("Error in reading step size of sliding window / number of samples");
-    let skip_rm_simi: bool = *matches
-        .get_one("skip_rm_simi")
-        .expect("Error in reading whether to skip removing similar features");
+    let check_sim: bool = *matches
+        .get_one("check_sim")
+        .expect("Error in reading whether to check for similar features pairs");
     let n_threads: usize = *matches
         .get_one("nthreads")
         .expect("Error in reading number of threads");
 
-    // let array_2d = read_npz_to_array2d(path_in).expect("Failed to read file");
-    // let array_2d = read_npy_to_array2d(path_in).expect("Failed to read file");
     let (array_2d, obs_names, var_names) =
         read_parquet_to_array2d(path_in).expect("Failed to read file");
 
@@ -47,7 +45,7 @@ fn main() {
         &array_2d,
         &obs_names,
         &var_names,
-        skip_rm_simi,
+        check_sim,
         thre_cv,
         thre_pcc,
         thre_mi,
@@ -114,10 +112,10 @@ fn cli() -> Command {
                 .long("stepsli")
                 .help("Step size of sliding window / number of samples")
                 .default_value("0.05"),
-            Arg::new("skip_rm_simi")
+            Arg::new("check_sim")
                 .short('s')
-                .long("skipsimi")
-                .help("Skip removing similar features")
+                .long("chksim")
+                .help("Whether to detect similar features pairs and remove redundant features")
                 .required(false)
                 .action(ArgAction::SetTrue),
             Arg::new("nthreads")

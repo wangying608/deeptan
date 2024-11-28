@@ -1,9 +1,7 @@
 use chrono::Local;
 use ndarray::prelude::*;
-use ndarray_npy::{read_npy, NpzReader, NpzWriter};
-use ndarray_rand::rand;
+use ndarray_npy::NpzWriter;
 use polars::prelude::*;
-use rand::Rng;
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -16,7 +14,7 @@ mod slidingwindow;
 mod sortf64;
 
 use mutualinfo::iter_feat_pairs_mi;
-use processing::{normalize_vecf64, remove_feat_similar, rm_feat_low_cv};
+use processing::{remove_feat_similar, rm_feat_low_cv};
 use slidingwindow::init_windows_from_ratio;
 use sortf64::get_sort_indices_vecf64;
 
@@ -26,7 +24,7 @@ use sortf64::get_sort_indices_vecf64;
 /// 1. Remove features with low coefficients of variation (using dynamic sliding windows).
 /// 2. Detect similar features pairs [Optional] (using dynamic 2D sliding windows for maxmizing PCC(`abs=true`)) then remove redundant features.
 /// 3. Compute MIC for each feature pair (using dynamic sliding windows).
-/// 4. Filter weak MIC values and corresponding feature pairs.
+/// 4. Filter out weak MIC values and corresponding feature pairs.
 /// 5. Save sorted MIC values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
 ///
 /// **Input**:
@@ -34,6 +32,7 @@ use sortf64::get_sort_indices_vecf64;
 /// + `data`: input data with shape (n_var, n_obs)
 /// + `obs_names`: observation names
 /// + `var_names`: variable names
+/// + `check_sim`: whether to detect similar features pairs and remove redundant features
 /// + `thre_cv`: threshold for removing features with low coefficients of variation
 /// + `thre_pcc`: threshold for removing redundant features
 /// + `thre_mi`: threshold for removing feature pairs with low mutual information
@@ -59,7 +58,7 @@ pub fn mic_mat_with_data_filter(
     data: &Array2<f64>,
     obs_names: &DataFrame,
     var_names: &Vec<String>,
-    skip_rm_similar: bool,
+    check_sim: bool,
     thre_cv: f64,
     thre_pcc: f64,
     thre_mi: f64,
@@ -115,9 +114,7 @@ pub fn mic_mat_with_data_filter(
     let mut feat_indices_1 = feat_indices_0.clone();
     let mut simi_feat_pairs = Array2::<i64>::zeros((0, 2));
 
-    if skip_rm_similar {
-        println!("Skip removing similar features.");
-    } else {
+    if check_sim {
         println!("Start removing similar features.");
         (
             data_0,
@@ -129,6 +126,8 @@ pub fn mic_mat_with_data_filter(
             "Shape of data after removing similar features: {:?}",
             data_0.shape()
         );
+    } else {
+        println!("Skip removing similar features.");
     }
 
     // Print time
@@ -180,8 +179,7 @@ pub fn mic_mat_with_data_filter(
     });
 
     // Convert feature indices to original indices.
-    if skip_rm_similar {
-    } else {
+    if check_sim {
         // Create a map from new indices (feat_indices_1) to original indices (feat_indices_0).
         let mut map_new2orig: HashMap<usize, usize> = HashMap::new();
         sorted_uniq_features.iter().for_each(|&i| {
@@ -355,6 +353,47 @@ fn save_parquet(
     Ok(())
 }
 
+/// Read parquet file (n_obs x (1 + n_vars)) into ndarray (n_obs x n_vars)
+pub fn read_parquet_to_array2d(
+    path_parquet: &str,
+) -> Result<(Array2<f64>, DataFrame, Vec<String>), Box<dyn Error>> {
+    let mut file = std::fs::File::open(path_parquet).unwrap();
+    let df = ParquetReader::new(&mut file).finish().unwrap();
+    // let mat = df.to_ndarray::<f64>().unwrap();
+    // let lf1 = LazyFrame::scan_parquet(path_parquet, Default::default())?;
+    let obs_names = df.select(["obs_names"])?;
+    let binding = df.drop("obs_names")?;
+    let var_names_0 = binding.get_column_names();
+    // Convert Vec<&PlSmallStr> to Vec<String>
+    let var_names: Vec<String> = var_names_0.iter().map(|x| x.to_string()).collect();
+    let mat = binding
+        .to_ndarray::<Float64Type>(IndexOrder::Fortran)
+        .unwrap()
+        .t()
+        .to_owned();
+    Ok((mat, obs_names, var_names))
+}
+
+/// mi_values and feat_pairs have been sorted. We can check elements from the end.
+fn check_sorted_vals(vals: &Array1<f64>, threshold: f64) -> usize {
+    let num_pairs = vals.len();
+    // Start from the end
+    let mut chk_i = num_pairs - 1;
+    while chk_i > 0 {
+        // Stop if the current pair has a higher MI than the threshold
+        if vals[chk_i] > threshold {
+            break;
+        }
+        chk_i -= 1;
+    }
+    chk_i
+}
+
+/*
+use ndarray_rand::rand;
+use ndarray_npy::{read_npy, NpzReader};
+use rand::Rng;
+
 /// Random 2D ndarray generator
 pub fn random_2d_array(n_feat: usize, n_samp: usize) -> Array2<f64> {
     let mut rng = rand::thread_rng();
@@ -401,38 +440,4 @@ pub fn read_npy_to_array2d(path_npy: &str) -> Result<Array2<f64>, Box<dyn Error>
     Ok(mat)
 }
 
-/// Read parquet file (n_obs x (1 + n_vars)) into ndarray (n_obs x n_vars)
-pub fn read_parquet_to_array2d(
-    path_parquet: &str,
-) -> Result<(Array2<f64>, DataFrame, Vec<String>), Box<dyn Error>> {
-    let mut file = std::fs::File::open(path_parquet).unwrap();
-    let df = ParquetReader::new(&mut file).finish().unwrap();
-    // let mat = df.to_ndarray::<f64>().unwrap();
-    // let lf1 = LazyFrame::scan_parquet(path_parquet, Default::default())?;
-    let obs_names = df.select(["obs_names"])?;
-    let binding = df.drop("obs_names")?;
-    let var_names_0 = binding.get_column_names();
-    // Convert Vec<&PlSmallStr> to Vec<String>
-    let var_names: Vec<String> = var_names_0.iter().map(|x| x.to_string()).collect();
-    let mat = binding
-        .to_ndarray::<Float64Type>(IndexOrder::Fortran)
-        .unwrap()
-        .t()
-        .to_owned();
-    Ok((mat, obs_names, var_names))
-}
-
-/// mi_values and feat_pairs have been sorted. We can check elements from the end.
-fn check_sorted_vals(vals: &Array1<f64>, threshold: f64) -> usize {
-    let num_pairs = vals.len();
-    // Start from the end
-    let mut chk_i = num_pairs - 1;
-    while chk_i > 0 {
-        // Stop if the current pair has a higher MI than the threshold
-        if vals[chk_i] > threshold {
-            break;
-        }
-        chk_i -= 1;
-    }
-    chk_i
-}
+*/

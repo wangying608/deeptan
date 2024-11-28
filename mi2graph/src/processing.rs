@@ -2,86 +2,6 @@ use crate::sortf64::{sort_vec_f64, sort_vecs_by_first};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 
-/// Min-max normalize a Vec<f64>.
-pub fn normalize_vecf64(vec_x: &Vec<f64>) -> Vec<f64> {
-    let sorted_vec = sort_vec_f64(vec_x);
-    let min_x = sorted_vec[0];
-    let max_x = sorted_vec[vec_x.len() - 1];
-
-    let normalized_vec_x = vec_x
-        .par_iter()
-        .map(|&x| (x - min_x) / (max_x - min_x))
-        .collect();
-
-    normalized_vec_x
-}
-
-/// Normalize (min-max) a 2D array along the rows(features).
-pub fn normalize_2d_array(array_2d: &Array2<f64>) -> Array2<f64> {
-    let n_feat = array_2d.nrows();
-    let n_samp = array_2d.ncols();
-
-    let mut normalized_array_2d = Array2::zeros((n_feat, n_samp));
-
-    // Normalization for each feature(row).
-    array_2d.outer_iter().enumerate().for_each(|(i, row)| {
-        let normalized_row_i = normalize_vecf64(&row.to_vec());
-        normalized_array_2d
-            .row_mut(i)
-            .assign(&Array1::from(normalized_row_i));
-    });
-
-    normalized_array_2d
-}
-
-/// Calculate standard deviation of a 2D array for each row(feature).
-/// Note:
-/// + Features are rows, samples are columns. Features must be normalized before input.
-fn stddev_array2d(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>>) -> Vec<f64> {
-    let n_feat = array_2d.nrows();
-    let n_windows = sliding_windows.len();
-    let mut stddev_opt: Vec<f64> = vec![0.0; n_feat];
-
-    // (Parallelized) Calculate the standard deviation for each feature, for each feature's sliding windows.
-    stddev_opt
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, std_dev)| {
-            let sorted_feat_i = sort_vec_f64(&array_2d.row(i).to_vec());
-
-            // Calculate the optimal standard deviation for each feature, through sliding windows.
-            let mut tmp_stddev_vals: Vec<f64> = vec![0.0; n_windows + 1];
-            for (j, window) in sliding_windows.iter().enumerate() {
-                let part_j = sorted_feat_i[window[0]..window[1]].to_vec();
-                // Calculate standard deviation of the feature's part.
-                tmp_stddev_vals[j] = Array1::from_vec(part_j).std(1.0);
-            }
-            // Calculate standard deviation of the complete feature.
-            tmp_stddev_vals[n_windows] = Array1::from_vec(sorted_feat_i).std(1.0);
-
-            // Check if None value exists.
-            // if tmp_stddev_vals.iter().any(|x| x.is_nan()) {
-            //     panic!("NaN value detected in tmp_stddev_vals.");
-            // }
-
-            // Substitude None with zero.
-            tmp_stddev_vals.iter_mut().for_each(|x| {
-                if x.is_nan() {
-                    *x = 0.0;
-                }
-            });
-            // println!("tmp_stddev_vals: {:?}", tmp_stddev_vals);
-
-            // Save the maximum standard deviation of the feature's sliding windows.
-            *std_dev = *tmp_stddev_vals
-                .iter()
-                .max_by(|x, y| x.partial_cmp(y).unwrap())
-                .unwrap();
-        });
-
-    stddev_opt
-}
-
 fn cv_array2d(
     array_2d: &Array2<f64>,
     sliding_windows: &Vec<Vec<usize>>,
@@ -132,27 +52,6 @@ fn cv_array2d(
     });
 
     cv_opt
-}
-
-/// Remove features with low standard deviation (using dynamic sliding windows).
-pub fn remove_feat_low_sd(
-    array_2d: &Array2<f64>,
-    thre_stddev: f64,
-    sliding_windows: &Vec<Vec<usize>>,
-) -> (Array2<f64>, Vec<usize>) {
-    // Calculate standard deviation for each feature
-    let sd_vals = stddev_array2d(array_2d, sliding_windows);
-
-    // Filter features with low standard deviation
-    let mut feat_idxs_saved: Vec<usize> = Vec::new();
-    for (i, sd) in sd_vals.iter().enumerate() {
-        if *sd >= thre_stddev {
-            feat_idxs_saved.push(i);
-        }
-    }
-    let data_ = array_2d.select(Axis(0), &feat_idxs_saved);
-
-    (data_, feat_idxs_saved)
 }
 
 pub fn rm_feat_low_cv(
@@ -306,7 +205,7 @@ pub fn remove_feat_similar(
 }
 
 /// Pearson Correlation Coefficient
-pub fn pearsoncc(vec1: &[f64], vec2: &[f64], abs: bool) -> f64 {
+fn pearsoncc(vec1: &[f64], vec2: &[f64], abs: bool) -> f64 {
     // Check if vectors have the same length
     assert_eq!(vec1.len(), vec2.len());
     let len_v = vec1.len() as f64;
@@ -326,3 +225,106 @@ pub fn pearsoncc(vec1: &[f64], vec2: &[f64], abs: bool) -> f64 {
     }
     pcc
 }
+
+/*
+/// Min-max normalize a Vec<f64>.
+pub fn normalize_vecf64(vec_x: &Vec<f64>) -> Vec<f64> {
+    let sorted_vec = sort_vec_f64(vec_x);
+    let min_x = sorted_vec[0];
+    let max_x = sorted_vec[vec_x.len() - 1];
+
+    let normalized_vec_x = vec_x
+        .par_iter()
+        .map(|&x| (x - min_x) / (max_x - min_x))
+        .collect();
+
+    normalized_vec_x
+}
+
+/// Normalize (min-max) a 2D array along the rows(features).
+pub fn normalize_2d_array(array_2d: &Array2<f64>) -> Array2<f64> {
+    let n_feat = array_2d.nrows();
+    let n_samp = array_2d.ncols();
+
+    let mut normalized_array_2d = Array2::zeros((n_feat, n_samp));
+
+    // Normalization for each feature(row).
+    array_2d.outer_iter().enumerate().for_each(|(i, row)| {
+        let normalized_row_i = normalize_vecf64(&row.to_vec());
+        normalized_array_2d
+            .row_mut(i)
+            .assign(&Array1::from(normalized_row_i));
+    });
+
+    normalized_array_2d
+}
+
+/// Calculate standard deviation of a 2D array for each row(feature).
+/// Note:
+/// + Features are rows, samples are columns. Features must be normalized before input.
+fn stddev_array2d(array_2d: &Array2<f64>, sliding_windows: &Vec<Vec<usize>>) -> Vec<f64> {
+    let n_feat = array_2d.nrows();
+    let n_windows = sliding_windows.len();
+    let mut stddev_opt: Vec<f64> = vec![0.0; n_feat];
+
+    // (Parallelized) Calculate the standard deviation for each feature, for each feature's sliding windows.
+    stddev_opt
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, std_dev)| {
+            let sorted_feat_i = sort_vec_f64(&array_2d.row(i).to_vec());
+
+            // Calculate the optimal standard deviation for each feature, through sliding windows.
+            let mut tmp_stddev_vals: Vec<f64> = vec![0.0; n_windows + 1];
+            for (j, window) in sliding_windows.iter().enumerate() {
+                let part_j = sorted_feat_i[window[0]..window[1]].to_vec();
+                // Calculate standard deviation of the feature's part.
+                tmp_stddev_vals[j] = Array1::from_vec(part_j).std(1.0);
+            }
+            // Calculate standard deviation of the complete feature.
+            tmp_stddev_vals[n_windows] = Array1::from_vec(sorted_feat_i).std(1.0);
+
+            // Check if None value exists.
+            // if tmp_stddev_vals.iter().any(|x| x.is_nan()) {
+            //     panic!("NaN value detected in tmp_stddev_vals.");
+            // }
+
+            // Substitude None with zero.
+            tmp_stddev_vals.iter_mut().for_each(|x| {
+                if x.is_nan() {
+                    *x = 0.0;
+                }
+            });
+            // println!("tmp_stddev_vals: {:?}", tmp_stddev_vals);
+
+            // Save the maximum standard deviation of the feature's sliding windows.
+            *std_dev = *tmp_stddev_vals
+                .iter()
+                .max_by(|x, y| x.partial_cmp(y).unwrap())
+                .unwrap();
+        });
+
+    stddev_opt
+}
+
+/// Remove features with low standard deviation (using dynamic sliding windows).
+pub fn remove_feat_low_sd(
+    array_2d: &Array2<f64>,
+    thre_stddev: f64,
+    sliding_windows: &Vec<Vec<usize>>,
+) -> (Array2<f64>, Vec<usize>) {
+    // Calculate standard deviation for each feature
+    let sd_vals = stddev_array2d(array_2d, sliding_windows);
+
+    // Filter features with low standard deviation
+    let mut feat_idxs_saved: Vec<usize> = Vec::new();
+    for (i, sd) in sd_vals.iter().enumerate() {
+        if *sd >= thre_stddev {
+            feat_idxs_saved.push(i);
+        }
+    }
+    let data_ = array_2d.select(Axis(0), &feat_idxs_saved);
+
+    (data_, feat_idxs_saved)
+}
+*/

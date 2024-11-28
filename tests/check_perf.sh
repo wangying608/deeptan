@@ -5,7 +5,7 @@ flamegraph=/home/wuch/.local/FlameGraph/flamegraph.pl
 
 # perf record --call-graph=dwarf mi2graphdev -i $f_i -o $f_o -s
 # perf report --stdio
-perf record -g mi2graph -i $f_i -o $f_o -s
+perf record -g mi2graphdev -i $f_i -o $f_o
 perf script | $stackcollapse > out.perf_folded
 $flamegraph out.perf_folded > perf.svg
 
