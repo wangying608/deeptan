@@ -14,7 +14,7 @@ fn cv_array2d(
     // Compute CV for each feature, for each feature's sliding windows.
     cv_opt.par_iter_mut().enumerate().for_each(|(i, cv)| {
         let f_i = array_2d.row(i).to_vec();
-        let sorted_feat_i = feat_sort_indices[i]
+        let sorted_f_i = feat_sort_indices[i]
             .iter()
             .map(|&i| f_i[i])
             .collect::<Vec<f64>>();
@@ -22,7 +22,7 @@ fn cv_array2d(
         // Compute the optimal CV for each feature through sliding windows.
         let mut tmp_cv_vals: Vec<f64> = vec![0.0; n_windows + 1];
         for (j, window) in sliding_windows.iter().enumerate() {
-            let part_j = sorted_feat_i[window[0]..window[1]].to_vec();
+            let part_j = sorted_f_i[window[0]..window[1]].to_vec();
 
             // CV of the feature's part.
             let tmp_array = Array1::from(part_j);
@@ -36,7 +36,7 @@ fn cv_array2d(
         }
 
         // Compute CV of the complete feature.
-        let tmp_array = Array1::from(sorted_feat_i);
+        let tmp_array = Array1::from(sorted_f_i);
         let complete_feat_sd = &tmp_array.std(1.0);
         let complete_feat_mean = &tmp_array.mean().unwrap().abs();
         if *complete_feat_mean < 0.0001 {

@@ -242,7 +242,7 @@ fn save_npz(
     processed_mat: &Array2<f64>,
     feat_indices: &Array1<i64>,
     simi_feat_pairs: &Array2<i64>,
-    thre_sd: f64,
+    thre_cv: f64,
     thre_pcc: f64,
     thre_mi: f64,
     ratio_max_window: f64,
@@ -274,7 +274,7 @@ fn save_npz(
     npz.add_array("mat_feat_indices", &feat_indices)?;
     npz.add_array("mat_simi_feat_pairs", &simi_feat_pairs)?;
     // Save input parameters as length 1 ndarray
-    npz.add_array("thre_sd", &Array1::from_vec(vec![thre_sd]))?;
+    npz.add_array("thre_cv", &Array1::from_vec(vec![thre_cv]))?;
     npz.add_array("thre_pcc", &Array1::from_vec(vec![thre_pcc]))?;
     npz.add_array("thre_mi", &Array1::from_vec(vec![thre_mi]))?;
     npz.add_array(
