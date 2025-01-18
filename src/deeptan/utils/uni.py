@@ -18,7 +18,7 @@ from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
 from multiprocessing import cpu_count
-import frn.constants as const
+import deeptan.constants as const
 
 
 def get_avail_cpu_count(target_n: int) -> int:

@@ -1,5 +1,5 @@
 r"""
-MSGP: Multi-Scale Graph Pooling for Graph-Level Representation Learning.
+AMSGP: Adaptive Multi-Scale Graph Pooling for Graph-Level Representation Learning.
 """
 from typing import List, Dict
 # from tqdm import tqdm
@@ -7,10 +7,12 @@ import torch
 from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
 from torch_geometric.utils import k_hop_subgraph, to_undirected
-from frn.graph.modules import XGATLayer, XGATLayers, DynamicCentrality, AttPool
+from deeptan.graph.modules import WGATLayer, NodeEmbedding, SelfAttPool
 
 
-class MSGP(torch.nn.Module):
+class AMSGP(torch.nn.Module):
+    r""" Adaptive Multi-Scale Graph Pooling for graph-level representation learning.
+    """
     def __init__(
             self,
             input_dim: int,
@@ -23,7 +25,7 @@ class MSGP(torch.nn.Module):
             negative_slope: float,
             use_all_subgraphs: bool = True,
         ):
-        r"""Multi-Scale Graph Pooling for graph-level representation learning.
+        r""" Adaptive Multi-Scale Graph Pooling for graph-level representation learning.
 
         Args:
             input_dim: Input node embedding dimension.

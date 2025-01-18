@@ -1,6 +1,6 @@
-from frn.graph.model import MSGPMTL
-from frn.utils.data import random_datamodule
-from frn.utils.uni import train_model
+from deeptan.graph.model import MSGPMTL
+from deeptan.utils.data import random_datamodule
+from deeptan.utils.uni import train_model
 
 
 if __name__ == '__main__':

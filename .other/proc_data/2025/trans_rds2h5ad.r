@@ -1,8 +1,11 @@
 library(sceasy)
 library(reticulate)
 
-path_rds = "/mnt/bank/sc_sn/GSE270392/GSE270392_Gm_atlas_Root.rna.seurat.obj.rds"
-path_out = "/mnt/bank/sc_sn/GSE270392/GSE270392_Gm_atlas_Root.rna.h5ad"
+# path_rds = "/mnt/bank/sc_sn/GSE270392/GSE270392_Gm_atlas_Root.rna.seurat.obj.rds"
+# path_out = "/mnt/bank/sc_sn/GSE270392/GSE270392_Gm_atlas_Root.rna.h5ad"
+argv <- commandArgs(trailingOnly = TRUE)
+path_rds = argv[1]
+path_out = argv[2]
 
 # conda_env_name = "sceasy"
 # use_condaenv(conda_env_name)

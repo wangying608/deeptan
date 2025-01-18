@@ -1,5 +1,5 @@
 import torch
-from frn.graph.core import MSGP, GData
+from deeptan.graph.core import MSGP, GData
 
 
 if __name__ == "__main__":

@@ -10,9 +10,9 @@ from torch_geometric.data import Data as GData
 from torchmetrics import MetricCollection
 from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
 from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
-import frn.constants as const
-from frn.graph.core import MSGP
-from frn.graph.modules import VGAE_Decoder, GLabelPredictor, AttPool
+import deeptan.constants as const
+from deeptan.graph.core import MSGP
+from deeptan.graph.modules import VGAE_Decoder, GLabelPredictor, SelfAttPool
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 

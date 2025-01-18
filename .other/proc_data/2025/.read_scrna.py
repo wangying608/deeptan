@@ -1,10 +1,9 @@
-import scanpy
-import pandas as pd
 import polars as pl
+import scanpy
 
 
-if __name__ == '__main__':
-    path_h5 = '/mnt/bank/sc_sn/GSE235510_RAW/GSM7504011.h5ad'
+if __name__ == "__main__":
+    path_h5 = "/mnt/bank/sc_sn/GSE235510_RAW/GSM7504011.h5ad"
     adata = scanpy.read_h5ad(path_h5)
     print(f"adata.shape: {adata.shape}")
     print(f"num obs: {adata.obs.shape}")
@@ -26,13 +25,16 @@ if __name__ == '__main__':
 
     # Plot the histogram of the RNA values
     # Read peaks
-    path_atac_peaks_bed = '/mnt/bank/sc_sn/GSE235510_RAW/GSM7504011_ATAC_Control2_atac_peaks.bed'
-    peak_bed = pl.read_csv(path_atac_peaks_bed, separator='\t', has_header=False,
-                        comment_prefix='#')
+    path_atac_peaks_bed = (
+        "/mnt/bank/sc_sn/GSE235510_RAW/GSM7504011_ATAC_Control2_atac_peaks.bed"
+    )
+    peak_bed = pl.read_csv(
+        path_atac_peaks_bed, separator="\t", has_header=False, comment_prefix="#"
+    )
     # print(f"Peaks bed shape: {peak_bed.shape}")
-    peak_bed.columns = ['chrom', 'chromStart', 'chromEnd']
+    peak_bed.columns = ["chrom", "chromStart", "chromEnd"]
     n_feature_atac = peak_bed.shape[0]
-    
+
     n_feature_rna = adata.shape[1] - n_feature_atac
     # scanpy.pl.highest_expr_genes(adata[:, :n_feature_rna], n_top=20)
 
@@ -48,5 +50,32 @@ if __name__ == '__main__':
     adata = adata[adata[:, :n_feature_rna].X.sum(axis=1) < 100000, :]
     # Filter blank features
     adata = adata[:, adata.X.sum(axis=0) > 0]
-    
+
     print(f"Matrix shape after filter: {adata.shape}")
+
+    print(f"First 5 obs names:\n{adata.obs_names[:5]}\n")
+
+    # Read other sc data's obs names into a list
+    _obn = (
+        pl.read_parquet(
+            "/home/wuch/Downloads/filtered_feature_bc_matrix_obs_names.parquet"
+        )
+        .to_series()
+        .to_list()
+    )
+    # Check overlap
+    obs_overlap = [x for x in _obn if x in adata.obs_names]
+    print(f"Overlap obs names: {obs_overlap}")
+    print(f"Number of overlap obs: {len(obs_overlap)}")
+
+    # print("Median of counts per cell:")
+    # print(f"{adata.to_df().sum(axis=1).median()}")
+    # print("Mean of counts per cell:")
+    # print(f"{adata.to_df().sum(axis=1).mean()}")
+
+    print("Median of counts per overlap cell:")
+    print(f"{adata[adata.obs_names.isin(obs_overlap), :].to_df().sum(axis=1).median()}")
+    print("Mean of counts per overlap cell:")
+    print(f"{adata[adata.obs_names.isin(obs_overlap), :].to_df().sum(axis=1).mean()}")
+
+    # Remove barcodes with less than 500 genes detected
