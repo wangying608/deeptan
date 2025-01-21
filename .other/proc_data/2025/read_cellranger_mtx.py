@@ -6,8 +6,10 @@ Read a cellranger mtx directory or h5 file.
 import sys
 
 # import polars as pl
-from anndata import concat
+import anndata
 import scanpy
+import muon
+import mudata
 
 
 def read_cellranger_mtx_or_h5(dir_mtx_or_h5: str) -> scanpy.AnnData:
@@ -57,15 +59,19 @@ def read_cellranger_mtx_or_h5(dir_mtx_or_h5: str) -> scanpy.AnnData:
     # Delete vars with zero counts
     adata = adata[:, adata.X.sum(axis=0) > 0]
     print(f"\nMatrix shape after delete vars with zero counts: {adata.shape}")
-    print(f"Number of GEX features after delete vars with zero counts: {(adata.var['feature_types'].values == 'Gene Expression').sum()}")
-    print(f"Number of ATAC features after delete vars with zero counts: {(adata.var['feature_types'].values == 'Peaks').sum()}")
+    print(
+        f"Number of GEX features after delete vars with zero counts: {(adata.var['feature_types'].values == 'Gene Expression').sum()}"
+    )
+    print(
+        f"Number of ATAC features after delete vars with zero counts: {(adata.var['feature_types'].values == 'Peaks').sum()}"
+    )
 
     return adata
 
 
 if __name__ == "__main__":
-    # file_path = sys.argv[1]
-    # adata = read_cellranger_mtx_or_h5(file_path)
+    file_path = sys.argv[1]
+    adata = read_cellranger_mtx_or_h5(file_path)
 
     # # Save obs names to a parquet file
     # obs_names = adata.obs_names.to_list()
@@ -73,30 +79,47 @@ if __name__ == "__main__":
     # # Save to ~/Downloads/xxxx_obs_names.parquet
     # df_obs_names.write_parquet(os.path.join(os.path.expanduser("~"), "Downloads", f"{os.path.basename(dir_mtx)}_obs_names.parquet"))
 
-    # Remove barcodes with less than 500 genes detected
 
-    h5_rep1 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep1/outs/filtered_feature_bc_matrix.h5"
-    h5_rep2 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep2/outs/filtered_feature_bc_matrix.h5"
+    # h5_rep1 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep1/outs/filtered_feature_bc_matrix.h5"
+    # h5_rep2 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep2/outs/filtered_feature_bc_matrix.h5"
 
-    adata_rep1 = read_cellranger_mtx_or_h5(h5_rep1)
-    print("\n--------------------------------------\n")
-    adata_rep2 = read_cellranger_mtx_or_h5(h5_rep2)
+    # adata_rep1 = read_cellranger_mtx_or_h5(h5_rep1)
+    # print("\n--------------------------------------\n")
+    # adata_rep2 = read_cellranger_mtx_or_h5(h5_rep2)
 
-    # adata_rep1_rep2 = concat([adata_rep1, adata_rep2], axis=1)
+    # # adata_rep1_rep2 = concat([adata_rep1, adata_rep2], axis=1)
+    # # print(adata_rep1_rep2.var["feature_types"].value_counts())
+
+    # print("\n--------------------------------------\n")
+
+    # # Union features of adata_rep1 and adata_rep2
+
+    # # adata_rep1_rep2 = anndata.concat(
+    # #     [adata_rep1, adata_rep2],
+    # #     join="outer",
+    # #     merge="first",
+    # #     uns_merge="first",
+    # #     label="replicate",
+    # #     keys=["rep1", "rep2"],
+    # #     index_unique="_",
+    # # )
+    # adata_rep1_rep2 = mudata.concat({"rep1": adata_rep1, "rep2": adata_rep2}, join="outer", label="replicate", index_unique="_")
+
+    # # adata_rep1_rep2.obs_names_make_unique(join="_")
+    # print("\nUnion features of adata_rep1 and adata_rep2:")
+    # print(adata_rep1_rep2.shape)
+    # # Print the feature types
+    # print("Feature types in adata_rep1_rep2:")
     # print(adata_rep1_rep2.var["feature_types"].value_counts())
 
-    print("\n--------------------------------------\n")
+    # # Save the concatenated data to an h5 file
+    # # scanpy.write(
+    # #     filename="/mnt/hdd2/homext/wuch/xn2p/data/raw_df/scMultiome/GSE235510_control.h5",
+    # #     adata=adata_rep1_rep2,
+    # #     ext="h5",
+    # # )
 
-    # Intersection features of adata_rep1 and adata_rep2
-    adata_rep1_rep2 = concat([adata_rep1, adata_rep2], join="inner")
-    adata_rep1_rep2.obs_names_make_unique(join="_")
-    print("\nIntersection features of adata_rep1 and adata_rep2:")
-    print(adata_rep1_rep2.shape)
-    # print(adata_rep1_rep2.var["feature_types"].value_counts())
-
-    # Union features of adata_rep1 and adata_rep2
-    adata_rep1_rep2 = concat([adata_rep1, adata_rep2], join="outer")
-    adata_rep1_rep2.obs_names_make_unique(join="_")
-    print("\nUnion features of adata_rep1 and adata_rep2:")
-    print(adata_rep1_rep2.shape)
-    # print(adata_rep1_rep2.var["feature_types"].value_counts())
+    # # Convert the concatenated data to muon object
+    # muon_obj = muon.MuData(adata_rep1_rep2)
+    # print("\nMuData object created from concatenated AnnData:")
+    # print(muon_obj)

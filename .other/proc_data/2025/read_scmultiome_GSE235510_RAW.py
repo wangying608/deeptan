@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 if __name__ == '__main__':
-    data_dir = '/mnt/bank/sc_sn/GSE235510_RAW'
+    data_dir = '/mnt/bank/sc_sn/GSE235510/GSE235510_RAW'
     gsm = 'GSM7504011'
     path_write = Path(os.path.join(data_dir, f'{gsm}.h5ad'))
     gsm_files = [f for f in os.listdir(data_dir) if f.startswith(gsm)]
@@ -46,5 +46,8 @@ if __name__ == '__main__':
     adata.obs_names = barcodes
     # adata.var_names = peak_bed['peak_id']
     adata.var_names = var_names
+    print(adata)
+    # Print cell types
+    print(f"Cell types: {adata.obs['cell_type'].unique()}")
 
-    adata.write_h5ad(path_write, compression='gzip')
+    # adata.write_h5ad(path_write, compression='gzip')
