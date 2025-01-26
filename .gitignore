@@ -8,3 +8,4 @@ profile*.svg
 perf*.svg
 logs/
 test_*/
+comparison/
