@@ -11,6 +11,32 @@ authors = [
 ]
 readme = "README.md"
 requires-python = ">=3.10, <3.13"
+dependencies = [
+    "lightning>=2.5.0.post0",
+    "litdata>=0.2.37",
+    "mosaicml-streaming>=0.11.0",
+    "muon>=0.1.7",
+    "optuna>=4.2.0",
+    "optuna-dashboard>=0.17.0",
+    "polars>=1.21.0",
+    "pyarrow>=19.0.0",
+    "pyg-lib>=0.4.0",
+    "scanpy>=1.10.4",
+    "scikit-learn>=1.6.1",
+    "scipy>=1.15.1",
+    "shortuuid>=1.0.13",
+    "tensorboard>=2.18.0",
+    "torch==2.4.1",
+    "torch-cluster>=1.6.3",
+    "torch-geometric>=2.6.1",
+    "torch-scatter>=2.1.2",
+    "torch-sparse>=0.6.18",
+    "torch-spline-conv>=1.2.2",
+    "torchaudio==2.4.1",
+    "torchmetrics>=1.6.1",
+    "torchvision==0.19.1",
+    "zstd>=1.5.6.2",
+]
 license = {file = "LICENSE"}
 keywords = ["bioinformatics", "deep learning", "pytorch"]
 classifiers = [
@@ -28,24 +54,11 @@ classifiers = [
     "Operating System :: Microsoft :: Windows :: Windows 11",
     "Operating System :: POSIX :: Linux",
 ]
-dependencies = [
-    "torch>=2.2",
-    "lightning>=2.4.0",
-    "litdata>=0.2.29",
-    "mosaicml-streaming>=0.8.1",
-    "pyarrow>=17.0",
-    "torchmetrics>=1.4.1",
-    "tensorboard>=2.18.0",
-    "numpy>=1.26.0",
-    "polars>=1.9.0",
-    "scikit-learn>=1.5.0",
-    "scipy>=1.13.0",
-    "optuna>=4.0",
-    "optuna-dashboard>=0.16.1",
-    "zstd>=1.5.5",
-]
+
+[tool.uv.pip]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [project.urls]
-Homepage = "https://github.com/xxxxx"
+Homepage = "https://github.com/cma2015/DeepTAN"
 
 [project.scripts]
