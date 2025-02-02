@@ -1,236 +1,323 @@
 r"""
-MSGP for semi-supervised multi-task learning.
+DeepTAN:
+Trait-associated multi-omics network inference via multi-task NMIC-guided adaptive multi-scale graph embedding.
 """
-from typing import List
+
+from typing import List, Dict, Optional
 import torch
-from torch.optim.adam import Adam
+import torch.nn.functional as F
+from torch.optim.adamw import AdamW
 import lightning as ltn
 from torch_geometric.data import Data as GData
-# from torchmetrics.wrappers import MultitaskWrapper#, MultioutputWrapper
 from torchmetrics import MetricCollection
-from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassAUROC, MulticlassPrecision, MulticlassRecall, MatthewsCorrCoef
-from torchmetrics.regression import MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
+from torchmetrics.classification import (
+    MulticlassAccuracy,
+    MulticlassF1Score,
+    MulticlassAUROC,
+    MulticlassPrecision,
+    MulticlassRecall,
+    MatthewsCorrCoef,
+)
+from torchmetrics.regression import (
+    MeanAbsoluteError,
+    MeanSquaredError,
+    PearsonCorrCoef,
+    R2Score,
+)
 import deeptan.constants as const
-from deeptan.graph.core import MSGP
-from deeptan.graph.modules import VGAE_Decoder, GLabelPredictor, SelfAttPool
+from deeptan.graph.core import AMSGP
+from deeptan.graph.modules import GE_Decoder, GLabelPredictor, EdgeDecoder
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 
 
-class MSGPMTL(ltn.LightningModule):
+class AMSGPMTL(ltn.LightningModule):
+    r"""
+    AMSGP for semi-supervised multi-task learning with enhanced training strategies.
+    """
+
     def __init__(
-            self,
-            input_dim: int,
-            output_dim: int,
-            is_regression: bool,
-            output_dims_nd: List[int],
-            output_dim_g_emb: int,
-            n_hop: int,
-            threshold_edge_exist: float,
-            threshold_subgraph_overlap: float,
-            n_heads: List[int],
-            dropout: float,
-            lr: float,
-            negative_slope: float,
-        ):
-        r"""Multi-task learning model.
-
-        Args:
-            input_dim: Input node embedding dimension.
-
-            output_dim: Number of output classes. If it is 1, the model will be a regression model. Otherwise, it should be at least 3 (3 for binary classification) for classification tasks.
-            
-            is_regression: Whether the task is a regression task or not.
-
-            output_dims_nd: Output node embedding dimensions for each layer.
-                The length denotes the number of layers.
-            
-            output_dim_g_emb: Output graph embedding dimension.
-
-            n_hop: Maximum number of hops for searching central nodes' neighbors.
-                ``n_hop >= 2`` is necessary to graph attention.
-
-            threshold_edge_exist: Threshold for the existence of edges.
-
-            threshold_subgraph_overlap: Threshold for the overlap between subgraphs.
-
-            n_heads: Number of attention heads.
-            
-            dropout: Dropout rate.
-            
-            lr: Learning rate for the optimizer.
-
-            negative_slope: Negative slope for leaky ReLU.
-        
-        """
+        self,
+        dict_node_names: Dict[str, int],
+        input_dim: int,
+        output_dim: int,
+        is_regression: bool,
+        node_emb_dim: int = 128,
+        fusion_dims_node_emb: List[int] = [256, 128],
+        output_dim_g_emb: int = 128,
+        n_hop: int = 3,
+        threshold_edge_exist: float = 0.5,
+        threshold_subgraph_overlap: float = 0.6,
+        n_heads_node_emb: int = 4,
+        n_heads_pooling: int = 4,
+        dropout: float = 0.2,
+        lr: float = 1e-3,
+        negative_slope: float = 0.2,
+        alpha: float = 0.7,
+    ):
         super().__init__()
         self.save_hyperparameters()
-        
-        self.input_dim = input_dim
-        self.output_dim = output_dim
-        self.is_regression = is_regression
-        self.output_dims_nd = output_dims_nd
-        self.output_dim_g_emb = output_dim_g_emb
-        self.n_hop = n_hop
-        self.threshold_edge_exist = threshold_edge_exist
-        self.threshold_subgraph_overlap = threshold_subgraph_overlap
-        self.n_heads = n_heads
-        self.dropout = dropout
-        self.lr = lr
-        self.negative_slope = negative_slope
+        self.automatic_optimization = False
 
-        self.msgp = MSGP(input_dim, output_dims_nd, output_dim_g_emb, n_heads, n_hop, threshold_edge_exist, threshold_subgraph_overlap, negative_slope)
-        self.ge_decoder = VGAE_Decoder(output_dim_g_emb, output_dims_nd[-1])
-        self.label_predictor = GLabelPredictor(output_dim_g_emb, output_dim)
-        self.pool_for_g_compare = AttPool(output_dims_nd[-1])
+        # Core components
+        self.amsgp = AMSGP(
+            dict_node_names=dict_node_names,
+            input_dim=input_dim,
+            node_emb_dim=node_emb_dim,
+            fusion_dims_node_emb=fusion_dims_node_emb,
+            n_heads_node_emb=n_heads_node_emb,
+            output_dim_g_emb=output_dim_g_emb,
+            n_heads_pooling=n_heads_pooling,
+            n_hop=n_hop,
+            threshold_edge_exist=threshold_edge_exist,
+            threshold_subgraph_overlap=threshold_subgraph_overlap,
+            negative_slope=negative_slope,
+        )
 
-    def forward(self, g: GData):
-        r"""
-        Args:
-            g: Graph data.
-        
-        Returns:
-            x: Graph embedding.
+        # Multi-task decoders
+        self.ge_decoder = GE_Decoder(
+            z_dim=output_dim_g_emb,
+            h_dim=node_emb_dim,
+            output_dim=fusion_dims_node_emb[-1],
+            hidden_dim=256,
+        )
+        self.edge_recon = EdgeDecoder(fusion_dims_node_emb[-1])
+        self.g_label_predictor = GLabelPredictor(
+            output_dim_g_emb, output_dim, [512, 256]
+        )
 
-            x_recon: Reconstructed node embeddings.
+        # Metrics and initialization
+        if not hasattr(self, "metrics"):
+            self._init_metrics()
+        self.ema_loss = None
 
-            x_label: Predicted graph label.
+    def forward(self, g: GData) -> Dict[str, torch.Tensor]:
+        # Feature extraction
+        z, Embedding = self.amsgp(
+            node_names=g.node_names,
+            x=g.x,
+            edge_attr=g.edge_attr,
+            edge_index=g.edge_index,
+        )
 
-            g_: Graph data of aggregated and pooled ``g``. The size is same as ``g``.
-            
-            g_ms: Graph data that nodes are embedded multi-scale subgraphs. Its size is smaller than ``g``.
-            
-            x_recon_emb: Embedding of reconstructed node embeddings.
-            
-            g_emb: Embedding of graph ``g_`` nodes.
-            
-        """
-        x, g_, g_ms = self.msgp(g)
-        x_recon = self.ge_decoder(x)
-        x_label = self.label_predictor(x)
+        recon_node_emb = self.ge_decoder(z, Embedding)  # Node reconstruction
+        recon_edge = self.edge_recon(recon_node_emb, g.edge_index)
+        predicted_label = self.g_label_predictor(z)  # Label prediction
 
-        # For reconstruction loss
-        x_recon_emb = self.pool_for_g_compare(x_recon)
-        g_emb = self.pool_for_g_compare(g_.x)
+        print("\n\nGraph embedding shape:", z.shape)
+        print("Reconstructed node embedding shape:", recon_node_emb.shape)
+        print("Predicted label shape:", predicted_label.shape)
+        print("Reconstructed edge shape:", recon_edge.shape, "\n\n")
 
-        return x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb
-    
+        # Multi-task outputs
+        return {
+            "embedding": z,
+            "node_recon": recon_node_emb,
+            "label_pred": predicted_label,
+            "edge_recon": recon_edge,
+        }
+
     def configure_optimizers(self):
-        optimizer = Adam(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, 5, 2)
-        return {'optimizer': optimizer,
-                'lr_scheduler': {
-                    'scheduler': scheduler,
-                    'interval': 'step',
-                    'frequency': 1,
-                    'monitor': const.dkey.title_val_loss,
-                    }
-                }
-    
-    def training_step(self, batch, batch_idx):
-        prefix = const.dkey.abbr_train + '_'
+        opt = AdamW(
+            self.parameters(), lr=self.hparams.lr, weight_decay=1e-4, betas=(0.9, 0.98)
+        )
 
-        g = batch#[const.dkey.graph_]
-        y = g.y
-        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
+        # Combined scheduler
+        total_steps = int(self.trainer.estimated_stepping_batches)
+        warmup_steps = int(total_steps * 0.1)
+        return {
+            "optimizer": opt,
+            "lr_scheduler": {
+                "scheduler": torch.optim.lr_scheduler.SequentialLR(
+                    opt,
+                    schedulers=[
+                        torch.optim.lr_scheduler.LambdaLR(
+                            opt, lr_lambda=lambda step: min(step / warmup_steps, 1.0)
+                        ),
+                        torch.optim.lr_scheduler.CosineAnnealingLR(
+                            opt,
+                            T_max=total_steps - warmup_steps,
+                            eta_min=self.hparams.lr / 100,
+                        ),
+                    ],
+                    milestones=[warmup_steps],
+                ),
+                "interval": "step",
+                "frequency": 1,
+            },
+        }
 
-        loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
+    def _init_metrics(self):
+        if hasattr(self, "metrics"):
+            self.metrics.clear()
 
-        if y is None:
-            loss = loss_recon
+        # Common metrics for both tasks
+        common_metrics = {
+            "recon": MeanSquaredError(),
+            "edge_recon": MeanSquaredError(),
+        }
+
+        # Task-specific metrics
+        if self.hparams.is_regression:
+            task_metrics = {
+                "pred_mse": MeanSquaredError(),
+                "pred_mae": MeanAbsoluteError(),
+                "pred_rmse": MeanSquaredError(squared=False),
+                "pred_r2": R2Score(),
+                "pred_pcc": PearsonCorrCoef(),
+            }
         else:
-            loss_pred = self._loss_pred(prefix=prefix, y=y, y_pred=x_label)
-            loss = (loss_pred + loss_recon) / 2.0
+            task_metrics = {
+                "pred_acc": MulticlassAccuracy(
+                    num_classes=self.hparams.output_dim, average="weighted"
+                ),
+                "pred_f1": MulticlassF1Score(
+                    num_classes=self.hparams.output_dim, average="weighted"
+                ),
+                "pred_auc": MulticlassAUROC(
+                    num_classes=self.hparams.output_dim, average="macro"
+                ),
+                "pred_precision": MulticlassPrecision(
+                    num_classes=self.hparams.output_dim, average="weighted"
+                ),
+                "pred_recall": MulticlassRecall(
+                    num_classes=self.hparams.output_dim, average="weighted"
+                ),
+                "pred_mcc": MatthewsCorrCoef(
+                    task="multiclass", num_classes=self.hparams.output_dim
+                ),
+            }
 
-        self.log(f"{prefix}loss", loss, sync_dist=True)
-        return loss
-    
-    def validation_step(self, batch, batch_idx):
-        prefix = const.dkey.abbr_val + '_'
-        g = batch#[const.dkey.graph_]
-        y = g.y
-        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
-        loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
-        if y is None:
-            loss = loss_recon
-        else:
-            loss_pred = self._loss_pred(prefix=prefix, y=y, y_pred=x_label)
-            loss = (loss_pred + loss_recon) / 2.0
-        self.log(f"{prefix}loss", loss, sync_dist=True)
-        return loss
-    
-    def test_step(self, batch, batch_idx):
-        prefix = const.dkey.abbr_test + '_'
-        g = batch#[const.dkey.graph_]
-        y = g.y
-        x, x_recon, x_label, g_, g_ms, x_recon_emb, g_emb = self(g)
-        loss_recon = self._loss_recon(prefix=prefix, x_recon_emb=x_recon_emb, g_emb=g_emb)
-        if y is None:
-            loss = loss_recon
-        else:
-            loss_pred = self._loss_pred(prefix=prefix, y=y, y_pred=x_label)
-            loss = (loss_pred + loss_recon) / 2.0
-        self.log(f"{prefix}loss", loss, sync_dist=True)
-        return loss
-    
-    def predict_step(self, batch, batch_idx):
-        g = batch#[const.dkey.graph_]
-        return self(g)
-    
-    def _loss_recon(self, prefix: str, x_recon_emb: torch.Tensor, g_emb: torch.Tensor):
-        r"""Compute the reconstruction loss for the graph embedding based on the structural similarity.
-        """
-        loss = torch.nn.functional.mse_loss(x_recon_emb, g_emb)
-        self.log(f"{prefix}loss_recon", loss, sync_dist=True)
-        return loss
-    
-    def _loss_pred(self, prefix: str, y: torch.Tensor, y_pred: torch.Tensor):
-        self._def_metrics_label_pred(prefix)
-        metrics_label = self.metrics_label_pred(y_pred, y)
+        # Combine metrics
+        metrics = MetricCollection({**common_metrics, **task_metrics})
 
-        if self.is_regression:
-            loss = metrics_label[f"{prefix}MSE"].mean()
-            self.log(f"{prefix}loss_pred", loss, sync_dist=True)
-            self.log_dict(metrics_label, sync_dist=True)
-        else:
-            loss = metrics_label[f"{prefix}F1_weighted"].mean().neg().add(1.0)
-            self.log(f"{prefix}loss_pred", loss, sync_dist=True)
-            self.log_dict(metrics_label, sync_dist=True)
+        # Create metrics for all stages
+        self.metrics = torch.nn.ModuleDict(
+            {
+                f"{k}_metrics": metrics.clone(prefix=k + "_")
+                for k in ["train", "val", "test"]
+            }
+        )
 
-        return loss
+    def _shared_step(self, batch: GData, stage: str) -> torch.Tensor:
+        outputs = self(batch)
+        losses = self._compute_losses(outputs, batch, stage)
 
-    def _def_metrics_label_pred(self, prefix: str):
-        r"""Define the loss function and the metrics.
-        """
-        output_dim = self.output_dim
-        if output_dim == 1:
-            # The task is regression
-            # self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(), "MAE": MeanAbsoluteError(), "R2": R2Score(), "PCC": PearsonCorrCoef()}, prefix=prefix)
-            self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(), "MAE": MeanAbsoluteError()}, prefix=prefix)
-        else:
-            if self.is_regression:
-                # The task is multi-trait regression. Compute loss and metrics per trait instead of average over all traits.
-                # self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(num_outputs=output_dim), "MAE": MeanAbsoluteError(num_outputs=output_dim), "R2": R2Score(num_outputs=output_dim), "PCC": PearsonCorrCoef(num_outputs=output_dim)}, prefix=prefix)
-                self.metrics_label_pred = MetricCollection({"MSE": MeanSquaredError(num_outputs=output_dim), "MAE": MeanAbsoluteError(num_outputs=output_dim)}, prefix=prefix)
+        if stage == "train":
+            opt = self.optimizers()
+            opt.zero_grad()
+            self.manual_backward(losses["total"])
+            torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+            opt.step()
+
+        # Update metrics
+        if batch.y is not None:
+            preds = outputs["label_pred"]
+            target = batch.y
+
+            if self.hparams.is_regression:
+                self.metrics[f"{stage}_metrics"].update(preds, target)
             else:
-                # The task is classification
-                self.metrics_label_pred = MetricCollection({
-                    "F1_weighted": MulticlassF1Score(average="weighted", num_classes=output_dim),
-                    "F1_micro": MulticlassF1Score(average="micro", num_classes=output_dim),
-                    "F1_macro": MulticlassF1Score(average="macro", num_classes=output_dim),
-                    "AUROC_weighted": MulticlassAUROC(average="weighted", num_classes=output_dim),
-                    "AUPRC_macro": MulticlassAUROC(average="macro", num_classes=output_dim),
-                    "Accuracy_weighted": MulticlassAccuracy(average="weighted", num_classes=output_dim),
-                    "Accuracy_micro": MulticlassAccuracy(average="micro", num_classes=output_dim),
-                    "Accuracy_macro": MulticlassAccuracy(average="macro", num_classes=output_dim),
-                    "Precision_weighted": MulticlassPrecision(average="weighted", num_classes=output_dim),
-                    "Precision_micro": MulticlassPrecision(average="micro", num_classes=output_dim),
-                    "Precision_macro": MulticlassPrecision(average="macro", num_classes=output_dim),
-                    "Recall_weighted": MulticlassRecall(average="weighted", num_classes=output_dim),
-                    "Recall_micro": MulticlassRecall(average="micro", num_classes=output_dim),
-                    "Recall_macro": MulticlassRecall(average="macro", num_classes=output_dim),
-                    "MCC": MatthewsCorrCoef(task='multiclass', num_classes=output_dim),
-                    "MSE": MeanSquaredError(num_outputs=output_dim),
-                }, prefix=prefix)
-        
-        self.metrics_label_pred.to(self.device)
+                preds = torch.argmax(preds, dim=-1) if preds.ndim > 1 else preds
+                self.metrics[f"{stage}_metrics"].update(preds, target)
+
+        self._log_metrics(losses, stage)
+        return losses["total"]
+
+    def _log_metrics(self, losses: Dict, stage: str):
+        # Log losses
+        for k, v in losses.items():
+            self.log(f"{stage}_{k}", v, prog_bar=(k == "total"), sync_dist=True)
+
+        # Log metrics at epoch end
+        if self.trainer.sanity_checking:
+            return
+
+        # Compute and log metrics
+        metrics = self.metrics[f"{stage}_metrics"].compute()
+        for name, val in metrics.items():
+            self.log(f"{stage}_{name}", val, sync_dist=True)
+        self.metrics[f"{stage}_metrics"].reset()
+
+    # Define epoch-end handlers
+    def on_train_epoch_end(self):
+        self._log_epoch_metrics("train")
+
+    def on_validation_epoch_end(self):
+        self._log_epoch_metrics("val")
+
+    def on_test_epoch_end(self):
+        self._log_epoch_metrics("test")
+
+    def _log_epoch_metrics(self, stage: str):
+        metrics = self.metrics[f"{stage}_metrics"].compute()
+        for name, val in metrics.items():
+            self.log(f"{stage}_{name}", val, sync_dist=True)
+        self.metrics[f"{stage}_metrics"].reset()
+
+    def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
+        losses = {}
+
+        # Feature imputation loss
+        recon = outputs["node_recon"]
+
+        assert recon.shape == batch.x.shape, (
+            f"Reconstructed ({recon.shape}) and original node features ({batch.x.shape}) must have the same shape"
+        )
+
+        mse_loss = F.mse_loss(recon, batch.x)
+        kl_loss = F.kl_div(
+            F.log_softmax(recon, dim=-1),
+            F.softmax(batch.x, dim=-1),
+            reduction="batchmean",
+        )
+        losses["recon"] = mse_loss + kl_loss
+
+        # Edge reconstruction
+        edge_mask = (batch.edge_attr > self.hparams.threshold_edge_exist).float()
+        losses["edge"] = F.binary_cross_entropy(outputs["edge_recon"], edge_mask)
+
+        # Prediction task
+        if batch.y is not None:
+            if self.hparams.is_regression:
+                losses["pred"] = F.mse_loss(outputs["label_pred"], batch.y)
+            else:
+                losses["pred"] = F.cross_entropy(outputs["label_pred"], batch.y)
+
+        # Dynamic weighting
+        total_loss = self._balance_losses(losses, stage)
+        return {**losses, "total": total_loss}
+
+    def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
+        # Adaptive task weighting
+        if stage == "train" and self.current_epoch > 5:
+            with torch.no_grad():
+                task_weights = torch.softmax(
+                    torch.stack([losses[k].item() for k in ["pred", "recon", "edge"]]),
+                    dim=0,
+                )
+                self.hparams.alpha = 0.8 * task_weights[0] + 0.2 * self.hparams.alpha
+
+        # EMA stabilization
+        total = self.hparams.alpha * losses.get("pred", 0) + (
+            1 - self.hparams.alpha
+        ) * (losses["recon"] + losses["edge"])
+        if self.ema_loss is None:
+            self.ema_loss = total.detach()
+        else:
+            self.ema_loss = 0.9 * self.ema_loss + 0.1 * total.detach()
+
+        return total + 0.1 * (total - self.ema_loss).abs()
+
+    def training_step(self, batch: GData, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
+        return self._shared_step(batch, "val")
+
+    def test_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
+        return self._shared_step(batch, "test")
+
+    def predict_step(self, batch: GData, batch_idx: int) -> Dict[str, torch.Tensor]:
+        with torch.no_grad():
+            return self(batch)

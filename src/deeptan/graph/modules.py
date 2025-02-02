@@ -1,11 +1,11 @@
 r"""
-Modules for biological state-specific graph embedding.
+Enhanced modules for multi-scale graph processing.
 """
 
-from typing import Dict, List, Optional
-
+from typing import Dict, List
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch_geometric.nn import MessagePassing
 
 
@@ -16,352 +16,247 @@ class WGATLayer(MessagePassing):
         output_dim: int,
         negative_slope: float,
         num_heads: int,
+        dropout: float = 0.1,
     ):
-        r"""Edge weight guided GAT layer.
-
-        Args:
-            input_dim: Input node embedding dimension.
-
-            output_dim: Output node embedding dimension.
-
-            negative_slope: LeakyReLU negative slope.
-
-            num_heads: Number of attention heads.
-        """
         super().__init__(aggr="add")
-
         self.output_dim = output_dim
         self.num_heads = num_heads
+        self.dropout = dropout
 
         self.trans = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.Sigmoid(),
-            nn.Linear(input_dim, output_dim),
-            nn.Sigmoid(),
+            nn.Linear(input_dim, input_dim * num_heads),
+            nn.LeakyReLU(negative_slope),
+            nn.Linear(input_dim * num_heads, output_dim * num_heads),
         )
-        self.W = nn.Parameter(torch.zeros(size=(input_dim * 2, output_dim * num_heads)))
-        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+        # Adjusted for per-head attention computation
+        self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
+        self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
+        self.reset_parameters()
 
-        self.attn = nn.Parameter(torch.zeros(size=(output_dim * num_heads, num_heads)))
-        nn.init.xavier_uniform_(self.attn.data, gain=1.414)
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.W.data)
+        nn.init.xavier_uniform_(self.attn.data)
 
-        self.activation = nn.LeakyReLU(negative_slope)
+    def forward(self, x, edge_index, edge_attr=None):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: Optional[torch.Tensor] = None,
-    ):
+    def message(self, x_i, x_j, edge_attr):
+        # Compute attention scores per head
+        h = torch.cat([x_i, x_j], -1) @ self.W  # [E, num_heads * output_dim]
+        h = h.view(-1, self.num_heads, self.output_dim)  # [E, num_heads, output_dim]
+
+        # Calculate attention coefficients [E, num_heads]
+        e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+
+        # Integrate edge attributes
         if edge_attr is not None:
-            edge_attr = edge_attr.view(-1, 1)
-        h = self.propagate(edge_index, x=x, edge_attr=edge_attr)
+            # Expand edge_attr to match num_heads [E, num_heads]
+            e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
 
-        # Reshape the output to (num_nodes, output_dim * num_heads)
-        return h.view(-1, self.output_dim * self.num_heads)
+        # Normalize attention scores
+        a = F.leaky_relu(e, 0.2)
+        a = F.softmax(a, dim=0)  # Normalize over neighbors
+        a = F.dropout(a, self.dropout, training=self.training)
 
-    def message(
-        self,
-        x_i: torch.Tensor,
-        x_j: torch.Tensor,
-        edge_attr: Optional[torch.Tensor] = None,
-    ):
-        # edge_attr has shape: torch.Size([E, 1])
-        h_cat = torch.cat([x_i, x_j], dim=-1)
-        # Shape of h_cat: (E, 2 * input_dim)
-        Wh = h_cat @ self.W
-        # Shape of Wh: (E, output_dim * num_heads)
+        # Transform features and prepare multi-head output
+        x_trans = self.trans(x_j).view(
+            -1, self.num_heads, self.output_dim
+        )  # [E, num_heads, output_dim]
 
-        # Reshape Wh to (E, output_dim, num_heads)
-        Wh = Wh.view(-1, self.output_dim, self.num_heads)
+        # Weight features by attention scores
+        # Average features across heads
+        h = (x_trans * a.unsqueeze(-1)).mean(dim=1)  # [E, output_dim]
 
-        e_ij: torch.Tensor = self.activation(Wh.matmul(self.attn))
-        # Shape of e_ij: (E, num_heads)
-
-        if edge_attr is None:
-            e_ij = e_ij.softmax(dim=0)
-        else:
-            # Mask attention scores with adjacency matrix
-            e_ij = e_ij.mul(edge_attr).softmax(dim=0)
-        # Shape of e_ij: (E, num_heads)
-
-        # Compute transformed node embeddings for each head
-        # Shape of x_j_transformed: (E, output_dim * num_heads)
-        x_j_transformed = self.trans(x_j).view(-1, self.output_dim, self.num_heads)
-
-        # Multiply transformed embeddings by attention scores
-        output: torch.Tensor = x_j_transformed * e_ij.unsqueeze(1)
-        # Shape of output: (E, output_dim, num_heads)
-
-        # Reshape output to (E, output_dim * num_heads)
-        return output.view(-1, self.output_dim * self.num_heads)
+        return h
 
 
 class NodeEmbedding(nn.Module):
-    r"""
-    Biological state-specific feature embedding.
-    """
-
     def __init__(
         self,
         input_dim: int,
-        num_embeddings: int,
         embedding_dim: int,
         fusion_dims: List[int],
         dict_node_names: Dict[str, int],
-        n_heads: List[int],
+        n_heads: int,
         negative_slope: float,
+        dropout: float = 0.2,
     ):
-        r"""WGAT layers with skip connections.
-
-        Args:
-            input_dim: Input node embedding dimension.
-
-            embedding_dim: Target node embedding dimension.
-
-            fusion_dims: Node embedding dimensions after embedding_dims achiving.
-
-            n_heads: Number of attention heads for each layer.
-
-            negative_slope: LeakyReLU negative slope.
-
-        """
         super().__init__()
-        self.node_embedding = nn.Embedding(
-            num_embeddings=num_embeddings,
-            embedding_dim=embedding_dim,
-            padding_idx=None,
-            sparse=True,
-        )
+        self.input_dim = input_dim
+        self.embedding_dim = embedding_dim
+        self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
+        self.n_heads = n_heads
+        self.dropout = dropout
+        self.negative_slope = negative_slope
 
-        # Feature encoding layers (Part 1)
-        self.raiseQuaDim = nn.Sequential(
-            nn.Linear(
-                input_dim, embedding_dim // 2
-            ),  # Input: quantitative features (e.g., gene expression)
-            nn.Tanh(),
-            nn.Linear(embedding_dim // 2, embedding_dim),
-            nn.Tanh(),
+        self.embed = nn.Embedding(len(dict_node_names), embedding_dim)
+
+        self.mlp1 = nn.Sequential(
+            nn.Linear(input_dim, embedding_dim), nn.LayerNorm(embedding_dim), nn.GELU()
         )
-        self.quaEncoder = nn.Sequential(
-            nn.Linear(embedding_dim * 2, embedding_dim),
-            nn.Tanh(),
-            nn.Linear(embedding_dim, embedding_dim),
-            nn.Tanh(),
+        self.mlp2 = nn.Sequential(
+            nn.Linear(2 * embedding_dim, embedding_dim),
+            nn.LayerNorm(embedding_dim),
+            nn.GELU(),
         )
 
-        # Feature encoding layers (Part 2) for fusing node embeddings and their quantitative features
-        self.n_layers_fusion = len(fusion_dims)
-        self.layers = nn.ModuleList()
-        for i in range(self.n_layers_fusion):
-            if i == 0:
-                self.layers.append(
-                    WGATLayer(embedding_dim, fusion_dims[i], negative_slope, n_heads[0])
+        # WGAT layers with skip connections
+        self.layers = nn.ModuleList(
+            [
+                WGATLayer(
+                    dim_in if i else embedding_dim,
+                    dim_out,
+                    negative_slope,
+                    n_heads,
+                    dropout,
                 )
-            else:
-                self.layers.append(
-                    WGATLayer(
-                        fusion_dims[i - 1], fusion_dims[i], negative_slope, n_heads[i]
-                    )
+                for i, (dim_in, dim_out) in enumerate(
+                    zip([embedding_dim] + fusion_dims[:-1], fusion_dims)
                 )
+            ]
+        )
 
-        if self.n_layers_fusion > 2:
-            # Enable skip connections
-            self.skip_connections = True
-            self.Ws = nn.ModuleList()
-            for i in range(self.n_layers_fusion - 2):
-                self.Ws.append(nn.Linear(fusion_dims[i], fusion_dims[-1]))
-                nn.init.xavier_uniform_(self.Ws[-1].weight.data, gain=1.414)
-        else:
-            self.skip_connections = False
-            self.Ws = None
+        # Skip connections
+        self.skips = (
+            nn.ModuleList([nn.Linear(dim, fusion_dims[-1]) for dim in fusion_dims])
+            if len(fusion_dims) > 1
+            else None
+        )
 
-    def forward(
-        self,
-        node_names: List[str],
-        x: torch.Tensor,
-        edge_attr: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> torch.Tensor:
-        indices_embedding = torch.tensor(
-            [self.dict_node_names[node] for node in node_names],
+    def forward(self, node_names, x, edge_attr, edge_index):
+        if isinstance(node_names[0], list):
+            node_names = node_names[0]
+
+        # Verify node indices in edge_index
+        num_nodes = x.size(0)
+        assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), (
+            "Invalid edge indices detected"
+        )
+
+        # Initial embeddings
+        ids = torch.tensor(
+            # [self.dict_node_names.get(n, -1) for n in node_names],
+            [self.dict_node_names[n] for n in node_names],
             dtype=torch.long,
             device=x.device,
         )
-        node_embedding = self.node_embedding(indices_embedding)
+        # assert -1 not in ids, "Some node names are not in dict_node_names"
 
-        x = self.raiseQuaDim(x)
-        x = self.quaEncoder(torch.cat([node_embedding, x], dim=-1)) + node_embedding
+        E_i = self.embed(ids)
+        x_mlp1 = self.mlp1(x)
+        combined = torch.cat([x_mlp1, E_i], dim=-1)
+        x_mlp2 = self.mlp2(combined)
+        emb = x_mlp2 + E_i
 
-        h_list = []
-        for i in range(self.n_layers_fusion):
-            x = self.layers[i](x, edge_index, edge_attr)
-            h_list.append(x)
+        # Multi-scale processing
+        skips = []
+        for i, layer in enumerate(self.layers):
+            emb = layer(emb, edge_index, edge_attr)
+            if self.skips and i < len(self.skips):
+                skips.append(self.skips[i](emb))
 
-        if self.skip_connections and self.Ws is not None:
-            for i in range(self.n_layers_fusion - 2):
-                h_list[i] = self.Ws[i](h_list[i])
+        # Skip fusion
+        if self.skips:
+            emb = emb + torch.stack(skips).mean(dim=0)
 
-            h_list[-1] = h_list[-1] + torch.mean(torch.stack(h_list[:-2]), dim=0)
+        # emb = F.layer_norm(emb, emb.shape)
 
-        return h_list[-1]
+        return emb
 
 
-class SelfAttPool(nn.Module):
+class EdgeDecoder(nn.Module):
     r"""
-    Self-attention pooling layer for graph pooling.
+    Edge reconstruction.
     """
 
-    def __init__(self, input_dim: int):
-        r"""Apply self-attention to multi-scale subgraphs' embeddings.
-
-        Args:
-            input_dim (int): The dimension of the input embeddings.
-        """
+    def __init__(self, emb_dim: int):
         super().__init__()
-        self.input_dim = input_dim
-
-        # Self-attention layers
-        self.query = nn.Linear(input_dim, input_dim)
-        self.key = nn.Linear(input_dim, input_dim)
-        self.value = nn.Linear(input_dim, input_dim)
-
-        # Output projection
-        self.proj = nn.Linear(input_dim, input_dim)
-
-    def forward(self, g_emb: torch.Tensor):
-        r"""
-        Args:
-            g_emb (torch.Tensor): Graph embeddings of shape ``(num_graphs, input_dim)``.
-
-        Returns:
-            Pooled representation of shape ``(output_dim_g_emb,)``.
-        """
-        # Compute query, key, and value
-        Q = self.query(g_emb)
-        K = self.key(g_emb)
-        V = self.value(g_emb)
-
-        # Scaled dot-product attention
-        scale = torch.sqrt(torch.tensor(self.input_dim, dtype=torch.float32))
-        attention_scores = torch.matmul(Q, K.transpose(0, 1)) / scale
-        attention_weights = nn.functional.softmax(
-            attention_scores, dim=1
-        )  # (num_graphs, num_graphs)
-
-        # Apply attention to the value
-        weighted = torch.matmul(attention_weights, V)  # (num_graphs, input_dim)
-
-        # Project the output
-        weighted = self.proj(weighted)  # (num_graphs, input_dim)
-
-        # Concatenate the pooled representation with the mean and std of the graphs
-        weighted_mean = weighted.sum(dim=0)
-        weighted_std = weighted.mul(weighted.shape[0]).std(dim=0)
-        g_emb_mean = g_emb.mean(dim=0)
-        g_emb_std = g_emb.std(dim=0)
-        out_emb = torch.cat([weighted_mean, weighted_std, g_emb_mean, g_emb_std])
-
-        # Shape of the output: (graph_embedding_dim * 4)
-        return out_emb
-
-
-class VGAE_Decoder(nn.Module):
-    def __init__(self, graph_embedding_dim: int, node_embedding_dim: int):
-        super().__init__()
-        self.graph_embedding_dim = graph_embedding_dim
-        self.node_embedding_dim = node_embedding_dim
-
-        self.guess_num_nodes = nn.Sequential(
-            nn.Linear(graph_embedding_dim, graph_embedding_dim // 2),
-            nn.Sigmoid(),
-            nn.Linear(graph_embedding_dim // 2, 1),
-            nn.Softplus(),
-        )
-        self.fc_mu = nn.Linear(graph_embedding_dim, graph_embedding_dim)
-        self.fc_var = nn.Linear(graph_embedding_dim, graph_embedding_dim)
-
         self.decoder = nn.Sequential(
-            nn.Linear(graph_embedding_dim, graph_embedding_dim // 2),
-            nn.LeakyReLU(),
-            nn.Linear(graph_embedding_dim // 2, node_embedding_dim * 4),
-            nn.Tanh(),
-            nn.Linear(node_embedding_dim * 4, node_embedding_dim),
-            nn.LeakyReLU(),
+            nn.Linear(2 * emb_dim, 256),
+            nn.BatchNorm1d(256),
+            nn.GELU(),
+            nn.Linear(256, 1),
+            nn.Sigmoid(),
         )
 
-    def forward(self, graph_embedding: torch.Tensor):
-        num_nodes = torch.exp(self.guess_num_nodes(graph_embedding)).round().long()
-        graph_embedding_expanded = graph_embedding.unsqueeze(0).expand(
-            int(num_nodes.item()), -1
+    def forward(self, Hs: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        src, dst = edge_index
+        concat_ = torch.cat([Hs[src], Hs[dst]], dim=-1)
+        output = self.decoder(concat_)
+        return output  # .squeeze()
+
+
+class GE_Decoder(nn.Module):
+    r"""
+    Graph Embedding Decoder for reconstructing node features from latent representations (biological state-specific embeddings).
+    """
+
+    def __init__(self, z_dim: int, h_dim: int, output_dim: int, hidden_dim: int = 128):
+        r"""
+        Initialize graph embedding decoder.
+
+        Args:
+            z_dim: Dimension of the latent representation.
+            h_dim: Dimension of node features.
+        """
+        super().__init__()
+        self.z_dim = z_dim
+        self.h_dim = h_dim
+        self.output_dim = output_dim
+        self.hidden_dim = hidden_dim
+
+        self.ffn_i = nn.Sequential(
+            nn.Linear(z_dim + h_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, h_dim),
         )
-        # Shape of graph_embedding_expanded: (num_nodes, graph_embedding_dim)
+        self.ffn_q = nn.Sequential(
+            nn.Linear(h_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, output_dim),
+        )
 
-        # mu, var
-        mu = self.fc_mu(graph_embedding_expanded)
-        log_var = self.fc_var(graph_embedding_expanded)
-        z = self.reparameterize(mu, log_var)
-
-        node_embeddings = self.decoder(z)
-
-        return node_embeddings
-
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        return eps * std + mu
+    def forward(self, z: torch.Tensor, Embedding: nn.Embedding):
+        z_expanded = z.unsqueeze(1).expand(-1, Embedding.num_embeddings).T
+        E = Embedding.weight
+        combined = torch.cat([z_expanded, E], dim=-1)
+        h_s = self.ffn_i(combined) + E
+        h_s = self.ffn_q(h_s)
+        return h_s
 
 
 class GLabelPredictor(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int]):
         super().__init__()
-        self.predictor = nn.Sequential(
-            nn.Linear(input_dim, input_dim),
-            nn.Tanh(),
-            nn.Linear(input_dim, input_dim // 2),
-            nn.Tanh(),
-            nn.Linear(input_dim // 2, output_dim),
-        )
+        layers = []
+        for dim in hidden_dims:
+            layers += [
+                nn.Linear(input_dim, dim),
+                nn.GELU(),
+            ]
+            input_dim = dim
+        layers.append(nn.Linear(input_dim, output_dim))
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.predictor(x)
+        if x.ndim == 1:
+            x = x.unsqueeze(0)
+        return self.net(x)
 
 
-# class AttPool(nn.Module):
-#     r"""
-#     Attention pooling layer for graph pooling.
-#     """
-#     def __init__(self, input_dim: int):
-#         r"""Apply attention to multi-scale subgraphs' embeddings.
+class SelfAttPool(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+        self.scale = dim**-0.5
 
-#         """
-#         super().__init__()
-#         # self.attention = nn.Linear(input_dim, 1)
-#         self.attention = nn.Sequential(
-#             nn.Linear(input_dim, input_dim // 4),
-#             nn.Tanh(),
-#             nn.Linear(input_dim // 4, 1),
-#         )
-
-#     def forward(self, g_emb: torch.Tensor):
-#         r"""
-#         Args:
-#             g_emb: Graph embeddings of shape ``(num_graphs, input_dim)``.
-
-#         Returns:
-#             Pooled representation of shape ``(output_dim_g_emb,)``.
-#         """
-#         weight_per_g = self.attention(g_emb).softmax(dim=0)
-#         weighted = g_emb.mul(weight_per_g)
-#         # pooled = weighted.sum(dim=0)
-
-#         # Concatenate the pooled representation with the mean and std of the graphs
-#         weighted_mean = weighted.sum(dim=0)
-#         weighted_std = weighted.mul(weighted.shape[0]).std(dim=0)
-#         g_emb_mean = g_emb.mean(dim=0)
-#         g_emb_std = g_emb.std(dim=0)
-#         out_emb = torch.cat([weighted_mean, weighted_std, g_emb_mean, g_emb_std])
-
-#         # Shape of the output: (graph_embedding_dim * 4)
-#         return out_emb
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).mean(dim=0)
+        return self.proj(x)
