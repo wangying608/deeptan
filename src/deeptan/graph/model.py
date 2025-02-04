@@ -3,12 +3,14 @@ DeepTAN:
 Trait-associated multi-omics network inference via multi-task NMIC-guided adaptive multi-scale graph embedding.
 """
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 import torch
 import torch.nn.functional as F
 from torch.optim.adamw import AdamW
 import lightning as ltn
 from torch_geometric.data import Data as GData
+
+# from torch_geometric.utils import unbatch
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
     MulticlassAccuracy,
@@ -87,35 +89,68 @@ class AMSGPMTL(ltn.LightningModule):
         )
 
         # Metrics and initialization
-        if not hasattr(self, "metrics"):
-            self._init_metrics()
+        # if not hasattr(self, "metrics"):
+        self._init_metrics()
         self.ema_loss = None
 
-    def forward(self, g: GData) -> Dict[str, torch.Tensor]:
+    def forward(self, g: GData) -> Dict[str, Any]:
+        # Extract batch information if available, otherwise initialize with zeros
+        node_batch = getattr(
+            g, "batch", torch.zeros(g.x.size(0), dtype=torch.long, device=g.x.device)
+        )
+
         # Feature extraction
         z, Embedding = self.amsgp(
             node_names=g.node_names,
             x=g.x,
             edge_attr=g.edge_attr,
             edge_index=g.edge_index,
+            batch=node_batch,
         )
 
-        recon_node_emb = self.ge_decoder(z, Embedding)  # Node reconstruction
-        recon_edge = self.edge_recon(recon_node_emb, g.edge_index)
-        predicted_label = self.g_label_predictor(z)  # Label prediction
+        # print(f"\n\nz shape: {z.shape}")
 
-        print("\n\nGraph embedding shape:", z.shape)
-        print("Reconstructed node embedding shape:", recon_node_emb.shape)
-        print("Predicted label shape:", predicted_label.shape)
-        print("Reconstructed edge shape:", recon_edge.shape, "\n\n")
+        recon_node_emb = self.ge_decoder(z, Embedding)
+        # batch_size = recon_node_emb.size(0)
+        # print(f"\nReconstructed node embeddings shape: {recon_node_emb.shape}\n")  # torch.Size([16, 50, 32])
 
-        # Multi-task outputs
+        edge_pred = self.edge_recon(recon_node_emb, g.edge_index)
+
+        # Graph-level label prediction
+        pred_labels = self.g_label_predictor(z)
+        if not self.hparams.is_regression:
+            pred_labels = torch.nn.functional.log_softmax(pred_labels, dim=1)
+
+        # Assertions to check the dimensions of the outputs
+        # assert z.dim() == 2 and z.size(0) == g.batch.max() + 1, (
+        #     f"图嵌入形状错误，应为[batch_size, dim]，实际得到{z.shape}"
+        # )
+        # assert pred_labels.size(0) == z.size(0), "预测结果数量与图数量不匹配"
+
         return {
             "embedding": z,
-            "node_recon": recon_node_emb,
-            "label_pred": predicted_label,
-            "edge_recon": recon_edge,
+            "node_recon": recon_node_emb.view(-1, self.hparams.input_dim),
+            "label_pred": pred_labels,
+            "edge_recon": edge_pred,
         }
+
+        # print("\n\nGraph embedding shape:", z.shape)
+        # print("Reconstructed node embedding shape:", recon_node_emb.shape)
+        # print("Predicted label shape:", predicted_label.shape)
+        # print("Reconstructed edge shape:", recon_edge.shape, "\n\n")
+
+    def training_step(self, batch: GData, batch_idx: int) -> torch.Tensor:
+        return self._shared_step(batch, "train")
+
+    def validation_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
+        return self._shared_step(batch, "val")
+
+    def test_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
+        return self._shared_step(batch, "test")
+
+    def predict_step(self, batch: GData, batch_idx: int) -> Dict[str, torch.Tensor]:
+        with torch.no_grad():
+            return self(batch)
 
     def configure_optimizers(self):
         opt = AdamW(
@@ -160,41 +195,55 @@ class AMSGPMTL(ltn.LightningModule):
         # Task-specific metrics
         if self.hparams.is_regression:
             task_metrics = {
-                "pred_mse": MeanSquaredError(),
-                "pred_mae": MeanAbsoluteError(),
-                "pred_rmse": MeanSquaredError(squared=False),
-                "pred_r2": R2Score(),
-                "pred_pcc": PearsonCorrCoef(),
+                "label_mse": MeanSquaredError(),
+                "label_mae": MeanAbsoluteError(),
+                "label_rmse": MeanSquaredError(squared=False),
+                "label_r2": R2Score(),
+                "label_pcc": PearsonCorrCoef(),
             }
         else:
             task_metrics = {
-                "pred_acc": MulticlassAccuracy(
+                # "label_acc": MulticlassAccuracy(
+                #     num_classes=self.hparams.output_dim, average="weighted"
+                # ),
+                "label_f1_weighted": MulticlassF1Score(
                     num_classes=self.hparams.output_dim, average="weighted"
                 ),
-                "pred_f1": MulticlassF1Score(
-                    num_classes=self.hparams.output_dim, average="weighted"
+                "label_f1_macro": MulticlassF1Score(
+                    num_classes=self.hparams.output_dim,
+                    average="macro",
                 ),
-                "pred_auc": MulticlassAUROC(
+                "label_f1_micro": MulticlassF1Score(
+                    num_classes=self.hparams.output_dim,
+                    average="micro",
+                ),
+                "label_auc": MulticlassAUROC(
                     num_classes=self.hparams.output_dim, average="macro"
                 ),
-                "pred_precision": MulticlassPrecision(
-                    num_classes=self.hparams.output_dim, average="weighted"
-                ),
-                "pred_recall": MulticlassRecall(
-                    num_classes=self.hparams.output_dim, average="weighted"
-                ),
-                "pred_mcc": MatthewsCorrCoef(
-                    task="multiclass", num_classes=self.hparams.output_dim
-                ),
+                # "label_precision": MulticlassPrecision(
+                #     num_classes=self.hparams.output_dim, average="weighted"
+                # ),
+                # "label_recall": MulticlassRecall(
+                #     num_classes=self.hparams.output_dim, average="weighted"
+                # ),
+                # "label_mcc": MatthewsCorrCoef(
+                #     task="multiclass", num_classes=self.hparams.output_dim
+                # ),
             }
 
-        # Combine metrics
-        metrics = MetricCollection({**common_metrics, **task_metrics})
+        metrics_common = MetricCollection({**common_metrics})
+        metrics_task_label = MetricCollection({**task_metrics})
 
         # Create metrics for all stages
-        self.metrics = torch.nn.ModuleDict(
+        self.metrics_common = torch.nn.ModuleDict(
             {
-                f"{k}_metrics": metrics.clone(prefix=k + "_")
+                f"{k}_metrics": metrics_common.clone(prefix=k + "_")
+                for k in ["train", "val", "test"]
+            }
+        )
+        self.metrics_task_label = torch.nn.ModuleDict(
+            {
+                f"{k}_metrics": metrics_task_label.clone(prefix=k + "_")
                 for k in ["train", "val", "test"]
             }
         )
@@ -203,6 +252,15 @@ class AMSGPMTL(ltn.LightningModule):
         outputs = self(batch)
         losses = self._compute_losses(outputs, batch, stage)
 
+        # More loss computation
+        if batch.y is not None:
+            preds = outputs["label_pred"]
+            targets = batch.y
+            targets = torch.as_tensor(targets, device=preds.device, dtype=torch.long)
+
+            self.metrics_task_label[f"{stage}_metrics"].update(preds, targets)
+
+        # Optimization step (only during training)
         if stage == "train":
             opt = self.optimizers()
             opt.zero_grad()
@@ -210,98 +268,54 @@ class AMSGPMTL(ltn.LightningModule):
             torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
             opt.step()
 
-        # Update metrics
-        if batch.y is not None:
-            preds = outputs["label_pred"]
-            target = batch.y
-
-            if self.hparams.is_regression:
-                self.metrics[f"{stage}_metrics"].update(preds, target)
-            else:
-                preds = torch.argmax(preds, dim=-1) if preds.ndim > 1 else preds
-                self.metrics[f"{stage}_metrics"].update(preds, target)
-
+        # Logging metrics and losses
         self._log_metrics(losses, stage)
         return losses["total"]
-
-    def _log_metrics(self, losses: Dict, stage: str):
-        # Log losses
-        for k, v in losses.items():
-            self.log(f"{stage}_{k}", v, prog_bar=(k == "total"), sync_dist=True)
-
-        # Log metrics at epoch end
-        if self.trainer.sanity_checking:
-            return
-
-        # Compute and log metrics
-        metrics = self.metrics[f"{stage}_metrics"].compute()
-        for name, val in metrics.items():
-            self.log(f"{stage}_{name}", val, sync_dist=True)
-        self.metrics[f"{stage}_metrics"].reset()
-
-    # Define epoch-end handlers
-    def on_train_epoch_end(self):
-        self._log_epoch_metrics("train")
-
-    def on_validation_epoch_end(self):
-        self._log_epoch_metrics("val")
-
-    def on_test_epoch_end(self):
-        self._log_epoch_metrics("test")
-
-    def _log_epoch_metrics(self, stage: str):
-        metrics = self.metrics[f"{stage}_metrics"].compute()
-        for name, val in metrics.items():
-            self.log(f"{stage}_{name}", val, sync_dist=True)
-        self.metrics[f"{stage}_metrics"].reset()
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
         losses = {}
 
-        # Feature imputation loss
-        recon = outputs["node_recon"]
-
-        assert recon.shape == batch.x.shape, (
-            f"Reconstructed ({recon.shape}) and original node features ({batch.x.shape}) must have the same shape"
-        )
-
-        mse_loss = F.mse_loss(recon, batch.x)
+        # Node reconstruction loss
+        recon_loss = F.mse_loss(outputs["node_recon"], batch.x)
         kl_loss = F.kl_div(
-            F.log_softmax(recon, dim=-1),
+            F.log_softmax(outputs["node_recon"], dim=-1),
             F.softmax(batch.x, dim=-1),
             reduction="batchmean",
         )
-        losses["recon"] = mse_loss + kl_loss
+        losses["recon"] = recon_loss + kl_loss
 
-        # Edge reconstruction
+        # Edge reconstruction loss
         edge_mask = (batch.edge_attr > self.hparams.threshold_edge_exist).float()
-        losses["edge"] = F.binary_cross_entropy(outputs["edge_recon"], edge_mask)
+        edge_loss = F.binary_cross_entropy(outputs["edge_recon"], edge_mask)
+        losses["edge"] = edge_loss
 
-        # Prediction task
+        # Graph-level label prediction loss
         if batch.y is not None:
             if self.hparams.is_regression:
-                losses["pred"] = F.mse_loss(outputs["label_pred"], batch.y)
+                pred_loss = F.mse_loss(outputs["label_pred"], batch.y)
             else:
-                losses["pred"] = F.cross_entropy(outputs["label_pred"], batch.y)
+                pred_loss = F.cross_entropy(outputs["label_pred"], batch.y)
+            losses["pred"] = pred_loss
 
-        # Dynamic weighting
+        # Dynamic weight adjustment
         total_loss = self._balance_losses(losses, stage)
         return {**losses, "total": total_loss}
 
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
-        # Adaptive task weighting
+        # Dynamic weight adjustment
         if stage == "train" and self.current_epoch > 5:
             with torch.no_grad():
-                task_weights = torch.softmax(
-                    torch.stack([losses[k].item() for k in ["pred", "recon", "edge"]]),
-                    dim=0,
+                loss_values = torch.stack(
+                    [losses[k] for k in ["pred", "recon", "edge"]]
                 )
+                task_weights = F.softmax(loss_values / loss_values.mean(), dim=0)
                 self.hparams.alpha = 0.8 * task_weights[0] + 0.2 * self.hparams.alpha
 
-        # EMA stabilization
+        # EMA stableization
         total = self.hparams.alpha * losses.get("pred", 0) + (
             1 - self.hparams.alpha
         ) * (losses["recon"] + losses["edge"])
+
         if self.ema_loss is None:
             self.ema_loss = total.detach()
         else:
@@ -309,15 +323,67 @@ class AMSGPMTL(ltn.LightningModule):
 
         return total + 0.1 * (total - self.ema_loss).abs()
 
-    def training_step(self, batch: GData, batch_idx: int) -> torch.Tensor:
-        return self._shared_step(batch, "train")
+    def _log_metrics(self, losses: Dict, stage: str):
+        # Log losses
+        for k, v in losses.items():
+            self.log(
+                f"{stage}_{k}",
+                v,
+                prog_bar=(k == "total"),
+                sync_dist=True,
+                batch_size=self._get_batch_size(stage),
+            )
 
-    def validation_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
-        return self._shared_step(batch, "val")
+        # Log evaluation metrics
+        if not self.trainer.sanity_checking:
+            metrics_common = self.metrics_common[f"{stage}_metrics"].compute()
+            for name, val in metrics_common.items():
+                self.log(
+                    # f"{stage}_{name}",
+                    name,
+                    val,
+                    sync_dist=True,
+                    batch_size=self._get_batch_size(stage),
+                )
+            self.metrics_common[f"{stage}_metrics"].reset()
 
-    def test_step(self, batch: GData, batch_idx: int) -> Optional[torch.Tensor]:
-        return self._shared_step(batch, "test")
+            metrics_task_label = self.metrics_task_label[f"{stage}_metrics"].compute()
+            for name, val in metrics_task_label.items():
+                self.log(
+                    # f"{stage}_{name}",
+                    name,
+                    val,
+                    sync_dist=True,
+                    batch_size=self._get_batch_size(stage),
+                )
+            self.metrics_task_label[f"{stage}_metrics"].reset()
 
-    def predict_step(self, batch: GData, batch_idx: int) -> Dict[str, torch.Tensor]:
-        with torch.no_grad():
-            return self(batch)
+    def _get_batch_size(self, stage: str) -> int:
+        if stage == "train":
+            return self.trainer.train_dataloader.batch_size
+        elif stage == "val":
+            return self.trainer.val_dataloaders.batch_size
+        elif stage == "test":
+            return self.trainer.test_dataloaders.batch_size
+        return 1
+
+    # Define epoch-end handlers
+    # def on_train_epoch_end(self):
+    #     self._log_epoch_metrics("train")
+
+    # def on_validation_epoch_end(self):
+    #     self._log_epoch_metrics("val")
+
+    # def on_test_epoch_end(self):
+    #     self._log_epoch_metrics("test")
+
+    # def _log_epoch_metrics(self, stage: str):
+    #     metrics = self.metrics_common[f"{stage}_metrics"].compute()
+    #     for name, val in metrics.items():
+    #         self.log(f"{stage}_{name}", val, sync_dist=True)
+    #     self.metrics_common[f"{stage}_metrics"].reset()
+
+    #     metrics = self.metrics_task_label[f"{stage}_metrics"].compute()
+    #     for name, val in metrics.items():
+    #         self.log(f"{stage}_{name}", val, sync_dist=True)
+    #     self.metrics_task_label[f"{stage}_metrics"].reset()

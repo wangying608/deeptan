@@ -12,7 +12,9 @@ from deeptan.graph.model import AMSGPMTL
 from torch_geometric.utils import erdos_renyi_graph
 
 import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
+
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
 
 def generate_random_graph(
     num_nodes: int, num_features: int, num_classes: int, is_regression: bool
@@ -61,36 +63,55 @@ def generate_random_graph(
 
 if __name__ == "__main__":
     # 示例：生成训练、验证和测试数据集
+    num_nodes = 5000
+    num_features = 1
+    input_dim = num_features
+    num_label_class = 10
+    is_regression = False
+    batch_size = 8
+    num_workers = 28
+
     train_dataset = [
         generate_random_graph(
-            num_nodes=50, num_features=32, num_classes=10, is_regression=False
+            num_nodes=num_nodes,
+            num_features=num_features,
+            num_classes=10,
+            is_regression=False,
         )
-        for _ in range(100)
+        for _ in range(200)
     ]
     val_dataset = [
         generate_random_graph(
-            num_nodes=50, num_features=32, num_classes=10, is_regression=False
+            num_nodes=num_nodes,
+            num_features=num_features,
+            num_classes=10,
+            is_regression=False,
         )
         for _ in range(20)
     ]
     test_dataset = [
         generate_random_graph(
-            num_nodes=50, num_features=32, num_classes=10, is_regression=False
+            num_nodes=num_nodes,
+            num_features=num_features,
+            num_classes=10,
+            is_regression=False,
         )
         for _ in range(20)
     ]
 
-    train_loader = DataLoader(train_dataset, batch_size=1, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False)
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers
+    )
+    val_loader = DataLoader(
+        val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+    )
 
-    dict_node_names_values = [i for i in range(50)]
-    dict_node_names_keys = [f"node_{i}" for i in range(50)]
+    dict_node_names_values = [i for i in range(num_nodes)]
+    dict_node_names_keys = [f"node_{i}" for i in range(num_nodes)]
     dict_node_names = dict(zip(dict_node_names_keys, dict_node_names_values))
-    # print(dict_node_names)
-    input_dim = 32
-    output_dim = 10
-    is_regression = False
 
     # 打印生成的图数据信息
     print(f"训练集大小: {len(train_dataset)}")
@@ -103,7 +124,7 @@ if __name__ == "__main__":
     model = AMSGPMTL(
         dict_node_names=dict_node_names,
         input_dim=input_dim,
-        output_dim=output_dim,
+        output_dim=num_label_class,
         is_regression=is_regression,
         node_emb_dim=128,
         fusion_dims_node_emb=[256, input_dim],
@@ -122,6 +143,7 @@ if __name__ == "__main__":
     # Initialize the PyTorch Lightning Trainer
     trainer = ltn.Trainer(
         max_epochs=100,
+        precision="16",
         accelerator="auto",
         devices=1,
         logger=True,

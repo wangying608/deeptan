@@ -126,7 +126,7 @@ class NodeEmbedding(nn.Module):
 
     def forward(self, node_names, x, edge_attr, edge_index):
         if isinstance(node_names[0], list):
-            node_names = node_names[0]
+            node_names = [n for sublist in node_names for n in sublist]
 
         # Verify node indices in edge_index
         num_nodes = x.size(0)
@@ -167,24 +167,30 @@ class NodeEmbedding(nn.Module):
 
 class EdgeDecoder(nn.Module):
     r"""
-    Edge reconstruction.
+    Decode the concatenated embeddings to predict edge existence probabilities.
     """
 
     def __init__(self, emb_dim: int):
         super().__init__()
         self.decoder = nn.Sequential(
             nn.Linear(2 * emb_dim, 256),
-            nn.BatchNorm1d(256),
             nn.GELU(),
             nn.Linear(256, 1),
             nn.Sigmoid(),
         )
 
     def forward(self, Hs: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+        # Hs shape: torch.Size([16, 50, 32])
+        # num_nodes_per_graph = Hs.size(1)
+        batch_size = Hs.size(0)
+        Hs_reshape = Hs.reshape(-1, Hs.size(-1))
         src, dst = edge_index
-        concat_ = torch.cat([Hs[src], Hs[dst]], dim=-1)
-        output = self.decoder(concat_)
-        return output  # .squeeze()
+        # print(src.max(), dst.max())#tensor(799, device='cuda:0') tensor(799, device='cuda:0')
+        # concat_ = torch.cat([Hs[:, src, :], Hs[:, dst, :]], dim=-1)
+        concat_ = torch.cat([Hs_reshape[src], Hs_reshape[dst]], dim=-1)
+        edge_probs = self.decoder(concat_)
+        # edge_probs = edge_probs.view(batch_size, -1)
+        return edge_probs
 
 
 class GE_Decoder(nn.Module):
@@ -220,8 +226,10 @@ class GE_Decoder(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, Embedding: nn.Embedding):
-        z_expanded = z.unsqueeze(1).expand(-1, Embedding.num_embeddings).T
-        E = Embedding.weight
+        z_expanded = z.unsqueeze(1).expand(-1, Embedding.num_embeddings, -1)
+        # print("z_expanded shape:", z_expanded.shape)
+        E = Embedding.weight.unsqueeze(0).expand(z.size(0), -1, -1)
+        # print("E shape:", E.shape)
         combined = torch.cat([z_expanded, E], dim=-1)
         h_s = self.ffn_i(combined) + E
         h_s = self.ffn_q(h_s)

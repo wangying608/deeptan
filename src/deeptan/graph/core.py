@@ -5,8 +5,9 @@ AMSGP: Adaptive Multi-Scale Graph Pooling for Graph-Level Representation Learnin
 from typing import List, Dict, Tuple
 import torch
 import torch.nn.functional as F
+# from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
-from torch_geometric.utils import k_hop_subgraph, to_undirected, subgraph
+from torch_geometric.utils import k_hop_subgraph, to_undirected
 from deeptan.graph.modules import WGATLayer, NodeEmbedding, SelfAttPool
 
 
@@ -63,29 +64,56 @@ class AMSGP(torch.nn.Module):
         )
         self.global_att_pool = SelfAttPool(output_dim)
 
-    def forward(self, node_names, x, edge_attr, edge_index):
+    def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Feature regularization
-        x = F.dropout(x, p=self.dropout, training=self.training)
+        # x = F.dropout(x, p=self.dropout, training=self.training)
 
         # Node embedding with layer norm
         h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
         h = F.layer_norm(h, h.size()[1:])
 
-        # Dynamic subgraph generation
-        filtered_edge_index, centrality = self._calculate_dynamic_centrality(
-            h, edge_attr, edge_index
-        )
-        subgraphs = self._generate_multiscale_subgraphs(
-            filtered_edge_index, x.size(0), centrality, h, x.device
-        )
+        # Graph embedding
+        unique_batches = torch.unique(batch)
+        graph_embs = []
 
-        # Fallback for empty subgraphs
-        if not subgraphs:
-            return torch.zeros((x.size(0), self.output_dim_g_emb), device=x.device)
+        for graph_id in unique_batches:
+            # Extract node mask for the current graph
+            mask = batch == graph_id
+            node_indices = torch.where(mask)[0]
 
-        g_emb = self._create_graph_embeddings(subgraphs)
+            # Extract edges for the current graph
+            edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+            sub_edge_index = edge_index[:, edge_mask]
+            # Adjust edge indices to local indices
+            local_node_ids = torch.arange(mask.sum(), device=x.device)
+            global_to_local = torch.zeros(
+                mask.size(0), dtype=torch.long, device=x.device
+            )
+            global_to_local[node_indices] = local_node_ids
+            sub_edge_index = global_to_local[sub_edge_index]
 
-        return g_emb, self.node_embedding_layers.embed
+            # Compute dynamic centrality
+            filtered_edge_index, centrality = self._calculate_dynamic_centrality(
+                h[mask],
+                edge_attr[edge_mask] if edge_attr is not None else None,
+                sub_edge_index,
+            )
+
+            # Generate multiscale subgraphs
+            subgraphs = self._generate_multiscale_subgraphs(
+                filtered_edge_index, mask.sum(), centrality, h[mask], x.device
+            )
+
+            # Create graph embeddings
+            if subgraphs:
+                g_emb = self._create_graph_embeddings(subgraphs)
+                graph_embs.append(g_emb)
+            else:
+                # Process empty subgraph case
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+
+        # Stack all graph embeddings
+        return torch.stack(graph_embs), self.node_embedding_layers.embed
 
     def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
         # Calculate edge importance
@@ -157,16 +185,13 @@ class AMSGP(torch.nn.Module):
 
     def _create_graph_embeddings(self, subgraphs):
         # Process each subgraph
-        pooled = [self._process_subgraph(g) for g in subgraphs]
-        emb_stack = torch.stack(pooled)
+        embs = torch.cat([self._process_subgraph(g) for g in subgraphs], dim=0)
 
         # Build super graph
         super_nodes = GData(
-            x=emb_stack,
+            x=embs,
             edge_index=to_undirected(
-                torch.combinations(
-                    torch.arange(len(subgraphs), device=emb_stack.device)
-                ).t()
+                torch.combinations(torch.arange(len(subgraphs), device=embs.device)).t()
             ),
         )
 
