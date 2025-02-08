@@ -117,19 +117,10 @@ class DeepTAN(ltn.LightningModule):
         recon_node_emb, recon_node_emb_for_loss = self.ge_decoder(z, Embedding)
 
         # Graph-level label prediction
-        if self.hparams.output_g_label_dim is not None:
-            pred_labels = self.g_label_predictor(z)
-            if not self.hparams.is_regression:
-                pred_labels = F.log_softmax(pred_labels, dim=1)
-        else:
-            pred_labels = torch.tensor([0.0, 0.0])
+        pred_labels = self.g_label_predictor(z)
+        if not self.hparams.is_regression:
+            pred_labels = F.log_softmax(pred_labels, dim=1)
 
-        # print(f"\n\nRecon node emb for loss shape: {recon_node_emb_for_loss.shape}\n")
-        # recon_node_emb_for_loss = (
-        #     recon_node_emb_for_loss[:, self.pick_avail_node_in_x(g.node_names), :]
-        #     .contiguous()
-        #     # .view(-1, self.hparams.input_dim)
-        # )
         recon_node_emb_for_loss = torch.cat(
             [
                 recon_node_emb_for_loss[
@@ -160,8 +151,7 @@ class DeepTAN(ltn.LightningModule):
         return self._shared_step(batch, "test")
 
     def predict_step(self, batch: GData, batch_idx: int):
-        with torch.no_grad():
-            return self(batch)
+        return self(batch)
 
     def _shared_step(self, batch: GData, stage: str) -> torch.Tensor:
         outputs = self(batch)
@@ -170,8 +160,10 @@ class DeepTAN(ltn.LightningModule):
         # More loss computation
         if batch.y is not None:
             preds = outputs["label_pred"]
-            targets = torch.as_tensor(batch.y, device=preds.device, dtype=torch.long)
-
+            targets = torch.as_tensor(batch.y, device=preds.device)
+            # print(f"\npreds:\n{preds.shape}\ntargets:{targets.shape}\n")
+            if not self.hparams.is_regression:
+                targets = torch.argmax(targets, dim=1)
             self.metrics_task_label[f"{stage}_metrics"].update(preds, targets)
         # else:
         #     self.metrics_task_label[f"{stage}_metrics"].update(
@@ -296,16 +288,19 @@ class DeepTAN(ltn.LightningModule):
         losses["recon"] = recon_loss + kl_loss
 
         # Graph-level label prediction loss
-        if batch.y is not None:
-            if self.hparams.is_regression:
-                pred_loss = F.mse_loss(outputs["label_pred"], batch.y)
-            else:
-                pred_loss = F.cross_entropy(outputs["label_pred"], batch.y)
-            losses["label"] = pred_loss
+        if batch.y is None:
+            # Placeholder for no label loss
+            losses["label"] = torch.tensor(0.0, device=self.device)
         else:
-            losses["label"] = torch.tensor(
-                0.0, device=self.device
-            )  # Placeholder for no label loss
+            if isinstance(batch.y, torch.Tensor):
+                _y = batch.y
+            else:
+                _y = torch.tensor(batch.y, device=self.device)
+            if self.hparams.is_regression:
+                pred_loss = F.mse_loss(outputs["label_pred"], _y)
+            else:
+                pred_loss = F.cross_entropy(outputs["label_pred"], _y)
+            losses["label"] = pred_loss
 
         # Dynamic weight adjustment
         total_loss = self._balance_losses(losses, stage)
@@ -313,7 +308,7 @@ class DeepTAN(ltn.LightningModule):
 
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
         # Dynamic weight adjustment
-        if stage == "train" and self.current_epoch > 5:
+        if stage == "train":# and self.current_epoch > 5:
             with torch.no_grad():
                 loss_values = torch.stack([losses[k] for k in ["label", "recon"]])
                 task_weights = F.softmax(loss_values / loss_values.mean(), dim=0)

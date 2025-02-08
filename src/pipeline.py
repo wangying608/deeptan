@@ -2,9 +2,11 @@ r"""
 DeepTAN pipelines for fitting, hyperparameter tuning, inference, and testing.
 """
 
+import os
 import argparse
+import pickle
 from deeptan.utils.uni import train_model, time_string
-from deeptan.utils.data import DeepTANDataModule
+from deeptan.utils.data import DeepTANDataModule, DeepTANDataModuleLit
 from deeptan.graph.model import DeepTAN
 
 
@@ -12,13 +14,14 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DeepTAN pipeline for training and testing.")
     
     parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
-    parser.add_argument('--labels', type=str, default=None, help='Path to label data in .parquet format')
+    parser.add_argument('--labels', type=str, default="", help='Path to label data in .parquet format')
     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
     parser.add_argument('--bs', type=int, default=1, help='Batch size for training')
     parser.add_argument('--es_patience', type=int, default=10, help='Early stopping patience')
-    parser.add_argument('--trn_npz', type=str, required=True, help='Path to training data in .npz format')
-    parser.add_argument('--val_parquet', type=str, required=True, help='Path to validation data in .parquet format')
-    parser.add_argument('--tst_parquet', type=str, required=True, help='Path to test data in .parquet format')
+    parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
+    parser.add_argument('--trn_npz', type=str, default="", required=False, help='Path to training data in .npz format')
+    parser.add_argument('--val_parquet', type=str, default="", required=False, help='Path to validation data in .parquet format')
+    parser.add_argument('--tst_parquet', type=str, default="", required=False, help='Path to test data in .parquet format')
     parser.add_argument('--node_emb_dim', type=int, default=128, help='Node embedding dimension')
     parser.add_argument('--fusion_dims_node_emb', nargs='+', type=int, default=[128, 128], help='Fusion dimensions for node embedding')
     parser.add_argument('--output_dim_g_emb', type=int, default=128, help='Output dimension for graph embedding')
@@ -44,16 +47,34 @@ if __name__ == "__main__":
     if args.log_dir.endswith("/"):
         args.log_dir = args.log_dir[:-1]
     args.log_dir = args.log_dir + "_" + time_string()
-    
-    files_fit = {"trn": args.trn_npz, "val": args.val_parquet, "tst": args.tst_parquet}
-    datamodule = DeepTANDataModule(files_fit, args.labels, batch_size=args.bs, device="cpu")
-    datamodule.setup()
+
+    if len(args.litdata) > 0:
+        # Read "others2save.pkl" from args.litdata
+        with open(os.path.join(args.litdata, "others2save.pkl"), "rb") as f:
+            others2save = pickle.load(f)
+        dict_node_names = others2save["dict_node_names"]
+        output_g_label_dim = others2save["output_g_label_dim"]
+        
+        datamodule = DeepTANDataModuleLit(args.litdata, batch_size=args.bs)
+        datamodule.setup()
+    elif len(args.trn_npz) > 0 and len(args.val_parquet) > 0 and len(args.tst_parquet) > 0:
+        if len(args.labels) < 2:
+            labels = None
+        else:
+            labels = args.labels
+        files_fit = {"trn": args.trn_npz, "val": args.val_parquet, "tst": args.tst_parquet}
+        datamodule = DeepTANDataModule(files_fit, labels, batch_size=args.bs)
+        datamodule.setup()
+        dict_node_names = datamodule.dict_node_names
+        output_g_label_dim = datamodule.label_dim
+    else:
+        raise ValueError("Invalid arguments provided. Please check the input data paths and labels.")
 
     # Initialize the model
     model = DeepTAN(
-        dict_node_names=datamodule.dict_node_names,
+        dict_node_names=dict_node_names,
         input_dim=args.input_node_emb_dim,
-        output_g_label_dim=datamodule.label_dim,
+        output_g_label_dim=output_g_label_dim,
         is_regression=args.is_regression,
         node_emb_dim=args.node_emb_dim,
         fusion_dims_node_emb=args.fusion_dims_node_emb,

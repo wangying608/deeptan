@@ -13,14 +13,21 @@ import anndata
 import torch
 from torch_geometric.data import Data as GData
 from torch_geometric.data import Dataset as GDataset
+from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader as GDataLoader
 from torch_geometric.utils import erdos_renyi_graph
 from lightning import LightningDataModule
-from deeptan.utils.uni import get_avail_cpu_count, get_map_location
+from litdata import StreamingDataset, StreamingDataLoader
+from deeptan.utils.uni import get_avail_cpu_count
+
+
+def collate_fn(data_list):
+    batch = Batch.from_data_list(data_list)
+    return batch
 
 
 class NMICGraphDataset(GDataset):
-    def __init__(self, npz_path: str, labels: str | None, device: str):
+    def __init__(self, npz_path: str, labels: str | None):
         """
         Initialize the NMIC graph dataset.
 
@@ -30,7 +37,6 @@ class NMICGraphDataset(GDataset):
             device: Device to store the graph data on.
         """
         super().__init__()
-        self.device = device
         (
             self.edge_attr,
             self.edge_index,
@@ -44,11 +50,9 @@ class NMICGraphDataset(GDataset):
             self.labels = None
             self.label_dim = None
         else:
-            self.labels = (
-                pl.read_parquet(labels)
-                # .filter(pl.col("bc").is_in(self.obs_names))
-                .sort("bc")
-            )
+            self.labels = pl.read_parquet(labels)
+            # .filter(pl.col("bc").is_in(self.obs_names))
+            # .sort("bc")
             self.label_dim = self.labels.shape[1] - 1
 
     def len(self):
@@ -59,9 +63,7 @@ class NMICGraphDataset(GDataset):
         avail_col_indices = np.where(values > 0)[0]
         avail_feat_indices = self.mat_feat_indices[avail_col_indices]
 
-        x = torch.tensor(
-            values[avail_col_indices], dtype=torch.float32, device=self.device
-        ).unsqueeze(1)
+        x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
 
         # Filter edges based on available nodes
         edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(
@@ -80,36 +82,29 @@ class NMICGraphDataset(GDataset):
         for i in range(edge_indices.shape[1]):
             mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(
-            mapped_edge_indices, dtype=torch.long, device=self.device
-        )
+        edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
         edge_attrs = torch.tensor(
-            self.edge_attr[edge_mask], dtype=torch.float32, device=self.device
+            self.edge_attr[edge_mask], dtype=torch.float32
         ).unsqueeze(1)
 
         node_names = [self.node_names[i] for i in avail_col_indices]
 
         # Create the graph data object
         if self.labels is None:
-            graph_data = GData(
-                x=x,
-                edge_index=edge_index,
-                edge_attr=edge_attrs,
-                node_names=node_names,
-            )
+            _y = None
         else:
-            graph_data = GData(
-                x=x,
-                y=torch.tensor(
-                    self.pick_label(self.obs_names[idx]),
-                    dtype=torch.float,
-                    device=self.device,
-                ),
-                edge_index=edge_index,
-                edge_attr=edge_attrs,
-                node_names=node_names,
+            _y = torch.tensor(
+                self.pick_label(self.obs_names[idx]),
+                # dtype=torch.float,
             )
+        graph_data = GData(
+            x=x,
+            y=_y,
+            edge_index=edge_index,
+            edge_attr=edge_attrs,
+            node_names=node_names,
+        )
 
         return graph_data
 
@@ -137,14 +132,18 @@ class NMICGraphDataset(GDataset):
         if self.labels is None:
             return None
         else:
-            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy()
+            _label = (
+                self.labels.filter(pl.col("bc") == obs_name)
+                .drop("bc")
+                .to_numpy()
+                .astype(np.float32)
+            )
             return _label
 
 
 class NMICGraphDatasetRely(GDataset):
-    def __init__(self, parquet_path: str, depGDataset: NMICGraphDataset, device: str):
+    def __init__(self, parquet_path: str, depGDataset: NMICGraphDataset):
         super().__init__()
-        self.device = device
         self.depGDataset = depGDataset
         df = pl.read_parquet(parquet_path)
         self.obs_names = df[df.columns[0]].to_list()
@@ -158,9 +157,7 @@ class NMICGraphDatasetRely(GDataset):
         values = self.selected_mat[idx]
         avail_col_indices = np.where(values > 0)[0]
 
-        x = torch.tensor(
-            values[avail_col_indices], dtype=torch.float32, device=self.device
-        ).unsqueeze(1)
+        x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
 
         avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
         # Filter edges based on available nodes
@@ -180,38 +177,30 @@ class NMICGraphDatasetRely(GDataset):
         for i in range(edge_indices.shape[1]):
             mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(
-            mapped_edge_indices, dtype=torch.long, device=self.device
-        )
+        edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
         edge_attrs = torch.tensor(
             self.depGDataset.edge_attr[edge_mask],
             dtype=torch.float32,
-            device=self.device,
         ).unsqueeze(1)
 
         node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
 
         # Create the graph data object
         if self.depGDataset.labels is None:
-            graph_data = GData(
-                x=x,
-                edge_index=edge_index,
-                edge_attr=edge_attrs,
-                node_names=node_names,
-            )
+            _y = None
         else:
-            graph_data = GData(
-                x=x,
-                y=torch.tensor(
-                    self.depGDataset.pick_label(self.obs_names[idx]),
-                    dtype=torch.float,
-                    device=self.device,
-                ),
-                edge_index=edge_index,
-                edge_attr=edge_attrs,
-                node_names=node_names,
+            _y = torch.tensor(
+                self.depGDataset.pick_label(self.obs_names[idx]),
+                # dtype=torch.float,
             )
+        graph_data = GData(
+            x=x,
+            y=_y,
+            edge_index=edge_index,
+            edge_attr=edge_attrs,
+            node_names=node_names,
+        )
 
         return graph_data
 
@@ -222,8 +211,7 @@ class DeepTANDataModule(LightningDataModule):
         files: dict[str, str],
         labels: str | None,
         batch_size: int,
-        num_workers: int | None = None,
-        device: str | None = None,
+        # num_workers: int | None = None,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:
@@ -233,15 +221,14 @@ class DeepTANDataModule(LightningDataModule):
         self.files = files
         self.labels = labels
         self.batch_size = batch_size
-        self.num_workers = (
-            get_avail_cpu_count(num_workers) if num_workers else get_avail_cpu_count(28)
-        )
-        self.device = get_map_location(device)
+        # self.num_workers = (
+        #     get_avail_cpu_count(num_workers) if num_workers else get_avail_cpu_count(28)
+        # )
 
     def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.device)
-        self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.device)
-        self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.device)
+        self.train = NMICGraphDataset(self.files["trn"], self.labels)
+        self.val = NMICGraphDatasetRely(self.files["val"], self.train)
+        self.test = NMICGraphDatasetRely(self.files["tst"], self.train)
         dict_node_names_values = [i for i in range(len(self.train.node_names))]
         self.dict_node_names = dict(zip(self.train.node_names, dict_node_names_values))
         self.label_dim = self.train.label_dim
@@ -251,8 +238,6 @@ class DeepTANDataModule(LightningDataModule):
             self.train,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
-            persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -260,8 +245,6 @@ class DeepTANDataModule(LightningDataModule):
             self.val,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=True,
         )
 
     def test_dataloader(self):
@@ -269,9 +252,61 @@ class DeepTANDataModule(LightningDataModule):
             self.test,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=True,
         )
+
+
+class DeepTANDataModuleLit(LightningDataModule):
+    def __init__(
+        self,
+        litdata_dir: str,
+        batch_size: int,
+        n_workers: int | None = 1,
+    ):
+        r"""LightningDataModule for training.
+
+        Args:
+            litdata_dir: Directory containing the LitData for "trn", "val", and "tst".
+
+            batch_size: Batch size for dataloader.
+
+            n_workers: Number of workers for dataloader.
+        """
+        super().__init__()
+        self.litdata_dir = litdata_dir
+        self.batch_size = batch_size
+        self.n_workers = (
+            get_avail_cpu_count(n_workers) if n_workers else get_avail_cpu_count(28)
+        )
+
+    def setup(self, stage=None):
+        self.dataloder_trn = StreamingDataLoader(
+            StreamingDataset(os.path.join(self.litdata_dir, "trn")),
+            batch_size=self.batch_size,
+            num_workers=self.n_workers,
+            shuffle=True,
+            collate_fn=collate_fn,
+        )
+        self.dataloader_val = StreamingDataLoader(
+            StreamingDataset(os.path.join(self.litdata_dir, "val")),
+            batch_size=self.batch_size,
+            num_workers=self.n_workers,
+            collate_fn=collate_fn,
+        )
+        self.dataloader_test = StreamingDataLoader(
+            StreamingDataset(os.path.join(self.litdata_dir, "tst")),
+            batch_size=self.batch_size,
+            num_workers=self.n_workers,
+            collate_fn=collate_fn,
+        )
+
+    def train_dataloader(self):
+        return self.dataloder_trn
+
+    def val_dataloader(self):
+        return self.dataloader_val
+
+    def test_dataloader(self):
+        return self.dataloader_test
 
 
 def generate_random_graph(

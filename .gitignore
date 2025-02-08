@@ -19,3 +19,4 @@ comparison/
 profile*.svg
 perf*.svg
 lightning_logs/
+optimized_data/
