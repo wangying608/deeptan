@@ -95,7 +95,7 @@ def train_model(
         max_epochs=max_epochs,
         min_epochs=min_epochs,
         callbacks=[callback_es, callback_ckpt],
-        # num_sanity_val_steps=0,
+        num_sanity_val_steps=0,
         default_root_dir=log_dir,
         gradient_clip_val=1.0,
     )

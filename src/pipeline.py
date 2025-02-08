@@ -12,7 +12,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DeepTAN pipeline for training and testing.")
     
     parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
-    parser.add_argument('--num_label_class', type=int, default=None, help='Number of label classes')
+    parser.add_argument('--labels', type=str, default=None, help='Path to label data in .parquet format')
     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
     parser.add_argument('--bs', type=int, default=1, help='Batch size for training')
     parser.add_argument('--es_patience', type=int, default=10, help='Early stopping patience')
@@ -42,17 +42,18 @@ if __name__ == "__main__":
     args = parse_args()
 
     if args.log_dir.endswith("/"):
-        args.log_dir = args.log_dir[:-1] + time_string()
+        args.log_dir = args.log_dir[:-1]
+    args.log_dir = args.log_dir + "_" + time_string()
     
     files_fit = {"trn": args.trn_npz, "val": args.val_parquet, "tst": args.tst_parquet}
-    datamodule = DeepTANDataModule(files_fit, batch_size=args.bs, device="cpu")
+    datamodule = DeepTANDataModule(files_fit, args.labels, batch_size=args.bs, device="cpu")
     datamodule.setup()
 
     # Initialize the model
     model = DeepTAN(
         dict_node_names=datamodule.dict_node_names,
         input_dim=args.input_node_emb_dim,
-        output_g_label_dim=args.num_label_class,
+        output_g_label_dim=datamodule.label_dim,
         is_regression=args.is_regression,
         node_emb_dim=args.node_emb_dim,
         fusion_dims_node_emb=args.fusion_dims_node_emb,

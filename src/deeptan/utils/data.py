@@ -19,6 +19,261 @@ from lightning import LightningDataModule
 from deeptan.utils.uni import get_avail_cpu_count, get_map_location
 
 
+class NMICGraphDataset(GDataset):
+    def __init__(self, npz_path: str, labels: str | None, device: str):
+        """
+        Initialize the NMIC graph dataset.
+
+        Args:
+            npz_path: Path to the .npz file containing NMIC results.
+            labels: Path to the obs labels.
+            device: Device to store the graph data on.
+        """
+        super().__init__()
+        self.device = device
+        (
+            self.edge_attr,
+            self.edge_index,
+            self.mat,
+            self.mat_feat_indices,
+            self.obs_names,
+            self.node_names,
+        ) = self.read_nmic_results(npz_path)
+
+        if labels is None:
+            self.labels = None
+            self.label_dim = None
+        else:
+            self.labels = (
+                pl.read_parquet(labels)
+                # .filter(pl.col("bc").is_in(self.obs_names))
+                .sort("bc")
+            )
+            self.label_dim = self.labels.shape[1] - 1
+
+    def len(self):
+        return len(self.obs_names)
+
+    def get(self, idx):
+        values: np.ndarray = self.mat[idx]
+        avail_col_indices = np.where(values > 0)[0]
+        avail_feat_indices = self.mat_feat_indices[avail_col_indices]
+
+        x = torch.tensor(
+            values[avail_col_indices], dtype=torch.float32, device=self.device
+        ).unsqueeze(1)
+
+        # Filter edges based on available nodes
+        edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(
+            self.edge_index[1], avail_feat_indices
+        )
+
+        edge_indices = self.edge_index[:, edge_mask]
+
+        # Map edge indices to current feature indices
+        # Create a mapping from original feature indices to current indices
+        feat_index_to_avail_index = {
+            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
+        }
+        # Apply the mapping to edge_indices
+        mapped_edge_indices = edge_indices.copy()
+        for i in range(edge_indices.shape[1]):
+            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
+            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
+        edge_index = torch.tensor(
+            mapped_edge_indices, dtype=torch.long, device=self.device
+        )
+
+        edge_attrs = torch.tensor(
+            self.edge_attr[edge_mask], dtype=torch.float32, device=self.device
+        ).unsqueeze(1)
+
+        node_names = [self.node_names[i] for i in avail_col_indices]
+
+        # Create the graph data object
+        if self.labels is None:
+            graph_data = GData(
+                x=x,
+                edge_index=edge_index,
+                edge_attr=edge_attrs,
+                node_names=node_names,
+            )
+        else:
+            graph_data = GData(
+                x=x,
+                y=torch.tensor(
+                    self.pick_label(self.obs_names[idx]),
+                    dtype=torch.float,
+                    device=self.device,
+                ),
+                edge_index=edge_index,
+                edge_attr=edge_attrs,
+                node_names=node_names,
+            )
+
+        return graph_data
+
+    def read_nmic_results(self, npz_path: str):
+        r"""
+        Read NMIC results from a .npz file and convert them into a graph data.
+        """
+        # Load the NMIC results
+        results = np.load(npz_path)
+        df = pl.read_parquet(npz_path.replace(".npz", ".parquet"))
+
+        # Extract relevant data
+        edge_attr: np.ndarray = results["mi_values"]
+        edge_index: np.ndarray = results["feat_pairs"].T
+        mat: np.ndarray = results["processed_mat"].T
+        mat_feat_indices: np.ndarray = results["mat_feat_indices"]
+
+        # Extract node features (assuming the first column is obs_names)
+        obs_names: List[str] = df.select("obs_names").to_series().to_list()
+        node_names: List[str] = df.columns[1:]
+
+        return edge_attr, edge_index, mat, mat_feat_indices, obs_names, node_names
+
+    def pick_label(self, obs_name: str):
+        if self.labels is None:
+            return None
+        else:
+            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy()
+            return _label
+
+
+class NMICGraphDatasetRely(GDataset):
+    def __init__(self, parquet_path: str, depGDataset: NMICGraphDataset, device: str):
+        super().__init__()
+        self.device = device
+        self.depGDataset = depGDataset
+        df = pl.read_parquet(parquet_path)
+        self.obs_names = df[df.columns[0]].to_list()
+        # Extract relevant data
+        self.selected_mat = df.select(depGDataset.node_names).to_numpy()
+
+    def len(self):
+        return self.selected_mat.shape[0]
+
+    def get(self, idx):
+        values = self.selected_mat[idx]
+        avail_col_indices = np.where(values > 0)[0]
+
+        x = torch.tensor(
+            values[avail_col_indices], dtype=torch.float32, device=self.device
+        ).unsqueeze(1)
+
+        avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
+        # Filter edges based on available nodes
+        edge_mask = np.isin(
+            self.depGDataset.edge_index[0], avail_feat_indices
+        ) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
+
+        edge_indices = self.depGDataset.edge_index[:, edge_mask]
+
+        # Map edge indices to current feature indices
+        # Create a mapping from original feature indices to current indices
+        feat_index_to_avail_index = {
+            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
+        }
+        # Apply the mapping to edge_indices
+        mapped_edge_indices = edge_indices.copy()
+        for i in range(edge_indices.shape[1]):
+            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
+            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
+        edge_index = torch.tensor(
+            mapped_edge_indices, dtype=torch.long, device=self.device
+        )
+
+        edge_attrs = torch.tensor(
+            self.depGDataset.edge_attr[edge_mask],
+            dtype=torch.float32,
+            device=self.device,
+        ).unsqueeze(1)
+
+        node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
+
+        # Create the graph data object
+        if self.depGDataset.labels is None:
+            graph_data = GData(
+                x=x,
+                edge_index=edge_index,
+                edge_attr=edge_attrs,
+                node_names=node_names,
+            )
+        else:
+            graph_data = GData(
+                x=x,
+                y=torch.tensor(
+                    self.depGDataset.pick_label(self.obs_names[idx]),
+                    dtype=torch.float,
+                    device=self.device,
+                ),
+                edge_index=edge_index,
+                edge_attr=edge_attrs,
+                node_names=node_names,
+            )
+
+        return graph_data
+
+
+class DeepTANDataModule(LightningDataModule):
+    def __init__(
+        self,
+        files: dict[str, str],
+        labels: str | None,
+        batch_size: int,
+        num_workers: int | None = None,
+        device: str | None = None,
+    ):
+        super().__init__()
+        if files.keys() != {"trn", "val", "tst"}:
+            raise ValueError("files must contain 'trn', 'val', and 'tst' keys")
+        if not files["trn"].endswith(".npz"):
+            raise ValueError("files['trn'] must be a .npz file")
+        self.files = files
+        self.labels = labels
+        self.batch_size = batch_size
+        self.num_workers = (
+            get_avail_cpu_count(num_workers) if num_workers else get_avail_cpu_count(28)
+        )
+        self.device = get_map_location(device)
+
+    def setup(self, stage=None):
+        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.device)
+        self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.device)
+        self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.device)
+        dict_node_names_values = [i for i in range(len(self.train.node_names))]
+        self.dict_node_names = dict(zip(self.train.node_names, dict_node_names_values))
+        self.label_dim = self.train.label_dim
+
+    def train_dataloader(self):
+        return GDataLoader(
+            self.train,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            persistent_workers=True,
+        )
+
+    def val_dataloader(self):
+        return GDataLoader(
+            self.val,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            persistent_workers=True,
+        )
+
+    def test_dataloader(self):
+        return GDataLoader(
+            self.test,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            persistent_workers=True,
+        )
+
+
 def generate_random_graph(
     num_nodes: int, num_features: int, num_classes: int | None, is_regression: bool
 ) -> GData:
@@ -331,220 +586,3 @@ def read_nmic_results(npz_path: str):
     print(df, "\n")
     print(df.columns)
     # The first column is obs_names, other columns are features.
-
-
-class NMICGraphDataset(GDataset):
-    def __init__(self, npz_path: str, device: str):
-        """
-        Initialize the NMIC graph dataset.
-
-        Args:
-            npz_path: Path to the .npz file containing NMIC results.
-            device: Device to store the graph data on.
-        """
-        super().__init__()
-        self.device = device
-        (
-            self.edge_attr,
-            self.edge_index,
-            self.mat,
-            self.mat_feat_indices,
-            self.obs_names,
-            self.node_names,
-        ) = self.read_nmic_results(npz_path)
-
-    def len(self):
-        return len(self.obs_names)
-
-    def get(self, idx):
-        values: np.ndarray = self.mat[idx]
-        avail_col_indices = np.where(values > 0)[0]
-        avail_feat_indices = self.mat_feat_indices[avail_col_indices]
-
-        x = torch.tensor(
-            values[avail_col_indices], dtype=torch.float32, device=self.device
-        ).unsqueeze(1)
-
-        # Filter edges based on available nodes
-        edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(
-            self.edge_index[1], avail_feat_indices
-        )
-
-        edge_indices = self.edge_index[:, edge_mask]
-
-        # Map edge indices to current feature indices
-        # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {
-            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
-        }
-        # Apply the mapping to edge_indices
-        mapped_edge_indices = edge_indices.copy()
-        for i in range(edge_indices.shape[1]):
-            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
-            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(
-            mapped_edge_indices, dtype=torch.long, device=self.device
-        )
-
-        edge_attrs = torch.tensor(
-            self.edge_attr[edge_mask], dtype=torch.float32, device=self.device
-        ).unsqueeze(1)
-
-        node_names = [self.node_names[i] for i in avail_col_indices]
-
-        # Create the graph data object
-        graph_data = GData(
-            x=x,
-            edge_index=edge_index,
-            edge_attr=edge_attrs,
-            node_names=node_names,
-        )
-
-        return graph_data
-
-    def read_nmic_results(self, npz_path: str):
-        r"""
-        Read NMIC results from a .npz file and convert them into a graph data.
-        """
-        # Load the NMIC results
-        results = np.load(npz_path)
-        df = pl.read_parquet(npz_path.replace(".npz", ".parquet"))
-
-        # Extract relevant data
-        edge_attr: np.ndarray = results["mi_values"]
-        edge_index: np.ndarray = results["feat_pairs"].T
-        mat: np.ndarray = results["processed_mat"].T
-        mat_feat_indices: np.ndarray = results["mat_feat_indices"]
-
-        # Extract node features (assuming the first column is obs_names)
-        obs_names: List[str] = df.select("obs_names").to_series().to_list()
-        node_names: List[str] = df.columns[1:]
-
-        return edge_attr, edge_index, mat, mat_feat_indices, obs_names, node_names
-
-
-class NMICGraphDatasetRely(GDataset):
-    def __init__(self, parquet_path: str, depGDataset: NMICGraphDataset, device: str):
-        super().__init__()
-        self.device = device
-        self.depGDataset = depGDataset
-        df = pl.read_parquet(parquet_path)
-        # Extract relevant data
-        self.selected_mat = df.select(depGDataset.node_names).to_numpy()
-
-    def len(self):
-        return self.selected_mat.shape[0]
-
-    def get(self, idx):
-        values = self.selected_mat[idx]
-        avail_col_indices = np.where(values > 0)[0]
-
-        x = torch.tensor(
-            values[avail_col_indices], dtype=torch.float32, device=self.device
-        ).unsqueeze(1)
-
-        avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
-        # Filter edges based on available nodes
-        edge_mask = np.isin(
-            self.depGDataset.edge_index[0], avail_feat_indices
-        ) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
-
-        edge_indices = self.depGDataset.edge_index[:, edge_mask]
-
-        # Map edge indices to current feature indices
-        # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {
-            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
-        }
-        # Apply the mapping to edge_indices
-        mapped_edge_indices = edge_indices.copy()
-        for i in range(edge_indices.shape[1]):
-            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
-            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(
-            mapped_edge_indices, dtype=torch.long, device=self.device
-        )
-
-        edge_attrs = torch.tensor(
-            self.depGDataset.edge_attr[edge_mask],
-            dtype=torch.float32,
-            device=self.device,
-        ).unsqueeze(1)
-
-        node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
-
-        # Create the graph data object
-        graph_data = GData(
-            x=x,
-            edge_index=edge_index,
-            edge_attr=edge_attrs,
-            node_names=node_names,
-        )
-
-        return graph_data
-
-
-class DeepTANDataModule(LightningDataModule):
-    def __init__(
-        self,
-        files: dict[str, str],
-        batch_size: int,
-        num_workers: int | None = None,
-        device: str | None = None,
-    ):
-        super().__init__()
-        if files.keys() != {"trn", "val", "tst"}:
-            raise ValueError("files must contain 'trn', 'val', and 'tst' keys")
-        if not files["trn"].endswith(".npz"):
-            raise ValueError("files['trn'] must be a .npz file")
-        self.files = files
-        self.batch_size = batch_size
-        self.num_workers = (
-            get_avail_cpu_count(num_workers) if num_workers else get_avail_cpu_count(28)
-        )
-        self.device = get_map_location(device)
-
-    def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.device)
-        self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.device)
-        self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.device)
-        dict_node_names_values = [i for i in range(len(self.train.node_names))]
-        self.dict_node_names = dict(zip(self.train.node_names, dict_node_names_values))
-
-    def train_dataloader(self):
-        return GDataLoader(
-            self.train,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            persistent_workers=True,
-        )
-
-    def val_dataloader(self):
-        return GDataLoader(
-            self.val,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=True,
-        )
-
-    def test_dataloader(self):
-        return GDataLoader(
-            self.test,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=True,
-        )
-
-
-# if __name__ == "__main__":
-#     # Read npz file
-#     path_npz = "/mnt/hdd2/homext/wuch/xn2p/data/raw_df/scMultiome/GSE235510_control_split/nmic_g/split_seed_47_0.parquet.npz"
-#     # read_nmic_results(path_npz)
-#     g_dataset = NMICGraphDataset(path_npz, "cuda")
-
-#     print(len(g_dataset))
-#     print(g_dataset[666])
-#     print(g_dataset[4999])
