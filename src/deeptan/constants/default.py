@@ -1,7 +1,7 @@
 r"""
 Default values.
 """
-# from os import getenv
+
 from os import getenv
 from numpy import ceil
 from multiprocessing import cpu_count

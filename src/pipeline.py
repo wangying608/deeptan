@@ -2,163 +2,77 @@ r"""
 DeepTAN pipelines for fitting, hyperparameter tuning, inference, and testing.
 """
 
-import torch
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader
-import lightning as ltn
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
-from lightning.pytorch.loggers import TensorBoardLogger
-from deeptan.graph.model import AMSGPMTL
-from torch_geometric.utils import erdos_renyi_graph
-
-import os
-
-os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+import argparse
+from deeptan.utils.uni import train_model, time_string
+from deeptan.utils.data import DeepTANDataModule
+from deeptan.graph.model import DeepTAN
 
 
-def generate_random_graph(
-    num_nodes: int, num_features: int, num_classes: int, is_regression: bool
-) -> Data:
-    """
-    生成一个随机的图数据对象。
-
-    参数:
-        num_nodes (int): 图中的节点数量。
-        num_features (int): 每个节点的特征维度。
-        num_classes (int): 类别数量（用于分类任务）或输出维度（用于回归任务）。
-        is_regression (bool): 是否为回归任务。
-
-    返回:
-        Data: 随机生成的图数据对象。
-    """
-    # 随机生成节点特征
-    x = torch.randn(num_nodes, num_features)  # 节点特征矩阵 (num_nodes, num_features)
-
-    # 随机生成边索引 (使用 Erdős-Rényi 模型生成随机图)
-    edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.2)  # 边索引 (2, num_edges)
-
-    # 随机生成边属性
-    edge_attr = torch.rand(edge_index.size(1), 1)  # 边属性矩阵 (num_edges, 1)
-
-    # 随机生成节点名称 (假设节点名称为字符串)
-    node_names = [f"node_{i}" for i in range(num_nodes)]
-
-    # 随机生成标签
-    if is_regression:
-        y = torch.rand(1)  # 回归任务标签 (num_nodes, output_dim)
-    else:
-        y = torch.randint(0, num_classes, (1,))  # 分类任务标签 (num_nodes,)
-
-    # 创建图数据对象
-    graph_data = Data(
-        x=x,
-        edge_index=edge_index,
-        edge_attr=edge_attr,
-        y=y,
-        node_names=node_names,
-    )
-
-    return graph_data
+def parse_args():
+    parser = argparse.ArgumentParser(description="DeepTAN pipeline for training and testing.")
+    
+    parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
+    parser.add_argument('--num_label_class', type=int, default=None, help='Number of label classes')
+    parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
+    parser.add_argument('--bs', type=int, default=1, help='Batch size for training')
+    parser.add_argument('--es_patience', type=int, default=10, help='Early stopping patience')
+    parser.add_argument('--trn_npz', type=str, required=True, help='Path to training data in .npz format')
+    parser.add_argument('--val_parquet', type=str, required=True, help='Path to validation data in .parquet format')
+    parser.add_argument('--tst_parquet', type=str, required=True, help='Path to test data in .parquet format')
+    parser.add_argument('--node_emb_dim', type=int, default=128, help='Node embedding dimension')
+    parser.add_argument('--fusion_dims_node_emb', nargs='+', type=int, default=[128, 128], help='Fusion dimensions for node embedding')
+    parser.add_argument('--output_dim_g_emb', type=int, default=128, help='Output dimension for graph embedding')
+    parser.add_argument('--n_hop', type=int, default=2, help='Number of hops')
+    parser.add_argument('--threshold_edge_exist', type=float, default=0.1, help='Threshold for edge existence')
+    parser.add_argument('--threshold_subgraph_overlap', type=float, default=0.9, help='Threshold for subgraph overlap')
+    parser.add_argument('--heads_node_emb', type=int, default=1, help='Number of heads for node embedding')
+    parser.add_argument('--heads_pooling', type=int, default=2, help='Number of heads for pooling')
+    parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
+    parser.add_argument('--lr', type=float, default=1e-5, help='Learning rate')
+    parser.add_argument('--negative_slope', type=float, default=0.2, help='Negative slope for LeakyReLU')
+    parser.add_argument('--alpha', type=float, default=0.7, help='Alpha for balancing loss terms')
+    parser.add_argument('--max_epochs', type=int, default=1000, help='Maximum number of epochs')
+    parser.add_argument('--min_epochs', type=int, default=10, help='Minimum number of epochs')
+    parser.add_argument('--log_dir', type=str, default=".tmp_logs", help='Directory for logging')
+    
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # 示例：生成训练、验证和测试数据集
-    num_nodes = 5000
-    num_features = 1
-    input_dim = num_features
-    num_label_class = 10
-    is_regression = False
-    batch_size = 8
-    num_workers = 28
+    args = parse_args()
 
-    train_dataset = [
-        generate_random_graph(
-            num_nodes=num_nodes,
-            num_features=num_features,
-            num_classes=10,
-            is_regression=False,
-        )
-        for _ in range(200)
-    ]
-    val_dataset = [
-        generate_random_graph(
-            num_nodes=num_nodes,
-            num_features=num_features,
-            num_classes=10,
-            is_regression=False,
-        )
-        for _ in range(20)
-    ]
-    test_dataset = [
-        generate_random_graph(
-            num_nodes=num_nodes,
-            num_features=num_features,
-            num_classes=10,
-            is_regression=False,
-        )
-        for _ in range(20)
-    ]
-
-    train_loader = DataLoader(
-        train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers
-    )
-    val_loader = DataLoader(
-        val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
-    )
-    test_loader = DataLoader(
-        test_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
-    )
-
-    dict_node_names_values = [i for i in range(num_nodes)]
-    dict_node_names_keys = [f"node_{i}" for i in range(num_nodes)]
-    dict_node_names = dict(zip(dict_node_names_keys, dict_node_names_values))
-
-    # 打印生成的图数据信息
-    print(f"训练集大小: {len(train_dataset)}")
-    print(f"验证集大小: {len(val_dataset)}")
-    print(f"测试集大小: {len(test_dataset)}")
-    print(f"单个图的节点数量: {train_dataset[0].num_nodes}")
-    print(f"单个图的边数量: {train_dataset[0].edge_index.size(1)}")
+    if args.log_dir.endswith("/"):
+        args.log_dir = args.log_dir[:-1] + time_string()
+    
+    files_fit = {"trn": args.trn_npz, "val": args.val_parquet, "tst": args.tst_parquet}
+    datamodule = DeepTANDataModule(files_fit, batch_size=args.bs, device="cpu")
+    datamodule.setup()
 
     # Initialize the model
-    model = AMSGPMTL(
-        dict_node_names=dict_node_names,
-        input_dim=input_dim,
-        output_dim=num_label_class,
-        is_regression=is_regression,
-        node_emb_dim=128,
-        fusion_dims_node_emb=[256, input_dim],
-        output_dim_g_emb=128,
-        n_hop=2,
-        threshold_edge_exist=0.1,
-        threshold_subgraph_overlap=0.9,
-        n_heads_node_emb=4,
-        n_heads_pooling=4,
-        dropout=0.2,
-        lr=1e-3,
-        negative_slope=0.2,
-        alpha=0.7,
+    model = DeepTAN(
+        dict_node_names=datamodule.dict_node_names,
+        input_dim=args.input_node_emb_dim,
+        output_g_label_dim=args.num_label_class,
+        is_regression=args.is_regression,
+        node_emb_dim=args.node_emb_dim,
+        fusion_dims_node_emb=args.fusion_dims_node_emb,
+        output_dim_g_emb=args.output_dim_g_emb,
+        n_hop=args.n_hop,
+        threshold_edge_exist=args.threshold_edge_exist,
+        threshold_subgraph_overlap=args.threshold_subgraph_overlap,
+        n_heads_node_emb=args.heads_node_emb,
+        n_heads_pooling=args.heads_pooling,
+        dropout=args.dropout,
+        lr=args.lr,
+        negative_slope=args.negative_slope,
+        alpha=args.alpha,
     )
 
-    # Initialize the PyTorch Lightning Trainer
-    trainer = ltn.Trainer(
-        max_epochs=100,
-        precision="16",
-        accelerator="auto",
-        devices=1,
-        logger=True,
-        enable_checkpointing=True,
-        callbacks=[
-            EarlyStopping(monitor="val_total", patience=10, mode="min"),
-            ModelCheckpoint(monitor="val_total", mode="min"),
-        ],
+    train_model(
+        model=model,
+        datamodule=datamodule,
+        es_patience=args.es_patience,
+        max_epochs=args.max_epochs,
+        min_epochs=args.min_epochs,
+        log_dir=args.log_dir,
     )
-
-    # Train the model
-    trainer.fit(model, train_loader, val_loader)
-
-    # Test the model
-    trainer.test(model, dataloaders=test_loader)
-
-    # Optionally, you can save the trained model
-    torch.save(model.state_dict(), "amsgp_mtl_model.pth")

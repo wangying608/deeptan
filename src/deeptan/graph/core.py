@@ -5,14 +5,15 @@ AMSGP: Adaptive Multi-Scale Graph Pooling for Graph-Level Representation Learnin
 from typing import List, Dict, Tuple
 import torch
 import torch.nn.functional as F
-# from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 from deeptan.graph.modules import WGATLayer, NodeEmbedding, SelfAttPool
 
 
 class AMSGP(torch.nn.Module):
-    r"""Enhanced Adaptive Multi-Scale Graph Pooling with dynamic subgraph sampling."""
+    r"""
+    Adaptive Multi-Scale Graph Pooling.
+    """
 
     def __init__(
         self,
@@ -29,6 +30,22 @@ class AMSGP(torch.nn.Module):
         negative_slope: float,
         dropout: float = 0.2,
     ):
+        r"""
+        Initialize the AMSGP model.
+        Args:
+            dict_node_names: A dictionary mapping node names to their indices.
+            input_dim: The dimension of the input node features.
+            node_emb_dim: The dimension of the node embeddings.
+            fusion_dims_node_emb: A list of dimensions for the fusion layers in the node embedding.
+            n_heads_node_emb: The number of attention heads for the node embedding.
+            output_dim_g_emb: The dimension of the output graph embedding.
+            n_heads_pooling: The number of attention heads for the pooling layers.
+            n_hop: The number of hops for subgraph extraction.
+            threshold_edge_exist: The threshold for edge existence in subgraphs.
+            threshold_subgraph_overlap: The threshold for subgraph overlap.
+            negative_slope: The negative slope for the LeakyReLU activation.
+            dropout: The dropout rate for the model.
+        """
         super().__init__()
         self.dict_node_names = dict_node_names
         self.output_dim_g_emb = output_dim_g_emb
@@ -37,7 +54,7 @@ class AMSGP(torch.nn.Module):
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.dropout = dropout
 
-        # Enhanced node embedding with dropout
+        # Node embedding
         self.node_embedding_layers = NodeEmbedding(
             input_dim,
             node_emb_dim,
@@ -45,7 +62,6 @@ class AMSGP(torch.nn.Module):
             dict_node_names,
             n_heads_node_emb,
             negative_slope,
-            dropout,
         )
 
         # Multi-scale pooling architecture
@@ -65,9 +81,6 @@ class AMSGP(torch.nn.Module):
         self.global_att_pool = SelfAttPool(output_dim)
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
-        # Feature regularization
-        # x = F.dropout(x, p=self.dropout, training=self.training)
-
         # Node embedding with layer norm
         h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
         h = F.layer_norm(h, h.size()[1:])
@@ -86,9 +99,7 @@ class AMSGP(torch.nn.Module):
             sub_edge_index = edge_index[:, edge_mask]
             # Adjust edge indices to local indices
             local_node_ids = torch.arange(mask.sum(), device=x.device)
-            global_to_local = torch.zeros(
-                mask.size(0), dtype=torch.long, device=x.device
-            )
+            global_to_local = torch.zeros_like(mask, dtype=torch.long, device=x.device)
             global_to_local[node_indices] = local_node_ids
             sub_edge_index = global_to_local[sub_edge_index]
 
@@ -113,7 +124,7 @@ class AMSGP(torch.nn.Module):
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
 
         # Stack all graph embeddings
-        return torch.stack(graph_embs), self.node_embedding_layers.embed
+        return torch.stack(graph_embs)
 
     def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
         # Calculate edge importance
@@ -161,21 +172,19 @@ class AMSGP(torch.nn.Module):
             subg_edge_local = node_mapping[subg_edge_idx]
 
             # Skip isolated nodes or invalid subgraphs
-            if len(subset) < 2 or subg_edge_local.size(1) == 0:
-                continue
-
-            subgraphs.append(
-                GData(
-                    x=h[subset],
-                    edge_index=subg_edge_local,
-                    center_node=node_idx,
-                    node_idx=subset,
+            if len(subset) >= 2 and subg_edge_local.size(1) > 0:
+                subgraphs.append(
+                    GData(
+                        x=h[subset],
+                        edge_index=subg_edge_local,
+                        center_node=node_idx,
+                        node_idx=subset,
+                    )
                 )
-            )
 
         # Node coverage-based merging
-        merged = []
         coverage = torch.zeros(num_nodes, device=device)
+        merged = []
         for subg in sorted(subgraphs, key=lambda x: -x.num_nodes):
             overlap = coverage[subg.node_idx].mean()
             if overlap < self.threshold_subgraph_overlap:

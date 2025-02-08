@@ -1,5 +1,5 @@
 r"""
-Enhanced modules for multi-scale graph processing.
+Modules for DeepTAN.
 """
 
 from typing import Dict, List
@@ -10,6 +10,10 @@ from torch_geometric.nn import MessagePassing
 
 
 class WGATLayer(MessagePassing):
+    r"""
+    (NMIC) Weighted Graph Attention Layer.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -18,6 +22,16 @@ class WGATLayer(MessagePassing):
         num_heads: int,
         dropout: float = 0.1,
     ):
+        r"""
+        Initialize the Weighted Graph Attention Layer.
+
+        Args:
+            input_dim: The dimension of the input embeddings.
+            output_dim: The dimension of the output embeddings.
+            negative_slope: The negative slope of the LeakyReLU activation.
+            num_heads: The number of attention heads.
+            dropout: The dropout probability for the attention weights.
+        """
         super().__init__(aggr="add")
         self.output_dim = output_dim
         self.num_heads = num_heads
@@ -71,6 +85,10 @@ class WGATLayer(MessagePassing):
 
 
 class NodeEmbedding(nn.Module):
+    r"""
+    For node embedding.
+    """
+
     def __init__(
         self,
         input_dim: int,
@@ -78,9 +96,20 @@ class NodeEmbedding(nn.Module):
         fusion_dims: List[int],
         dict_node_names: Dict[str, int],
         n_heads: int,
-        negative_slope: float,
+        negative_slope: float = 0.2,
         dropout: float = 0.2,
     ):
+        r"""
+        Embedding nodes in a graph like embedding words in a sentence.
+
+        Args:
+            input_dim: Dimension of input features.
+            embedding_dim: Dimension of the embedding.
+            fusion_dims: Dimensions for the fusion (fusing observation value and inherent feature) layers.
+            dict_node_names: Dictionary mapping node names to indices.
+            n_heads: Number of attention heads.
+            negative_slope: Negative slope for the LeakyReLU activation.
+        """
         super().__init__()
         self.input_dim = input_dim
         self.embedding_dim = embedding_dim
@@ -129,10 +158,10 @@ class NodeEmbedding(nn.Module):
             node_names = [n for sublist in node_names for n in sublist]
 
         # Verify node indices in edge_index
-        num_nodes = x.size(0)
-        assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), (
-            "Invalid edge indices detected"
-        )
+        # num_nodes = x.size(0)
+        # assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), (
+        #     "Invalid edge indices detected"
+        # )
 
         # Initial embeddings
         ids = torch.tensor(
@@ -165,34 +194,6 @@ class NodeEmbedding(nn.Module):
         return emb
 
 
-class EdgeDecoder(nn.Module):
-    r"""
-    Decode the concatenated embeddings to predict edge existence probabilities.
-    """
-
-    def __init__(self, emb_dim: int):
-        super().__init__()
-        self.decoder = nn.Sequential(
-            nn.Linear(2 * emb_dim, 256),
-            nn.GELU(),
-            nn.Linear(256, 1),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, Hs: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        # Hs shape: torch.Size([16, 50, 32])
-        # num_nodes_per_graph = Hs.size(1)
-        batch_size = Hs.size(0)
-        Hs_reshape = Hs.reshape(-1, Hs.size(-1))
-        src, dst = edge_index
-        # print(src.max(), dst.max())#tensor(799, device='cuda:0') tensor(799, device='cuda:0')
-        # concat_ = torch.cat([Hs[:, src, :], Hs[:, dst, :]], dim=-1)
-        concat_ = torch.cat([Hs_reshape[src], Hs_reshape[dst]], dim=-1)
-        edge_probs = self.decoder(concat_)
-        # edge_probs = edge_probs.view(batch_size, -1)
-        return edge_probs
-
-
 class GE_Decoder(nn.Module):
     r"""
     Graph Embedding Decoder for reconstructing node features from latent representations (biological state-specific embeddings).
@@ -215,29 +216,37 @@ class GE_Decoder(nn.Module):
         self.ffn_i = nn.Sequential(
             nn.Linear(z_dim + h_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
+            nn.Mish(),
             nn.Linear(hidden_dim, h_dim),
         )
         self.ffn_q = nn.Sequential(
             nn.Linear(h_dim, hidden_dim),
             nn.LayerNorm(hidden_dim),
-            nn.GELU(),
+            nn.Mish(),
             nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, z: torch.Tensor, Embedding: nn.Embedding):
         z_expanded = z.unsqueeze(1).expand(-1, Embedding.num_embeddings, -1)
-        # print("z_expanded shape:", z_expanded.shape)
         E = Embedding.weight.unsqueeze(0).expand(z.size(0), -1, -1)
-        # print("E shape:", E.shape)
         combined = torch.cat([z_expanded, E], dim=-1)
         h_s = self.ffn_i(combined) + E
-        h_s = self.ffn_q(h_s)
-        return h_s
+        h_ = self.ffn_q(h_s)
+        return h_s, h_
 
 
 class GLabelPredictor(nn.Module):
+    r"""
+    A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
+    """
+
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int]):
+        r"""
+        Args:
+            input_dim: The input dimension.
+            output_dim: The output dimension.
+            hidden_dims: The hidden dimensions of the feedforward network.
+        """
         super().__init__()
         layers = []
         for dim in hidden_dims:
@@ -256,7 +265,16 @@ class GLabelPredictor(nn.Module):
 
 
 class SelfAttPool(nn.Module):
+    r"""
+    Self-attention pooling layer.
+    This layer performs self-attention on the input tensor and then pools the results by taking the mean.
+    """
+
     def __init__(self, dim: int):
+        r"""Initialize the Self-attention pooling layer.
+        Args:
+            dim: The dimension of the input tensor.
+        """
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
