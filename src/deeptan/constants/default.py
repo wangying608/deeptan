@@ -12,7 +12,7 @@ negative_slope = 0.2
 node_feature_dim = 32
 hidden_dim_dyn_cen = 64
 
-matmul_precision = "high"
+matmul_precision = "medium"
 accelerator = "auto"
 devices = "auto"
 

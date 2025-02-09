@@ -2,16 +2,16 @@ r"""
 Universal functions.
 """
 
-# import os
 import time
 import random
-# import shortuuid
 import string
-from typing import Optional, Union, List, Dict, Any
-# import numpy as np
-# import polars as pl
+from typing import Optional, Any
 from lightning import Trainer, LightningDataModule
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    StochasticWeightAveraging,
+)
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
@@ -94,7 +94,7 @@ def train_model(
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
-        callbacks=[callback_es, callback_ckpt],
+        callbacks=[callback_es, callback_ckpt, StochasticWeightAveraging(swa_lrs=1e-2)],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
         gradient_clip_val=1.0,

@@ -6,6 +6,7 @@ from typing import Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import MessagePassing
 
 
@@ -56,8 +57,11 @@ class WGATLayer(MessagePassing):
 
     def message(self, x_i, x_j, edge_attr):
         # Compute attention scores per head
-        h = torch.cat([x_i, x_j], -1) @ self.W  # [E, num_heads * output_dim]
-        h = h.view(-1, self.num_heads, self.output_dim)  # [E, num_heads, output_dim]
+        # h = torch.cat([x_i, x_j], -1) @ self.W  # [E, num_heads * output_dim]
+        # h = h.view(-1, self.num_heads, self.output_dim)  # [E, num_heads, output_dim]
+        h = (torch.cat([x_i, x_j], -1) @ self.W).view(
+            -1, self.num_heads, self.output_dim
+        )
 
         # Calculate attention coefficients [E, num_heads]
         e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
@@ -165,12 +169,10 @@ class NodeEmbedding(nn.Module):
 
         # Initial embeddings
         ids = torch.tensor(
-            # [self.dict_node_names.get(n, -1) for n in node_names],
             [self.dict_node_names[n] for n in node_names],
             dtype=torch.long,
             device=x.device,
         )
-        # assert -1 not in ids, "Some node names are not in dict_node_names"
 
         E_i = self.embed(ids)
         x_mlp1 = self.mlp1(x)
@@ -180,13 +182,14 @@ class NodeEmbedding(nn.Module):
 
         # Multi-scale processing
         skips = []
-        for i, layer in enumerate(self.layers):
-            emb = layer(emb, edge_index, edge_attr)
-            if self.skips and i < len(self.skips):
-                skips.append(self.skips[i](emb))
-
-        # Skip fusion
         if self.skips:
+            for i, layer in enumerate(self.layers):
+                # emb = layer(emb, edge_index, edge_attr)
+                emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
+                if i < len(self.skips):
+                    skips.append(self.skips[i](emb))
+
+            # Skip fusion
             emb = emb + torch.stack(skips).mean(dim=0)
 
         # emb = F.layer_norm(emb, emb.shape)

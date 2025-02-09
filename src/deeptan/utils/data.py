@@ -284,12 +284,14 @@ class DeepTANDataModuleLit(LightningDataModule):
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             shuffle=True,
+            pin_memory=True,
             collate_fn=collate_fn,
         )
         self.dataloader_val = StreamingDataLoader(
             StreamingDataset(os.path.join(self.litdata_dir, "val")),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
+            pin_memory=True,
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(

@@ -5,7 +5,7 @@ DeepTAN pipelines for fitting, hyperparameter tuning, inference, and testing.
 import os
 import argparse
 import pickle
-from deeptan.utils.uni import train_model, time_string
+from deeptan.utils.uni import train_model, time_string, random_string
 from deeptan.utils.data import DeepTANDataModule, DeepTANDataModuleLit
 from deeptan.graph.model import DeepTAN
 
@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     if args.log_dir.endswith("/"):
         args.log_dir = args.log_dir[:-1]
-    args.log_dir = args.log_dir + "_" + time_string()
+    args.log_dir = args.log_dir + "_" + time_string() + "_" + random_string(5)
 
     if len(args.litdata) > 0:
         # Read "others2save.pkl" from args.litdata

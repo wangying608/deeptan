@@ -5,6 +5,7 @@ AMSGP: Adaptive Multi-Scale Graph Pooling for Graph-Level Representation Learnin
 from typing import List, Dict, Tuple
 import torch
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 from deeptan.graph.modules import WGATLayer, NodeEmbedding, SelfAttPool
@@ -82,7 +83,8 @@ class AMSGP(torch.nn.Module):
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
-        h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+        # h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+        h = checkpoint(self.node_embedding_layers, node_names, x, edge_attr, edge_index, use_reentrant=False)
         h = F.layer_norm(h, h.size()[1:])
 
         # Graph embedding
@@ -117,7 +119,8 @@ class AMSGP(torch.nn.Module):
 
             # Create graph embeddings
             if subgraphs:
-                g_emb = self._create_graph_embeddings(subgraphs)
+                # g_emb = self._create_graph_embeddings(subgraphs)
+                g_emb = checkpoint(self._create_graph_embeddings, subgraphs, use_reentrant=False)
                 graph_embs.append(g_emb)
             else:
                 # Process empty subgraph case

@@ -17,7 +17,7 @@ from torchmetrics.classification import (
     MulticlassAUROC,
     MulticlassPrecision,
     MulticlassRecall,
-    MatthewsCorrCoef,
+    # MatthewsCorrCoef,
 )
 from torchmetrics.regression import (
     MeanAbsoluteError,
@@ -112,6 +112,7 @@ class DeepTAN(ltn.LightningModule):
             edge_index=g.edge_index,
             batch=node_batch,
         )
+
         Embedding = self.amsgp.node_embedding_layers.embed
 
         recon_node_emb, recon_node_emb_for_loss = self.ge_decoder(z, Embedding)
@@ -121,14 +122,13 @@ class DeepTAN(ltn.LightningModule):
         if not self.hparams.is_regression:
             pred_labels = F.log_softmax(pred_labels, dim=1)
 
-        recon_node_emb_for_loss = torch.cat(
-            [
-                recon_node_emb_for_loss[
-                    i, self.pick_avail_node_in_x(g.node_names[i]), :
-                ].contiguous()
-                for i in range(len(g.node_names))
-            ]
-        )
+        recon_node_emb_for_loss_list = [
+            recon_node_emb_for_loss[
+                i, self.pick_avail_node_in_x(g.node_names[i]), :
+            ].contiguous()
+            for i in range(len(g.node_names))
+        ]
+        recon_node_emb_for_loss = torch.cat(recon_node_emb_for_loss_list)
 
         return {
             "embedding": z,
@@ -184,23 +184,33 @@ class DeepTAN(ltn.LightningModule):
         total_steps = max(total_steps, 1)
         warmup_steps = max(1, int(total_steps * 0.1))
         T_max = max(1, total_steps - warmup_steps)
+
+        # Define the warmup scheduler
+        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
+            opt, lr_lambda=lambda step: min(step / warmup_steps, 1.0)
+        )
+
+        # Define the cosine annealing scheduler
+        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=T_max, eta_min=self.hparams.lr / 100
+        )
+
+        # Combine the schedulers
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            opt,
+            schedulers=[warmup_scheduler, cosine_scheduler],
+            milestones=[warmup_steps],
+        )
+
+        # Ensure the optimizer is stepped before the scheduler
+        def scheduler_step(epoch, batch_idx, optimizer, scheduler):
+            optimizer.step()
+            scheduler.step()
+
         return {
             "optimizer": opt,
             "lr_scheduler": {
-                "scheduler": torch.optim.lr_scheduler.SequentialLR(
-                    opt,
-                    schedulers=[
-                        torch.optim.lr_scheduler.LambdaLR(
-                            opt, lr_lambda=lambda step: min(step / warmup_steps, 1.0)
-                        ),
-                        torch.optim.lr_scheduler.CosineAnnealingLR(
-                            opt,
-                            T_max=T_max,
-                            eta_min=self.hparams.lr / 100,
-                        ),
-                    ],
-                    milestones=[warmup_steps],
-                ),
+                "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
             },
@@ -250,9 +260,9 @@ class DeepTAN(ltn.LightningModule):
                     "AUC": MulticlassAUROC(
                         num_classes=self.output_dim, average="macro"
                     ),
-                    "MCC": MatthewsCorrCoef(
-                        task="multiclass", num_classes=self.output_dim
-                    ),
+                    # "MCC": MatthewsCorrCoef(
+                    #     task="multiclass", num_classes=self.output_dim
+                    # ),
                 }
             )
 
@@ -308,7 +318,7 @@ class DeepTAN(ltn.LightningModule):
 
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
         # Dynamic weight adjustment
-        if stage == "train":# and self.current_epoch > 5:
+        if stage == "train":  # and self.current_epoch > 5:
             with torch.no_grad():
                 loss_values = torch.stack([losses[k] for k in ["label", "recon"]])
                 task_weights = F.softmax(loss_values / loss_values.mean(), dim=0)
