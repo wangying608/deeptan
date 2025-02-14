@@ -16,10 +16,10 @@ if __name__ == "__main__":
     for _key in adata.obs.keys():
         print(f"\n{_key}:")
         print(adata.obs[_key].value_counts())
-    
-    if 'Celltype' in adata.obs.keys():
+
+    if "Celltype" in adata.obs.keys():
         print("\nCelltype:")
-        print(type(adata.obs['Celltype']))
+        print(type(adata.obs["Celltype"]))
 
     # The key "Orig.ident" denotes experiments (replicates)
     # See if these experiments has batch effects

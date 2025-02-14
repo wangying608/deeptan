@@ -122,9 +122,9 @@ class DeepTAN(ltn.LightningModule):
             batch=node_batch,
         )
 
-        Embedding = self.amsgp.node_embedding_layers.embed
-
-        recon_node_emb, recon_node_emb_for_loss_all = self.ge_decoder(z, Embedding)
+        recon_node_emb, recon_node_emb_for_loss_all = self.ge_decoder(
+            z, self.amsgp.node_embedding_layers.embed
+        )
 
         # Graph-level label prediction
         pred_labels = self.g_label_predictor(z)
@@ -141,20 +141,20 @@ class DeepTAN(ltn.LightningModule):
         recon_node_emb_for_loss = torch.cat(recon_node_emb_for_loss_list)
 
         # Node-level reconstruction loss for zeros
-        recon_node_emb_for_loss_list = [
-            recon_node_emb_for_loss_all[
-                i, self.pick_unavail_node_in_x(g.node_names[i]), :
-            ].contiguous()
-            for i in range(len(g.node_names))
-        ]
-        recon_node_emb_for_loss_zeros = torch.cat(recon_node_emb_for_loss_list)
+        # recon_node_emb_for_loss_list = [
+        #     recon_node_emb_for_loss_all[
+        #         i, self.pick_unavail_node_in_x(g.node_names[i]), :
+        #     ].contiguous()
+        #     for i in range(len(g.node_names))
+        # ]
+        # recon_node_emb_for_loss_zeros = torch.cat(recon_node_emb_for_loss_list)
 
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
             "label_pred": pred_labels,
             "node_recon_for_loss": recon_node_emb_for_loss,
-            "node_recon_for_loss_zeros": recon_node_emb_for_loss_zeros,
+            # "node_recon_for_loss_zeros": recon_node_emb_for_loss_zeros,
             "node_recon_for_loss_all": recon_node_emb_for_loss_all,
         }
 
@@ -199,6 +199,7 @@ class DeepTAN(ltn.LightningModule):
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer, 10, 2
         )
+        # scaler = torch.amp.GradScaler()
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -207,6 +208,7 @@ class DeepTAN(ltn.LightningModule):
                 "frequency": 1,
                 "monitor": "val_loss",
             },
+            # "scaler": scaler,
         }
 
         # # Combined scheduler
@@ -331,15 +333,15 @@ class DeepTAN(ltn.LightningModule):
         #     F.softmax(batch.x, dim=-1),
         #     reduction="batchmean",
         # )
-        recon_loss_zeros = F.mse_loss(
-            outputs["node_recon_for_loss_zeros"],
-            torch.zeros_like(outputs["node_recon_for_loss_zeros"]),
-        )
+        # recon_loss_zeros = F.mse_loss(
+        #     outputs["node_recon_for_loss_zeros"],
+        #     torch.zeros_like(outputs["node_recon_for_loss_zeros"]),
+        # )
         # losses["recon_KLD"] = kl_loss
         losses["recon_MSE"] = recon_loss
-        losses["recon_zeros"] = recon_loss_zeros
+        # losses["recon_zeros"] = recon_loss_zeros
         # losses["recon"] = recon_loss + kl_loss + 0.2 * recon_loss_zeros
-        losses["recon"] = recon_loss + 0.2 * recon_loss_zeros
+        losses["recon"] = recon_loss# + 0.2 * recon_loss_zeros
 
         # Graph-level label prediction loss
         if batch.y is None:
@@ -382,7 +384,7 @@ class DeepTAN(ltn.LightningModule):
             self.ema_loss = 0.9 * self.ema_loss + 0.1 * total.detach()
 
         return total + 0.1 * (total - self.ema_loss).abs()
-    
+
         # alpha = 0.5
         # total = alpha * losses["label"] + (1 - alpha) * losses["recon"]
         # return total

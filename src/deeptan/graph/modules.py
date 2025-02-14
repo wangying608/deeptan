@@ -64,7 +64,8 @@ class WGATLayer(MessagePassing):
         )
 
         # Calculate attention coefficients [E, num_heads]
-        e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+        # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+        e = torch.einsum('ehd,hd->eh', h, self.attn)
 
         # Integrate edge attributes
         if edge_attr is not None:
@@ -83,7 +84,7 @@ class WGATLayer(MessagePassing):
 
         # Weight features by attention scores
         # Average features across heads
-        h = (x_trans * a.unsqueeze(-1)).mean(dim=1)  # [E, output_dim]
+        h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
 
         return h
 
@@ -123,7 +124,9 @@ class NodeEmbedding(nn.Module):
         self.dropout = dropout
         self.negative_slope = negative_slope
 
-        self.embed = nn.Embedding(len(dict_node_names), embedding_dim)
+        self.embed = nn.Embedding(
+            len(dict_node_names), embedding_dim, scale_grad_by_freq=True
+        )
 
         self.mlp1 = nn.Sequential(
             nn.Linear(input_dim, embedding_dim), nn.LayerNorm(embedding_dim), nn.GELU()
@@ -184,8 +187,8 @@ class NodeEmbedding(nn.Module):
         skips = []
         if self.skips:
             for i, layer in enumerate(self.layers):
-                # emb = layer(emb, edge_index, edge_attr)
-                emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
+                emb = layer(emb, edge_index, edge_attr)
+                # emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
                 if i < len(self.skips):
                     skips.append(self.skips[i](emb))
 

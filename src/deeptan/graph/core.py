@@ -81,11 +81,14 @@ class AMSGP(torch.nn.Module):
         )
         self.global_att_pool = SelfAttPool(output_dim)
 
+    def _forward_embedding(self, node_names, x, edge_attr, edge_index):
+        return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
         # h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
         h = checkpoint(
-            self.node_embedding_layers,
+            self._forward_embedding,
             node_names,
             x,
             edge_attr,
@@ -163,7 +166,7 @@ class AMSGP(torch.nn.Module):
     ):
         # Adaptive binning using quantiles
         q_low, q_high = torch.quantile(
-            centrality, torch.tensor([0.2, 0.8], device=device)
+            centrality, torch.tensor([0.2, 0.85], device=device)
         )
         central_nodes = torch.where(centrality > q_high)[0]
 
