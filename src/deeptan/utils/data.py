@@ -600,6 +600,60 @@ def split_parquet(
             print(f"Saved split {i} with seed {seed} to {output_file}")
 
 
+def split_parquet_with_celltypes(
+    cell_types: List[str],
+    parquet_file: str,
+    output_dir: str,
+    ratio: List[float],
+    seeds: List[int],
+):
+    df = pl.read_parquet(parquet_file)
+    assert len(seeds) > 0, "Seeds list must not be empty."
+    assert sum(ratio) == 1, "Ratios must sum to 1."
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    assert len(cell_types) == len(df), (
+        "Cell types list must match the number of rows in the dataframe."
+    )
+    # Create a list of unique cell types
+    unique_cell_types = np.unique(cell_types)
+
+    # Stratified Sampling based on cell types
+    for seed in seeds:
+        np.random.seed(seed)
+
+        # Initialize an empty list to store indices for each split
+        split_indices = [[] for _ in range(len(ratio))]
+
+        # For each unique cell type, shuffle and split the indices
+        for cell_type in unique_cell_types:
+            # Get indices of rows corresponding to the current cell type
+            cell_type_indices = np.where(np.array(cell_types) == cell_type)[0]
+            # Shuffle the indices
+            shuffled_indices = np.random.permutation(cell_type_indices)
+            # Calculate the split points based on the ratio
+            split_points = np.cumsum(
+                np.array(ratio[:-1]) * len(shuffled_indices)
+            ).astype(int)
+            cell_type_split_indices = np.split(shuffled_indices, split_points)
+
+            # Append the split indices for each cell type to the overall split indices
+            for i, indices in enumerate(cell_type_split_indices):
+                split_indices[i].extend(indices)
+
+        # Shuffle the indices within each split to avoid any ordering bias
+        for i in range(len(split_indices)):
+            np.random.shuffle(split_indices[i])
+
+        # Create the splits based on the final split indices
+        for i, indices in enumerate(split_indices):
+            split_df = df[indices]
+            print(f"Split {i} with seed {seed} has {len(split_df)} rows")
+            output_file = os.path.join(output_dir, f"split_seed_{seed}_{i}.parquet")
+            split_df.write_parquet(output_file)
+            print(f"Saved split {i} with seed {seed} to {output_file}")
+
+
 def read_nmic_results(npz_path: str):
     data = np.load(npz_path)
 

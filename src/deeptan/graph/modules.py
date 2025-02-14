@@ -49,8 +49,8 @@ class WGATLayer(MessagePassing):
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.W.data)
-        nn.init.xavier_uniform_(self.attn.data)
+        nn.init.xavier_normal_(self.W.data)
+        nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
 
     def forward(self, x, edge_index, edge_attr=None):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
@@ -202,7 +202,7 @@ class GE_Decoder(nn.Module):
     Graph Embedding Decoder for reconstructing node features from latent representations (biological state-specific embeddings).
     """
 
-    def __init__(self, z_dim: int, h_dim: int, output_dim: int, hidden_dim: int = 128):
+    def __init__(self, z_dim: int, h_dim: int, output_dim: int, hidden_dim: int = 512):
         r"""
         Initialize graph embedding decoder.
 
@@ -243,7 +243,9 @@ class GLabelPredictor(nn.Module):
     A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
     """
 
-    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int]):
+    def __init__(
+        self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float
+    ):
         r"""
         Args:
             input_dim: The input dimension.
@@ -255,7 +257,9 @@ class GLabelPredictor(nn.Module):
         for dim in hidden_dims:
             layers += [
                 nn.Linear(input_dim, dim),
+                nn.LayerNorm(dim),
                 nn.GELU(),
+                nn.Dropout(dropout),
             ]
             input_dim = dim
         layers.append(nn.Linear(input_dim, output_dim))

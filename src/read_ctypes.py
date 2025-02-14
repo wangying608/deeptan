@@ -1,5 +1,4 @@
 import polars as pl
-import sklearn as sk
 
 
 if __name__ == "__main__":

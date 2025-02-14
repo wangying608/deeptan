@@ -13,12 +13,12 @@ readme = "README.md"
 requires-python = ">=3.10, <3.13"
 dependencies = [
     "lightning>=2.5.0.post0",
-    "litdata>=0.2.37",
+    "litdata>=0.2.38",
     "mosaicml-streaming>=0.11.0",
     "muon>=0.1.7",
     "optuna>=4.2.0",
     "optuna-dashboard>=0.17.0",
-    "polars>=1.21.0",
+    "polars>=1.22.0",
     "pyarrow>=19.0.0",
     "pyg-lib>=0.4.0",
     "scanpy>=1.10.4",
@@ -45,20 +45,23 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Operating System :: Microsoft :: Windows :: Windows 10",
-    "Operating System :: Microsoft :: Windows :: Windows 11",
     "Operating System :: POSIX :: Linux",
 ]
-
-[tool.uv.pip]
-index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
 [project.urls]
 Homepage = "https://github.com/cma2015/DeepTAN"
 
 [project.scripts]
+
+[tool.uv.pip]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+[tool.uv]
+find-links = [
+    "https://data.pyg.org/whl/torch-2.4.1+cu121.html",
+]

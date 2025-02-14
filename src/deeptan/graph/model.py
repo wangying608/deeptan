@@ -43,8 +43,8 @@ class DeepTAN(ltn.LightningModule):
         output_g_label_dim: Optional[int],
         is_regression: bool,
         node_emb_dim: int = 128,
-        fusion_dims_node_emb: List[int] = [256, 128],
-        output_dim_g_emb: int = 128,
+        fusion_dims_node_emb: List[int] = [256, 512, 128],
+        output_dim_g_emb: int = 512,
         n_hop: int = 2,
         threshold_edge_exist: float = 0.5,
         threshold_subgraph_overlap: float = 0.6,
@@ -86,12 +86,12 @@ class DeepTAN(ltn.LightningModule):
             z_dim=output_dim_g_emb,
             h_dim=node_emb_dim,
             output_dim=input_dim,
-            hidden_dim=256,
+            hidden_dim=512,
         )
 
         # Graph-level label predictor
         self.g_label_predictor = GLabelPredictor(
-            output_dim_g_emb, self.output_dim, [256, 256]
+            output_dim_g_emb, self.output_dim, [512, 512, 256], dropout
         )
 
         # Metrics and initialization
@@ -99,6 +99,15 @@ class DeepTAN(ltn.LightningModule):
         self.ema_loss = None
 
     def forward(self, g: GData) -> Dict[str, Any]:
+        assert g.x.dim() == 2, f"The input dim is wrong: {g.x.shape}"
+        assert g.edge_index.max() < g.x.size(0), (
+            "The edge index is wrong: {g.edge_index.shape}"
+        )
+        # Check if all node names are valid
+        for nodes in g.node_names:
+            assert all(n in self.dict_node_names for n in nodes), (
+                "Node names are not valid: {g.node_names}"
+            )
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(
             g, "batch", torch.zeros(g.x.size(0), dtype=torch.long, device=g.x.device)
@@ -115,26 +124,38 @@ class DeepTAN(ltn.LightningModule):
 
         Embedding = self.amsgp.node_embedding_layers.embed
 
-        recon_node_emb, recon_node_emb_for_loss = self.ge_decoder(z, Embedding)
+        recon_node_emb, recon_node_emb_for_loss_all = self.ge_decoder(z, Embedding)
 
         # Graph-level label prediction
         pred_labels = self.g_label_predictor(z)
         if not self.hparams.is_regression:
-            pred_labels = F.log_softmax(pred_labels, dim=1)
+            pred_labels = F.softmax(pred_labels, dim=1)
 
+        # Node-level reconstruction loss
         recon_node_emb_for_loss_list = [
-            recon_node_emb_for_loss[
+            recon_node_emb_for_loss_all[
                 i, self.pick_avail_node_in_x(g.node_names[i]), :
             ].contiguous()
             for i in range(len(g.node_names))
         ]
         recon_node_emb_for_loss = torch.cat(recon_node_emb_for_loss_list)
 
+        # Node-level reconstruction loss for zeros
+        recon_node_emb_for_loss_list = [
+            recon_node_emb_for_loss_all[
+                i, self.pick_unavail_node_in_x(g.node_names[i]), :
+            ].contiguous()
+            for i in range(len(g.node_names))
+        ]
+        recon_node_emb_for_loss_zeros = torch.cat(recon_node_emb_for_loss_list)
+
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
             "label_pred": pred_labels,
             "node_recon_for_loss": recon_node_emb_for_loss,
+            "node_recon_for_loss_zeros": recon_node_emb_for_loss_zeros,
+            "node_recon_for_loss_all": recon_node_emb_for_loss_all,
         }
 
         # print("\n\nGraph embedding shape:", z.shape)
@@ -163,58 +184,74 @@ class DeepTAN(ltn.LightningModule):
             targets = torch.as_tensor(batch.y, device=preds.device)
             # print(f"\npreds:\n{preds.shape}\ntargets:{targets.shape}\n")
             if not self.hparams.is_regression:
-                targets = torch.argmax(targets, dim=1)
+                if targets.ndim > 1 and targets.shape[1] > 1:
+                    targets = torch.argmax(targets, dim=1)
             self.metrics_task_label[f"{stage}_metrics"].update(preds, targets)
-        # else:
-        #     self.metrics_task_label[f"{stage}_metrics"].update(
-        #         torch.tensor([0.0, 0.0]), torch.tensor([0.0, 0.0])
-        #     )  # Placeholder for no labels
 
         # Logging metrics and losses
         self._log_metrics(losses, stage)
         return losses["loss"]
 
     def configure_optimizers(self):
-        opt = AdamW(
+        optimizer = AdamW(
             self.parameters(), lr=self.hparams.lr, weight_decay=1e-4, betas=(0.9, 0.98)
         )
-
-        # Combined scheduler
-        total_steps = int(self.trainer.estimated_stepping_batches)
-        total_steps = max(total_steps, 1)
-        warmup_steps = max(1, int(total_steps * 0.1))
-        T_max = max(1, total_steps - warmup_steps)
-
-        # Define the warmup scheduler
-        warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
-            opt, lr_lambda=lambda step: min(step / warmup_steps, 1.0)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, 10, 2
         )
-
-        # Define the cosine annealing scheduler
-        cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            opt, T_max=T_max, eta_min=self.hparams.lr / 100
-        )
-
-        # Combine the schedulers
-        scheduler = torch.optim.lr_scheduler.SequentialLR(
-            opt,
-            schedulers=[warmup_scheduler, cosine_scheduler],
-            milestones=[warmup_steps],
-        )
-
-        # Ensure the optimizer is stepped before the scheduler
-        def scheduler_step(epoch, batch_idx, optimizer, scheduler):
-            optimizer.step()
-            scheduler.step()
-
         return {
-            "optimizer": opt,
+            "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
                 "interval": "step",
                 "frequency": 1,
+                "monitor": "val_loss",
             },
         }
+
+        # # Combined scheduler
+        # total_steps = int(self.trainer.estimated_stepping_batches)
+        # total_steps = max(total_steps, 1)
+        # warmup_steps = max(500, int(total_steps * 0.2))
+        # T_max = max(1, total_steps - warmup_steps)
+
+        # # Define the warmup scheduler
+        # warmup_scheduler = torch.optim.lr_scheduler.LambdaLR(
+        #     opt, lr_lambda=lambda step: min(step / warmup_steps, 1.0)
+        # )
+
+        # # Define the cosine annealing scheduler
+        # cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        #     opt, T_max=T_max, eta_min=self.hparams.lr / 100
+        # )
+
+        # # Combine the schedulers
+        # scheduler = torch.optim.lr_scheduler.SequentialLR(
+        #     opt,
+        #     schedulers=[warmup_scheduler, cosine_scheduler],
+        #     milestones=[warmup_steps],
+        # )
+
+        # return {
+        #     "optimizer": opt,
+        #     "lr_scheduler": {
+        #         "scheduler": scheduler,
+        #         "interval": "step",
+        #         "frequency": 1,
+        #     },
+        # }
+
+    # def on_after_backward(self):
+    #     grad_norm = 0.0
+    #     for p in self.parameters():
+    #         if p.grad is not None:
+    #             grad_norm += p.grad.data.norm(2).item() ** 2
+    #     self.log("grad_norm", grad_norm**0.5, prog_bar=True)
+
+    #     if grad_norm > 5e4:
+    #         for param_group in self.optimizers()._optimizer.param_groups:
+    #             param_group["lr"] *= 0.5
+    #             self.log("lr", param_group["lr"], prog_bar=True)
 
     def _init_metrics(self):
         if hasattr(self, "metrics"):
@@ -257,7 +294,7 @@ class DeepTAN(ltn.LightningModule):
                     "Recall": MulticlassRecall(
                         num_classes=self.output_dim, average="weighted"
                     ),
-                    "AUC": MulticlassAUROC(
+                    "AUROC": MulticlassAUROC(
                         num_classes=self.output_dim, average="macro"
                     ),
                     # "MCC": MatthewsCorrCoef(
@@ -289,13 +326,20 @@ class DeepTAN(ltn.LightningModule):
 
         # Node reconstruction loss
         recon_loss = F.mse_loss(outputs["node_recon_for_loss"], batch.x)
-        kl_loss = F.kl_div(
-            F.log_softmax(outputs["node_recon_for_loss"], dim=-1),
-            F.softmax(batch.x, dim=-1),
-            reduction="batchmean",
+        # kl_loss = F.kl_div(
+        #     F.log_softmax(outputs["node_recon_for_loss"], dim=-1),
+        #     F.softmax(batch.x, dim=-1),
+        #     reduction="batchmean",
+        # )
+        recon_loss_zeros = F.mse_loss(
+            outputs["node_recon_for_loss_zeros"],
+            torch.zeros_like(outputs["node_recon_for_loss_zeros"]),
         )
-
-        losses["recon"] = recon_loss + kl_loss
+        # losses["recon_KLD"] = kl_loss
+        losses["recon_MSE"] = recon_loss
+        losses["recon_zeros"] = recon_loss_zeros
+        # losses["recon"] = recon_loss + kl_loss + 0.2 * recon_loss_zeros
+        losses["recon"] = recon_loss + 0.2 * recon_loss_zeros
 
         # Graph-level label prediction loss
         if batch.y is None:
@@ -309,6 +353,8 @@ class DeepTAN(ltn.LightningModule):
             if self.hparams.is_regression:
                 pred_loss = F.mse_loss(outputs["label_pred"], _y)
             else:
+                if _y.ndim > 1 and _y.shape[1] > 1:
+                    _y = torch.argmax(_y, dim=1)
                 pred_loss = F.cross_entropy(outputs["label_pred"], _y)
             losses["label"] = pred_loss
 
@@ -336,6 +382,10 @@ class DeepTAN(ltn.LightningModule):
             self.ema_loss = 0.9 * self.ema_loss + 0.1 * total.detach()
 
         return total + 0.1 * (total - self.ema_loss).abs()
+    
+        # alpha = 0.5
+        # total = alpha * losses["label"] + (1 - alpha) * losses["recon"]
+        # return total
 
     def _log_metrics(self, losses: Dict, stage: str):
         for k, v in losses.items():
@@ -391,3 +441,23 @@ class DeepTAN(ltn.LightningModule):
         node_names = flatten(x_node_names)
         avail_node_ind = [self.dict_node_names[node] for node in node_names]
         return avail_node_ind
+
+        # Also return the node that are not available.
+        # unavail_node_ind = [
+        #     i for i in range(len(self.dict_node_names)) if i not in avail_node_ind
+        # ]
+        # return avail_node_ind, unavail_node_ind
+
+    def pick_unavail_node_in_x(self, x_node_names: List[str]):
+        r"""
+        Pick unavailable features (nodes) from self.hparams.dict_node_names in x_node_names.
+        Returns:
+            List[str]: A list of unavailable node indices (the indices in self.hparams.dict_node_names).
+        """
+        # Extract all node names from x_node_names, even if they are nested lists or tuples.
+        node_names = flatten(x_node_names)
+        unavail_node_ind: List[int] = []
+        for node in self.dict_node_names:
+            if node not in node_names:
+                unavail_node_ind.append(self.dict_node_names[node])
+        return unavail_node_ind

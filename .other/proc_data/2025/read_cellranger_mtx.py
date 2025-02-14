@@ -34,6 +34,14 @@ def read_cellranger_mtx_or_h5(dir_mtx_or_h5: str) -> scanpy.AnnData:
     print(f"Features 0 to 4:\n{adata.var[:5]}\n")
     print(f"Features -1 to -5:\n{adata.var[-5:]}\n")
     print(f"First 5 obs names:\n{adata.obs_names[:5]}\n")
+
+    # Print properties
+    print(f"\nobs properties:\n{adata.obs.keys()}")
+    print(f"\nvar properties:\n{adata.var.keys()}")
+
+    # Print first 5 obs counts
+    # print(f"First 5 obs counts:\n{adata[:5].X}")
+    # Print sum of first 5 obs counts
     # print(f"Sum of first 5 obs counts:\n{adata[:5].X.sum(axis=1)}")
     print("Median of counts per cell:")
     print(f"{adata.to_df().sum(axis=1).median()}")
@@ -78,7 +86,6 @@ if __name__ == "__main__":
     # df_obs_names = pl.DataFrame({"obs_names": obs_names})
     # # Save to ~/Downloads/xxxx_obs_names.parquet
     # df_obs_names.write_parquet(os.path.join(os.path.expanduser("~"), "Downloads", f"{os.path.basename(dir_mtx)}_obs_names.parquet"))
-
 
     # h5_rep1 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep1/outs/filtered_feature_bc_matrix.h5"
     # h5_rep2 = "/mnt/bank/sc_sn/GSE235510/GSE235510_control_rep2/outs/filtered_feature_bc_matrix.h5"
