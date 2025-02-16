@@ -684,7 +684,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "lightning", specifier = ">=2.5.0.post0" },
-    { name = "litdata", specifier = ">=0.2.38" },
+    { name = "litdata", specifier = "==0.2.39" },
     { name = "mosaicml-streaming", specifier = ">=0.11.0" },
     { name = "muon", specifier = ">=0.1.7" },
     { name = "optuna", specifier = ">=4.2.0" },
@@ -1267,7 +1267,7 @@ wheels = [
 
 [[package]]
 name = "litdata"
-version = "0.2.38"
+version = "0.2.39"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "boto3" },
@@ -1278,9 +1278,9 @@ dependencies = [
     { name = "tifffile" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c5/1e/743f424c0c44ce8386ac7c250169f2cfc3991f263b16d446a72353f51407/litdata-0.2.38.tar.gz", hash = "sha256:8063def858310b3c267c9248a900f1a91b779438fa41e0ca9311a57acb54eca5", size = 141128 }
+sdist = { url = "https://files.pythonhosted.org/packages/d3/b1/4933a1b387e5132cc3519a626f5e221e3dc6a7e113b0e74bbefca259ce41/litdata-0.2.39.tar.gz", hash = "sha256:10d69d1b7f1f72d82f981e84e76ef74e69040c960f03376b17b7cf0fa80bc853", size = 147499 }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/76/64/b0b5e56ec6e8565386462e66d2cb3530995ed4fa8b2cc9988619fd4238f0/litdata-0.2.38-py3-none-any.whl", hash = "sha256:4c98e7f453a5189b9e4d694bf1f7df06d53f3d1bae66f1b8f671e65b4e9bbc01", size = 136544 },
+    { url = "https://files.pythonhosted.org/packages/86/b7/a2a4342fe175631801122c48d5206dda70ef9981244a753f3ce450bf9826/litdata-0.2.39-py3-none-any.whl", hash = "sha256:5e4e0b1c36244f2356d79b89f1325b92bfd7d3d44b0ff36cfb830ea8a5b6b9b1", size = 141626 },
 ]
 
 [[package]]

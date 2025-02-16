@@ -28,7 +28,7 @@ if __name__ == "__main__":
     celltypes = read_h5ad(path_h5ad).obs["Celltype"].to_list()
     batch_id = read_h5ad(path_h5ad).obs["Orig.ident"].to_list()
 
-    output_dir = path_parquet.replace(".parquet", "") + "_split" + "_resampled"
+    output_dir = path_parquet.replace(".parquet", "") + "_split" + "_strata"
     ratio = [0.8, 0.1, 0.1]
     seeds = [i + 42 for i in range(5)]
     # split_parquet_with_celltypes(

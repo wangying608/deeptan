@@ -1,8 +1,8 @@
 mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
 
-datadir=/mnt/hdd2/homext/wuch/xn2p/data/raw_df/scRNA/SRP273996.h5ad_split_resampled
+datadir=/mnt/hdd2/homext/wuch/xn2p/data/raw_df/scRNA/SRP273996_split_strata
 label_df=/mnt/hdd2/homext/wuch/xn2p/data/raw_df/scRNA/SRP273996_celltypes_onehot.parquet
-outputdir=/mnt/hdd1/wuch/optimized_data/GSE155304_SRP273996_resampled
+outputdir=/mnt/hdd1/wuch/optimized_data/GSE155304_SRP273996_strata
 
 seed=$1
 # for seed in $(seq 42 51)

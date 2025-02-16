@@ -2,91 +2,14 @@ r"""
 Modules for DeepTAN.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import MessagePassing
-
-
-class WGATLayer(MessagePassing):
-    r"""
-    (NMIC) Weighted Graph Attention Layer.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        negative_slope: float,
-        num_heads: int,
-        dropout: float = 0.1,
-    ):
-        r"""
-        Initialize the Weighted Graph Attention Layer.
-
-        Args:
-            input_dim: The dimension of the input embeddings.
-            output_dim: The dimension of the output embeddings.
-            negative_slope: The negative slope of the LeakyReLU activation.
-            num_heads: The number of attention heads.
-            dropout: The dropout probability for the attention weights.
-        """
-        super().__init__(aggr="add")
-        self.output_dim = output_dim
-        self.num_heads = num_heads
-        self.dropout = dropout
-
-        self.trans = nn.Sequential(
-            nn.Linear(input_dim, input_dim * num_heads),
-            nn.LeakyReLU(negative_slope),
-            nn.Linear(input_dim * num_heads, output_dim * num_heads),
-        )
-        # Adjusted for per-head attention computation
-        self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
-        self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_normal_(self.W.data)
-        nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
-
-    def forward(self, x, edge_index, edge_attr=None):
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-
-    def message(self, x_i, x_j, edge_attr):
-        # Compute attention scores per head
-        # h = torch.cat([x_i, x_j], -1) @ self.W  # [E, num_heads * output_dim]
-        # h = h.view(-1, self.num_heads, self.output_dim)  # [E, num_heads, output_dim]
-        h = (torch.cat([x_i, x_j], -1) @ self.W).view(
-            -1, self.num_heads, self.output_dim
-        )
-
-        # Calculate attention coefficients [E, num_heads]
-        # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
-        e = torch.einsum('ehd,hd->eh', h, self.attn)
-
-        # Integrate edge attributes
-        if edge_attr is not None:
-            # Expand edge_attr to match num_heads [E, num_heads]
-            e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
-
-        # Normalize attention scores
-        a = F.leaky_relu(e, 0.2)
-        a = F.softmax(a, dim=0)  # Normalize over neighbors
-        a = F.dropout(a, self.dropout, training=self.training)
-
-        # Transform features and prepare multi-head output
-        x_trans = self.trans(x_j).view(
-            -1, self.num_heads, self.output_dim
-        )  # [E, num_heads, output_dim]
-
-        # Weight features by attention scores
-        # Average features across heads
-        h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
-
-        return h
+from torch_geometric.utils import k_hop_subgraph, to_undirected
+from torch_geometric.data import Data as GData
 
 
 class NodeEmbedding(nn.Module):
@@ -121,16 +44,16 @@ class NodeEmbedding(nn.Module):
         self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
         self.n_heads = n_heads
-        self.dropout = dropout
+        # self.dropout = nn.Dropout(dropout)
         self.negative_slope = negative_slope
 
         self.embed = nn.Embedding(
-            len(dict_node_names), embedding_dim, scale_grad_by_freq=True
+            len(dict_node_names), embedding_dim, scale_grad_by_freq=True, sparse=True
         )
 
-        self.mlp1 = nn.Sequential(
-            nn.Linear(input_dim, embedding_dim), nn.LayerNorm(embedding_dim), nn.GELU()
-        )
+        # self.mlp1 = nn.Sequential(
+        #     nn.Linear(input_dim, embedding_dim), nn.LayerNorm(embedding_dim), nn.GELU()
+        # )
         self.mlp2 = nn.Sequential(
             nn.Linear(2 * embedding_dim, embedding_dim),
             nn.LayerNorm(embedding_dim),
@@ -177,9 +100,20 @@ class NodeEmbedding(nn.Module):
             device=x.device,
         )
 
-        E_i = self.embed(ids)
-        x_mlp1 = self.mlp1(x)
-        combined = torch.cat([x_mlp1, E_i], dim=-1)
+        # Get embeddings for all nodes
+        E_all = self.embed.weight
+        E_i = E_all[ids]
+
+        # Get embeddings for current nodes
+        # E_i = self.embed(ids)
+
+        # x_increased = self.mlp1(x)
+        # Do not use mlp1 for increasing input feature values
+        # But use repeating method
+        x_increased = x.repeat(1, self.embedding_dim)
+
+        combined = torch.cat([x_increased, E_i], dim=-1)
+        # combined = self.dropout(combined)
         x_mlp2 = self.mlp2(combined)
         emb = x_mlp2 + E_i
 
@@ -187,8 +121,8 @@ class NodeEmbedding(nn.Module):
         skips = []
         if self.skips:
             for i, layer in enumerate(self.layers):
-                emb = layer(emb, edge_index, edge_attr)
-                # emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
+                # emb = layer(emb, edge_index, edge_attr)
+                emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
                 if i < len(self.skips):
                     skips.append(self.skips[i](emb))
 
@@ -197,7 +131,318 @@ class NodeEmbedding(nn.Module):
 
         # emb = F.layer_norm(emb, emb.shape)
 
-        return emb
+        return emb, E_i, E_all
+
+
+class AMSGP(torch.nn.Module):
+    r"""
+    AMSGP: Adaptive Multi-Scale Graph Pooling for Graph-Level Representation Learning.
+    """
+
+    def __init__(
+        self,
+        dict_node_names: Dict[str, int],
+        input_dim: int,
+        node_emb_dim: int,
+        fusion_dims_node_emb: List[int],
+        n_heads_node_emb: int,
+        output_dim_g_emb: int,
+        n_heads_pooling: int,
+        n_hop: int,
+        threshold_edge_exist: float,
+        threshold_subgraph_overlap: float,
+        negative_slope: float,
+        dropout: float = 0.2,
+    ):
+        r"""
+        Initialize the AMSGP model.
+        Args:
+            dict_node_names: A dictionary mapping node names to their indices.
+            input_dim: The dimension of the input node features.
+            node_emb_dim: The dimension of the node embeddings.
+            fusion_dims_node_emb: A list of dimensions for the fusion layers in the node embedding.
+            n_heads_node_emb: The number of attention heads for the node embedding.
+            output_dim_g_emb: The dimension of the output graph embedding.
+            n_heads_pooling: The number of attention heads for the pooling layers.
+            n_hop: The number of hops for subgraph extraction.
+            threshold_edge_exist: The threshold for edge existence in subgraphs.
+            threshold_subgraph_overlap: The threshold for subgraph overlap.
+            negative_slope: The negative slope for the LeakyReLU activation.
+            dropout: The dropout rate for the model.
+        """
+        super().__init__()
+        self.dict_node_names = dict_node_names
+        self.output_dim_g_emb = output_dim_g_emb
+        self.n_hop = n_hop
+        self.threshold_edge_exist = threshold_edge_exist
+        self.threshold_subgraph_overlap = threshold_subgraph_overlap
+        self.dropout = dropout
+
+        # Node embedding
+        self.node_embedding_layers = NodeEmbedding(
+            input_dim,
+            node_emb_dim,
+            fusion_dims_node_emb,
+            dict_node_names,
+            n_heads_node_emb,
+            negative_slope,
+        )
+
+        # Multi-scale pooling architecture
+        self._init_pooling_layers(
+            fusion_dims_node_emb[-1], output_dim_g_emb, negative_slope, n_heads_pooling
+        )
+
+    def _init_pooling_layers(self, input_dim, output_dim, slope, heads):
+        # Local subgraph pooling
+        self.xgat_pool = WGATLayer(input_dim, output_dim, slope, heads, self.dropout)
+        self.att_pool = SelfAttPool(output_dim)
+
+        # Global graph pooling
+        self.global_xgat_pool = WGATLayer(
+            output_dim, output_dim, slope, heads, self.dropout
+        )
+        self.global_att_pool = SelfAttPool(output_dim)
+
+    def _forward_embedding(self, node_names, x, edge_attr, edge_index):
+        return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+
+    def forward(self, node_names, x, edge_attr, edge_index, batch):
+        # Node embedding with layer norm
+        # h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+        h, E_i, E_all = checkpoint(
+            self._forward_embedding,
+            node_names,
+            x,
+            edge_attr,
+            edge_index,
+            use_reentrant=False,
+        )
+        # h = F.layer_norm(h, h.size()[1:])
+
+        # Graph embedding
+        unique_batches = torch.unique(batch)
+        graph_embs = []
+
+        for graph_id in unique_batches:
+            # Extract node mask for the current graph
+            mask = batch == graph_id
+            node_indices = torch.where(mask)[0]
+
+            # Extract edges for the current graph
+            edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+            sub_edge_index = edge_index[:, edge_mask]
+            # Adjust edge indices to local indices
+            local_node_ids = torch.arange(mask.sum(), device=x.device)
+            global_to_local = torch.zeros_like(mask, dtype=torch.long, device=x.device)
+            global_to_local[node_indices] = local_node_ids
+            sub_edge_index = global_to_local[sub_edge_index]
+
+            # Compute dynamic centrality
+            filtered_edge_index, centrality = self._calculate_dynamic_centrality(
+                h[mask],
+                edge_attr[edge_mask] if edge_attr is not None else None,
+                sub_edge_index,
+            )
+
+            # Generate multiscale subgraphs
+            subgraphs = self._generate_multiscale_subgraphs(
+                filtered_edge_index, mask.sum(), centrality, h[mask], x.device
+            )
+
+            # Create graph embeddings
+            if subgraphs:
+                # g_emb = self._create_graph_embeddings(subgraphs)
+                g_emb = checkpoint(
+                    self._create_graph_embeddings, subgraphs, use_reentrant=False
+                )
+                graph_embs.append(g_emb)
+            else:
+                # Process empty subgraph case
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+
+        # Stack all graph embeddings
+        return torch.stack(graph_embs), E_i, E_all
+
+    def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
+        # Calculate edge importance
+        row, col = edge_index
+        h_i, h_j = h[row], h[col]
+        cos_sim = F.cosine_similarity(h_i, h_j).abs()
+
+        # Combine with edge attributes
+        edge_weight = cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
+
+        # Filter edges
+        mask = edge_weight > self.threshold_edge_exist
+        filtered_edge = edge_index[:, mask]
+        filtered_weight = edge_weight[mask]
+
+        # Compute node centrality
+        centrality = torch.zeros(h.size(0), device=h.device)
+        centrality.scatter_add_(0, filtered_edge[0], filtered_weight)
+        centrality.scatter_add_(0, filtered_edge[1], filtered_weight)
+        return filtered_edge, centrality
+
+    def _generate_multiscale_subgraphs(
+        self, edge_index, num_nodes, centrality, h, device
+    ):
+        # Adaptive binning using quantiles
+        q_low, q_high = torch.quantile(
+            centrality, torch.tensor([0.2, 0.85], device=device)
+        )
+        central_nodes = torch.where(centrality > q_high)[0]
+
+        # Parallel subgraph generation with index remapping
+        subgraphs = []
+        for node_idx in central_nodes:
+            subset, subg_edge_idx, _, _ = k_hop_subgraph(
+                int(node_idx.item()),
+                self.n_hop,
+                edge_index,
+                num_nodes=num_nodes,
+                flow="source_to_target",
+            )
+
+            # Remap edge indices to local subgraph indices
+            node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
+            node_mapping[subset] = torch.arange(len(subset), device=device)
+            subg_edge_local = node_mapping[subg_edge_idx]
+
+            # Skip isolated nodes or invalid subgraphs
+            if len(subset) >= 2 and subg_edge_local.size(1) > 0:
+                subgraphs.append(
+                    GData(
+                        x=h[subset],
+                        edge_index=subg_edge_local,
+                        center_node=node_idx,
+                        node_idx=subset,
+                    )
+                )
+
+        # Node coverage-based merging
+        coverage = torch.zeros(num_nodes, device=device)
+        merged = []
+        for subg in sorted(subgraphs, key=lambda x: -x.num_nodes):
+            overlap = coverage[subg.node_idx].mean()
+            if overlap < self.threshold_subgraph_overlap:
+                merged.append(subg)
+                coverage[subg.node_idx] += 1
+        return merged
+
+    def _create_graph_embeddings(self, subgraphs):
+        # Process each subgraph
+        embs = torch.cat([self._process_subgraph(g) for g in subgraphs], dim=0)
+
+        # Build super graph
+        super_nodes = GData(
+            x=embs,
+            edge_index=to_undirected(
+                torch.combinations(torch.arange(len(subgraphs), device=embs.device)).t()
+            ),
+        )
+
+        # Global pooling
+        global_emb = self.global_xgat_pool(super_nodes.x, super_nodes.edge_index)
+        return self.global_att_pool(global_emb)
+
+    def _process_subgraph(self, subgraph):
+        assert subgraph.edge_index.max() < subgraph.x.size(0), (
+            "Edge index exceeds node count"
+        )
+        h = self.xgat_pool(subgraph.x, subgraph.edge_index)
+        return self.att_pool(h.unsqueeze(0)).squeeze(0)
+
+    def hist_fd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Freedman-Diaconis histogram calculation."""
+        q75, q25 = torch.quantile(
+            tensor, torch.tensor([0.75, 0.25], device=tensor.device)
+        )
+        iqr = q75 - q25
+        bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
+        num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
+        counts = torch.histc(tensor, bins=num_bins)
+        edges = torch.linspace(
+            tensor.min(), tensor.max(), num_bins + 1, device=tensor.device
+        )
+        return counts, edges
+
+
+class WGATLayer(MessagePassing):
+    r"""
+    (NMIC) Weighted Graph Attention Layer.
+    """
+
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        negative_slope: float,
+        num_heads: int,
+        dropout: float = 0.2,
+    ):
+        r"""
+        Initialize the Weighted Graph Attention Layer.
+
+        Args:
+            input_dim: The dimension of the input embeddings.
+            output_dim: The dimension of the output embeddings.
+            negative_slope: The negative slope of the LeakyReLU activation.
+            num_heads: The number of attention heads.
+            dropout: The dropout probability for the attention weights.
+        """
+        super().__init__(aggr="add")
+        self.output_dim = output_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+
+        self.trans = nn.Sequential(
+            nn.Linear(input_dim, input_dim * num_heads),
+            nn.LeakyReLU(negative_slope),
+            nn.Linear(input_dim * num_heads, output_dim * num_heads),
+        )
+        # Adjusted for per-head attention computation
+        self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
+        self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        nn.init.xavier_normal_(self.W.data)
+        nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
+
+    def forward(self, x, edge_index, edge_attr=None):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+    def message(self, x_i, x_j, edge_attr):
+        # Compute attention scores per head
+        h = (torch.cat([x_i, x_j], -1) @ self.W).view(
+            -1, self.num_heads, self.output_dim
+        )
+
+        # Calculate attention coefficients [E, num_heads]
+        # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+        e = torch.einsum("ehd,hd->eh", h, self.attn)
+
+        # Integrate edge attributes
+        if edge_attr is not None:
+            # Expand edge_attr to match num_heads [E, num_heads]
+            e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
+
+        # Normalize attention scores
+        a = F.leaky_relu(e, 0.2)
+        a = F.softmax(a, dim=0)  # Normalize over neighbors
+        a = F.dropout(a, self.dropout, training=self.training)
+
+        # Transform features and prepare multi-head output
+        x_trans = self.trans(x_j).view(
+            -1, self.num_heads, self.output_dim
+        )  # [E, num_heads, output_dim]
+
+        # Weight features by attention scores
+        # Average features across heads
+        h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
+
+        return h
 
 
 class GE_Decoder(nn.Module):
@@ -205,7 +450,15 @@ class GE_Decoder(nn.Module):
     Graph Embedding Decoder for reconstructing node features from latent representations (biological state-specific embeddings).
     """
 
-    def __init__(self, z_dim: int, h_dim: int, output_dim: int, hidden_dim: int = 512):
+    def __init__(
+        self,
+        z_dim: int,
+        h_dim: int,
+        output_dim: int,
+        hidden_dim: int = 512,
+        dropout: float = 0.1,
+        negative_slope: float = 0.1,
+    ):
         r"""
         Initialize graph embedding decoder.
 
@@ -220,21 +473,24 @@ class GE_Decoder(nn.Module):
         self.hidden_dim = hidden_dim
 
         self.ffn_i = nn.Sequential(
+            SelfAtt_(z_dim + h_dim),
             nn.Linear(z_dim + h_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Mish(),
+            nn.ReLU(),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, h_dim),
+            nn.LayerNorm(h_dim),
         )
         self.ffn_q = nn.Sequential(
+            SelfAtt_(h_dim),
             nn.Linear(h_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.Mish(),
+            nn.LeakyReLU(negative_slope),
+            nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def forward(self, z: torch.Tensor, Embedding: nn.Embedding):
-        z_expanded = z.unsqueeze(1).expand(-1, Embedding.num_embeddings, -1)
-        E = Embedding.weight.unsqueeze(0).expand(z.size(0), -1, -1)
+    def forward(self, z: torch.Tensor, E_i: torch.Tensor, E_all: torch.Tensor):
+        z_expanded = z.unsqueeze(1).expand(-1, E_all.shape[0], -1)
+        E = E_all.unsqueeze(0).expand(z.size(0), -1, -1)
         combined = torch.cat([z_expanded, E], dim=-1)
         h_s = self.ffn_i(combined) + E
         h_ = self.ffn_q(h_s)
@@ -256,12 +512,13 @@ class GLabelPredictor(nn.Module):
             hidden_dims: The hidden dimensions of the feedforward network.
         """
         super().__init__()
-        layers = []
+
+        layers = [SelfAtt_(input_dim), nn.GELU()]
         for dim in hidden_dims:
             layers += [
                 nn.Linear(input_dim, dim),
-                nn.LayerNorm(dim),
                 nn.GELU(),
+                nn.LayerNorm(dim),
                 nn.Dropout(dropout),
             ]
             input_dim = dim
@@ -295,4 +552,27 @@ class SelfAttPool(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         x = (attn @ v).mean(dim=0)
+        return self.proj(x)
+
+
+class SelfAtt_(nn.Module):
+    r"""
+    Self-attention layer.
+    """
+
+    def __init__(self, dim: int):
+        r"""Initialize the Self-attention layer.
+        Args:
+            dim: The dimension of the input tensor.
+        """
+        super().__init__()
+        self.qkv = nn.Linear(dim, 3 * dim)
+        self.proj = nn.Linear(dim, dim)
+        self.scale = dim**-0.5
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        q, k, v = self.qkv(x).chunk(3, dim=-1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        x = attn @ v
         return self.proj(x)

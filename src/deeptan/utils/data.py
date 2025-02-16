@@ -13,17 +13,11 @@ import anndata
 import torch
 from torch_geometric.data import Data as GData
 from torch_geometric.data import Dataset as GDataset
-from torch_geometric.data import Batch
 from torch_geometric.loader import DataLoader as GDataLoader
 from torch_geometric.utils import erdos_renyi_graph
 from lightning import LightningDataModule
 from litdata import StreamingDataset, StreamingDataLoader
-from deeptan.utils.uni import get_avail_cpu_count
-
-
-def collate_fn(data_list):
-    batch = Batch.from_data_list(data_list)
-    return batch
+from deeptan.utils.uni import get_avail_cpu_count, collate_fn
 
 
 class NMICGraphDataset(GDataset):
@@ -698,9 +692,6 @@ def split_parquet_with_joint_strata(
         seeds (List[int]): List of seeds for reproducibility.
         balance_strategy (str): Strategy for balancing the splits. Options are "oversample", "undersample", or "combined".
     """
-    import os
-    import numpy as np
-    import polars as pl
 
     df = pl.read_parquet(parquet_file)
 
@@ -711,95 +702,87 @@ def split_parquet_with_joint_strata(
 
     os.makedirs(output_dir, exist_ok=True)
 
-    # Create a combined stratification label (strata) by combining cell_types and orig_idents
+    # Precompute strata labels once (deterministic, no randomness)
     strata = np.array(list(zip(cell_types, orig_idents)))
     unique_strata, stratum_labels = np.unique(strata, axis=0, return_inverse=True)
 
-    # Balance the dataset based on the balance_strategy
-    balanced_indices = []
-    if balance_strategy == "oversample":
-        # Oversample the minority strata to match the majority stratum size
-        max_stratum_size = max(np.bincount(stratum_labels))
-        for stratum_idx in range(len(unique_strata)):
-            stratum_mask = stratum_labels == stratum_idx
-            stratum_indices = np.where(stratum_mask)[0]
+    for seed in seeds:
+        np.random.seed(seed)  # Control all randomness within this seed iteration
 
-            if len(stratum_indices) == 0:
-                continue
-
-            repeat_factor = int(np.ceil(max_stratum_size / len(stratum_indices)))
-            balanced_indices.extend(
-                np.tile(stratum_indices, repeat_factor)[:max_stratum_size]
-            )
-
-    elif balance_strategy == "undersample":
-        # Under-sample the majority strata to match the minority stratum size
-        min_stratum_size = min(np.bincount(stratum_labels))
-        for stratum_idx in range(len(unique_strata)):
-            stratum_mask = stratum_labels == stratum_idx
-            stratum_indices = np.where(stratum_mask)[0]
-
-            if len(stratum_indices) == 0:
-                continue
-
-            sampled_indices = np.random.choice(
-                stratum_indices, size=min_stratum_size, replace=False
-            )
-            balanced_indices.extend(sampled_indices)
-
-    elif balance_strategy == "combined":
-        # Combined strategy: use a combination of oversampling and undersampling
-        target_stratum_size = int(np.mean(np.bincount(stratum_labels)))
-        for stratum_idx in range(len(unique_strata)):
-            stratum_mask = stratum_labels == stratum_idx
-            stratum_indices = np.where(stratum_mask)[0]
-
-            if len(stratum_indices) == 0:
-                continue
-
-            if len(stratum_indices) < target_stratum_size:
-                # Oversampling
-                repeat_factor = int(np.ceil(target_stratum_size / len(stratum_indices)))
-                sampled_indices = np.tile(stratum_indices, repeat_factor)[
-                    :target_stratum_size
-                ]
-            else:
-                # Undersampling
-                sampled_indices = np.random.choice(
-                    stratum_indices, size=target_stratum_size, replace=False
+        balanced_indices = []
+        if balance_strategy == "oversample":
+            # Oversample minority strata to match majority size
+            stratum_counts = np.bincount(stratum_labels)
+            max_stratum_size = np.max(stratum_counts)
+            for stratum_idx in range(len(unique_strata)):
+                stratum_mask = stratum_labels == stratum_idx
+                stratum_indices = np.where(stratum_mask)[0]
+                if len(stratum_indices) == 0:
+                    continue
+                repeat_factor = int(np.ceil(max_stratum_size / len(stratum_indices)))
+                balanced_indices.extend(
+                    np.tile(stratum_indices, repeat_factor)[:max_stratum_size]
                 )
 
-            balanced_indices.extend(sampled_indices)
+        elif balance_strategy == "undersample":
+            # Undersample majority strata to match minority size
+            stratum_counts = np.bincount(stratum_labels)
+            min_stratum_size = np.min(stratum_counts)
+            for stratum_idx in range(len(unique_strata)):
+                stratum_mask = stratum_labels == stratum_idx
+                stratum_indices = np.where(stratum_mask)[0]
+                if len(stratum_indices) == 0:
+                    continue
+                sampled = np.random.choice(
+                    stratum_indices, size=min_stratum_size, replace=False
+                )
+                balanced_indices.extend(sampled)
 
-    else:
-        raise ValueError(
-            "Invalid balance_strategy. Choose from 'oversample', 'undersample', or 'combined'."
-        )
+        elif balance_strategy == "combined":
+            # Hybrid: oversample small strata and undersample large ones
+            stratum_counts = np.bincount(stratum_labels)
+            target_stratum_size = int(np.mean(stratum_counts))
+            for stratum_idx in range(len(unique_strata)):
+                stratum_mask = stratum_labels == stratum_idx
+                stratum_indices = np.where(stratum_mask)[0]
+                if len(stratum_indices) == 0:
+                    continue
+                if len(stratum_indices) < target_stratum_size:
+                    repeat_factor = int(
+                        np.ceil(target_stratum_size / len(stratum_indices))
+                    )
+                    sampled = np.tile(stratum_indices, repeat_factor)[
+                        :target_stratum_size
+                    ]
+                else:
+                    sampled = np.random.choice(
+                        stratum_indices, size=target_stratum_size, replace=False
+                    )
+                balanced_indices.extend(sampled)
 
-    balanced_indices = np.array(balanced_indices)
-    np.random.shuffle(balanced_indices)
-
-    num_samples = len(balanced_indices)
-    split_targets = [max(1, int(r * num_samples)) for r in ratio]
-    split_targets[-1] = num_samples - sum(split_targets[:-1])
-
-    for seed in seeds:
-        np.random.seed(seed)
-
-        split_indices = [[] for _ in ratio]
-
-        current_index = 0
-        for split_idx in range(len(ratio)):
-            target_size = split_targets[split_idx]
-            split_indices[split_idx] = list(
-                balanced_indices[current_index : current_index + target_size]
+        else:
+            raise ValueError(
+                "Invalid balance_strategy. Choose from 'oversample', 'undersample', or 'combined'."
             )
-            current_index += target_size
 
-        for split_idx in range(len(ratio)):
-            current_indices = split_indices[split_idx]
-            split_df = df[current_indices, :]
+        balanced_indices = np.array(balanced_indices)
+        np.random.shuffle(balanced_indices)  # Shuffle after balancing
 
+        # Calculate split sizes fresh for this seed's balanced data
+        num_samples = len(balanced_indices)
+        split_targets = [max(1, int(r * num_samples)) for r in ratio]
+        split_targets[-1] = num_samples - sum(split_targets[:-1])  # Adjust for rounding
+
+        # Assign indices to splits sequentially after shuffling
+        splits = []
+        current_pos = 0
+        for target in split_targets:
+            splits.append(balanced_indices[current_pos : current_pos + target])
+            current_pos += target
+
+        # Write splits to disk
+        for split_idx, indices in enumerate(splits):
+            split_df = df[indices]
             output_path = os.path.join(output_dir, f"split_{seed}_{split_idx}.parquet")
             try:
                 split_df.write_parquet(output_path)
