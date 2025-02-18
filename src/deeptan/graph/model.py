@@ -50,12 +50,13 @@ class DeepTAN(ltn.LightningModule):
         input_dim: int,
         output_g_label_dim: Optional[int],
         is_regression: bool,
+        class_weights: Optional[List[float]] = None,
         node_emb_dim: int = 128,
         fusion_dims_node_emb: List[int] = [256, 512, 128],
         output_dim_g_emb: int = 512,
         n_hop: int = 2,
-        threshold_edge_exist: float = 0.5,
-        threshold_subgraph_overlap: float = 0.6,
+        threshold_edge_exist: float = 0.1,
+        threshold_subgraph_overlap: float = 0.99,
         n_heads_node_emb: int = 4,
         n_heads_pooling: int = 4,
         dropout: float = 0.1,
@@ -67,7 +68,13 @@ class DeepTAN(ltn.LightningModule):
         self.save_hyperparameters()
         self.dict_node_names = dict_node_names
 
-        self.output_dim = output_g_label_dim or 2
+        self.output_dim = output_g_label_dim if output_g_label_dim is not None else 2
+        # self.class_weights = (
+        #     torch.tensor(class_weights, dtype=torch.float32, device=self.device)
+        #     if class_weights is not None
+        #     else None
+        # )
+        self.class_weights = class_weights
 
         # Core components
         self.amsgp = AMSGP(
@@ -294,6 +301,7 @@ class DeepTAN(ltn.LightningModule):
         )
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
+        assert batch.x is not None
         losses = {}
 
         node_recon_for_loss = outputs["node_recon_for_loss"].squeeze(1)
@@ -307,11 +315,11 @@ class DeepTAN(ltn.LightningModule):
         recon_loss = F.mse_loss(node_recon_for_loss, node_true_val_for_loss)
 
         kl_loss = F.kl_div(
-            F.log_softmax(node_recon_for_loss),
-            F.softmax(node_true_val_for_loss),
+            F.log_softmax(node_recon_for_loss, dim=1),
+            F.softmax(node_true_val_for_loss, dim=1),
+            log_target=True,
             reduction="mean",
         )
-        # print(f"KL loss: {kl_loss}")
 
         recon_loss_zeros = F.mse_loss(
             outputs["node_recon_for_loss_zeros"].squeeze(1),
@@ -341,7 +349,17 @@ class DeepTAN(ltn.LightningModule):
             else:
                 if _y.ndim > 1 and _y.shape[1] > 1:
                     _y = torch.argmax(_y, dim=1)
-                pred_loss = F.cross_entropy(outputs["label_pred"], _y)
+
+                if self.class_weights is None:
+                    pred_loss = F.cross_entropy(outputs["label_pred"], _y)
+                else:
+                    pred_loss = F.cross_entropy(
+                        outputs["label_pred"],
+                        _y,
+                        weight=torch.tensor(
+                            self.class_weights, dtype=torch.float32, device=self.device
+                        ),
+                    )
 
             losses["label"] = pred_loss
 

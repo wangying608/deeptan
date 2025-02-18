@@ -25,7 +25,7 @@ class NodeEmbedding(nn.Module):
         dict_node_names: Dict[str, int],
         n_heads: int,
         negative_slope: float = 0.2,
-        dropout: float = 0.2,
+        dropout: float = 0.1,
     ):
         r"""
         Embedding nodes in a graph like embedding words in a sentence.
@@ -152,7 +152,7 @@ class AMSGP(torch.nn.Module):
         threshold_edge_exist: float,
         threshold_subgraph_overlap: float,
         negative_slope: float,
-        dropout: float = 0.2,
+        dropout: float = 0.1,
     ):
         r"""
         Initialize the AMSGP model.
@@ -196,13 +196,13 @@ class AMSGP(torch.nn.Module):
     def _init_pooling_layers(self, input_dim, output_dim, slope, heads):
         # Local subgraph pooling
         self.xgat_pool = WGATLayer(input_dim, output_dim, slope, heads, self.dropout)
-        self.att_pool = SelfAttPool(output_dim)
+        self.att_pool = SelfAttPool(output_dim, self.dropout)
 
         # Global graph pooling
         self.global_xgat_pool = WGATLayer(
             output_dim, output_dim, slope, heads, self.dropout
         )
-        self.global_att_pool = SelfAttPool(output_dim)
+        self.global_att_pool = SelfAttPool(output_dim, self.dropout)
 
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
         return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
@@ -210,14 +210,15 @@ class AMSGP(torch.nn.Module):
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
         # h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
-        h, E_i, E_all = checkpoint(
-            self._forward_embedding,
-            node_names,
-            x,
-            edge_attr,
-            edge_index,
-            use_reentrant=False,
-        )
+        # h, E_i, E_all = checkpoint(
+        #     self._forward_embedding,
+        #     node_names,
+        #     x,
+        #     edge_attr,
+        #     edge_index,
+        #     use_reentrant=False,
+        # )
+        h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
         # h = F.layer_norm(h, h.size()[1:])
 
         # Graph embedding
@@ -310,15 +311,15 @@ class AMSGP(torch.nn.Module):
             subg_edge_local = node_mapping[subg_edge_idx]
 
             # Skip isolated nodes or invalid subgraphs
-            if len(subset) >= 2 and subg_edge_local.size(1) > 0:
-                subgraphs.append(
-                    GData(
-                        x=h[subset],
-                        edge_index=subg_edge_local,
-                        center_node=node_idx,
-                        node_idx=subset,
-                    )
+            # if len(subset) >= 2 and subg_edge_local.size(1) > 0:
+            subgraphs.append(
+                GData(
+                    x=h[subset],
+                    edge_index=subg_edge_local,
+                    center_node=node_idx,
+                    node_idx=subset,
                 )
+            )
 
         # Node coverage-based merging
         coverage = torch.zeros(num_nodes, device=device)
@@ -379,7 +380,7 @@ class WGATLayer(MessagePassing):
         output_dim: int,
         negative_slope: float,
         num_heads: int,
-        dropout: float = 0.2,
+        dropout: float = 0.1,
     ):
         r"""
         Initialize the Weighted Graph Attention Layer.
@@ -393,6 +394,7 @@ class WGATLayer(MessagePassing):
         """
         super().__init__(aggr="add")
         self.output_dim = output_dim
+        self.negative_slope = negative_slope
         self.num_heads = num_heads
         self.dropout = dropout
 
@@ -429,7 +431,7 @@ class WGATLayer(MessagePassing):
             e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
 
         # Normalize attention scores
-        a = F.leaky_relu(e, 0.2)
+        a = F.leaky_relu(e, self.negative_slope)
         a = F.softmax(a, dim=0)  # Normalize over neighbors
         a = F.dropout(a, self.dropout, training=self.training)
 
@@ -473,7 +475,7 @@ class GE_Decoder(nn.Module):
         self.hidden_dim = hidden_dim
 
         self.ffn_i = nn.Sequential(
-            SelfAtt_(z_dim + h_dim),
+            SelfAtt_(z_dim + h_dim, dropout),
             nn.Linear(z_dim + h_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(p=dropout),
@@ -481,7 +483,7 @@ class GE_Decoder(nn.Module):
             nn.LayerNorm(h_dim),
         )
         self.ffn_q = nn.Sequential(
-            SelfAtt_(h_dim),
+            SelfAtt_(h_dim, dropout),
             nn.Linear(h_dim, hidden_dim),
             nn.LeakyReLU(negative_slope),
             nn.Dropout(p=dropout),
@@ -505,23 +507,19 @@ class GLabelPredictor(nn.Module):
     def __init__(
         self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float
     ):
-        r"""
-        Args:
-            input_dim: The input dimension.
-            output_dim: The output dimension.
-            hidden_dims: The hidden dimensions of the feedforward network.
-        """
         super().__init__()
 
-        layers = [SelfAtt_(input_dim), nn.GELU()]
+        layers = [
+            SelfAtt_(input_dim, dropout),
+            nn.GELU(),
+        ]
         for dim in hidden_dims:
             layers += [
                 nn.Linear(input_dim, dim),
                 nn.GELU(),
-                nn.LayerNorm(dim),
-                nn.Dropout(dropout),
             ]
             input_dim = dim
+        layers.append(nn.LayerNorm(dim))
         layers.append(nn.Linear(input_dim, output_dim))
         self.net = nn.Sequential(*layers)
 
@@ -533,26 +531,25 @@ class GLabelPredictor(nn.Module):
 
 class SelfAttPool(nn.Module):
     r"""
-    Self-attention pooling layer.
-    This layer performs self-attention on the input tensor and then pools the results by taking the mean.
+    Self-attention pooling layer with optional Dropout.
     """
 
-    def __init__(self, dim: int):
-        r"""Initialize the Self-attention pooling layer.
-        Args:
-            dim: The dimension of the input tensor.
-        """
+    def __init__(self, dim: int, dropout: float = 0.1):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
         self.scale = dim**-0.5
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
+        attn = self.dropout(attn)
         x = (attn @ v).mean(dim=0)
-        return self.proj(x)
+        x = self.proj(x)
+        x = self.dropout(x)
+        return x
 
 
 class SelfAtt_(nn.Module):
@@ -560,19 +557,17 @@ class SelfAtt_(nn.Module):
     Self-attention layer.
     """
 
-    def __init__(self, dim: int):
-        r"""Initialize the Self-attention layer.
-        Args:
-            dim: The dimension of the input tensor.
-        """
+    def __init__(self, dim: int, dropout: float = 0.1):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
         self.scale = dim**-0.5
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
+        attn = self.dropout(attn)
         x = attn @ v
         return self.proj(x)

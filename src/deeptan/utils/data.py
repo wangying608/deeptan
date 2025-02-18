@@ -20,6 +20,58 @@ from litdata import StreamingDataset, StreamingDataLoader
 from deeptan.utils.uni import get_avail_cpu_count, collate_fn
 
 
+def read_csv_celltypes2onehot(csv_path):
+    df = pl.read_csv(csv_path)
+    df.columns = ["bc", "ct"]
+
+    # One-hot encode the 'ct' column
+    df_one_hot = df_one_hot = df.to_dummies(columns=["ct"])
+
+    # Add a new column "ct_unknown" which all values are 0 (type: u8)
+    col_unk = pl.Series("ct_unknown", [0] * len(df_one_hot), dtype=pl.UInt8)
+    df_one_hot = df_one_hot.with_columns(col_unk)
+
+    # SORT
+    df_one_hot = df_one_hot.sort("bc")
+
+    # Save the one-hot encoded DataFrame
+    df_one_hot.write_parquet(csv_path.replace(".csv", "_celltypes_onehot.parquet"))
+
+
+def read_h5ad_celltypes2onehot(h5ad_path):
+    celltypes = sc.read_h5ad(h5ad_path).obs["Celltype"]
+    print(celltypes.value_counts())
+    celltypes_pl = pl.DataFrame({"bc": celltypes.index, "ct": celltypes.values})
+    celltypes_onehot = celltypes_pl.to_dummies(columns=["ct"])
+
+    # Add a new column "ct_unknown" which all values are 0 (type: u8)
+    col_unk = pl.Series("ct_unknown", [0] * len(celltypes_onehot), dtype=pl.UInt8)
+    celltypes_onehot = celltypes_onehot.with_columns(col_unk)
+
+    # SORT
+    celltypes_onehot = celltypes_onehot.sort("bc")
+
+    # Save the one-hot encoded DataFrame
+    celltypes_onehot.write_parquet(
+        h5ad_path.replace(".h5ad", "_celltypes_onehot.parquet")
+    )
+
+
+def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
+    r"""
+    Compute class weights for weighted cross entropy loss.
+    """
+    class_weights = df_onehot.select(pl.exclude("bc")).sum().to_numpy().flatten()
+    class_weights[-1] = class_weights.mean()
+
+    class_weights = 1 / (class_weights / class_weights.sum())
+
+    class_weights = class_weights / class_weights.sum()
+    output = class_weights.tolist()
+
+    return output
+
+
 class NMICGraphDataset(GDataset):
     def __init__(self, npz_path: str, labels: str | None):
         """
@@ -45,8 +97,6 @@ class NMICGraphDataset(GDataset):
             self.label_dim = None
         else:
             self.labels = pl.read_parquet(labels)
-            # .filter(pl.col("bc").is_in(self.obs_names))
-            # .sort("bc")
             self.label_dim = self.labels.shape[1] - 1
 
     def len(self):

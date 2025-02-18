@@ -5,9 +5,10 @@ DeepTAN pipelines for fitting, hyperparameter tuning, inference, and testing.
 import os
 import argparse
 import pickle
-from deeptan.utils.uni import train_model, time_string, random_string
-from deeptan.utils.data import DeepTANDataModule, DeepTANDataModuleLit
-from deeptan.graph.model import DeepTAN
+import polars as pl
+from deeptan.utils.uni import time_string, random_string
+from deeptan.utils.data import DeepTANDataModule, DeepTANDataModuleLit, celltypes_class_weights
+from deeptan.graph.model import DeepTAN, train_model
 
 
 def parse_args():
@@ -16,8 +17,10 @@ def parse_args():
     parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
     parser.add_argument('--labels', type=str, default="", help='Path to label data in .parquet format')
     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
-    parser.add_argument('--bs', type=int, default=1, help='Batch size for training')
-    parser.add_argument('--es_patience', type=int, default=2, help='Early stopping patience')
+    parser.add_argument('--onehot_class', type=str, default="", help='Path to a parquet file containing one-hot encoded class labels')
+    parser.add_argument('--bs', type=int, default=4, help='Batch size for training')
+    parser.add_argument('--acc_grad_batch', type=int, default=16, help='Accumulate gradients over multiple batches')
+    parser.add_argument('--es_patience', type=int, default=5, help='Early stopping patience')
     parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
     parser.add_argument('--trn_npz', type=str, default="", required=False, help='Path to training data in .npz format')
     parser.add_argument('--val_parquet', type=str, default="", required=False, help='Path to validation data in .parquet format')
@@ -27,10 +30,10 @@ def parse_args():
     parser.add_argument('--output_dim_g_emb', type=int, default=512, help='Output dimension for graph embedding')
     parser.add_argument('--n_hop', type=int, default=2, help='Number of hops')
     parser.add_argument('--threshold_edge_exist', type=float, default=0.1, help='Threshold for edge existence')
-    parser.add_argument('--threshold_subgraph_overlap', type=float, default=0.9, help='Threshold for subgraph overlap')
+    parser.add_argument('--threshold_subgraph_overlap', type=float, default=0.99, help='Threshold for subgraph overlap')
     parser.add_argument('--heads_node_emb', type=int, default=2, help='Number of heads for node embedding')
     parser.add_argument('--heads_pooling', type=int, default=2, help='Number of heads for pooling')
-    parser.add_argument('--dropout', type=float, default=0.3, help='Dropout rate')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout rate')
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--negative_slope', type=float, default=0.2, help='Negative slope for LeakyReLU')
     parser.add_argument('--alpha', type=float, default=0.5, help='Alpha for balancing loss terms')
@@ -69,6 +72,11 @@ if __name__ == "__main__":
         output_g_label_dim = datamodule.label_dim
     else:
         raise ValueError("Invalid arguments provided. Please check the input data paths and labels.")
+    
+    if len(args.onehot_class) < 2:
+        class_weight = None
+    else:
+        class_weight = celltypes_class_weights(pl.read_parquet(args.onehot_class))
 
     # Initialize the model
     model = DeepTAN(
@@ -76,6 +84,7 @@ if __name__ == "__main__":
         input_dim=args.input_node_emb_dim,
         output_g_label_dim=output_g_label_dim,
         is_regression=args.is_regression,
+        class_weights=class_weight,
         node_emb_dim=args.node_emb_dim,
         fusion_dims_node_emb=args.fusion_dims_node_emb,
         output_dim_g_emb=args.output_dim_g_emb,
@@ -97,4 +106,5 @@ if __name__ == "__main__":
         max_epochs=args.max_epochs,
         min_epochs=args.min_epochs,
         log_dir=args.log_dir,
+        accumulate_grad_batches=args.acc_grad_batch,
     )
