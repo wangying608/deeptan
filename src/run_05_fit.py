@@ -25,9 +25,9 @@ def parse_args():
     parser.add_argument('--trn_npz', type=str, default="", required=False, help='Path to training data in .npz format')
     parser.add_argument('--val_parquet', type=str, default="", required=False, help='Path to validation data in .parquet format')
     parser.add_argument('--tst_parquet', type=str, default="", required=False, help='Path to test data in .parquet format')
-    parser.add_argument('--node_emb_dim', type=int, default=256, help='Node embedding dimension')
-    parser.add_argument('--fusion_dims_node_emb', nargs='+', type=int, default=[256, 512, 256], help='Fusion dimensions for node embedding')
-    parser.add_argument('--output_dim_g_emb', type=int, default=512, help='Output dimension for graph embedding')
+    parser.add_argument('--node_emb_dim', type=int, default=128, help='Node embedding dimension')
+    parser.add_argument('--fusion_dims_node_emb', nargs='+', type=int, default=[256, 256, 256], help='Fusion dimensions for node embedding')
+    parser.add_argument('--output_dim_g_emb', type=int, default=256, help='Output dimension for graph embedding')
     parser.add_argument('--n_hop', type=int, default=2, help='Number of hops')
     parser.add_argument('--threshold_edge_exist', type=float, default=0.1, help='Threshold for edge existence')
     parser.add_argument('--threshold_subgraph_overlap', type=float, default=0.99, help='Threshold for subgraph overlap')
@@ -40,6 +40,9 @@ def parse_args():
     parser.add_argument('--max_epochs', type=int, default=1000, help='Maximum number of epochs')
     parser.add_argument('--min_epochs', type=int, default=2, help='Minimum number of epochs')
     parser.add_argument('--log_dir', type=str, default=".tmp_logs", help='Directory for logging')
+    parser.add_argument('--accelerator', type=str, default="auto", help="cpu, gpu, tpu, hpu, mps, auto")
+    parser.add_argument('--chunk_size', type=int, default=1024, help='A proper chunk size can balance memory usage and speed')
+    parser.add_argument('--nworker', type=int, default=1, help='Number of workers for dataloader')
     
     return parser.parse_args()
 
@@ -58,7 +61,7 @@ if __name__ == "__main__":
         dict_node_names = others2save["dict_node_names"]
         output_g_label_dim = others2save["output_g_label_dim"]
         
-        datamodule = DeepTANDataModuleLit(args.litdata, batch_size=args.bs)
+        datamodule = DeepTANDataModuleLit(args.litdata, batch_size=args.bs, n_workers=args.nworker)
         datamodule.setup()
     elif len(args.trn_npz) > 0 and len(args.val_parquet) > 0 and len(args.tst_parquet) > 0:
         if len(args.labels) < 2:
@@ -97,6 +100,7 @@ if __name__ == "__main__":
         lr=args.lr,
         negative_slope=args.negative_slope,
         alpha=args.alpha,
+        chunk_size=args.chunk_size,
     )
 
     train_model(
@@ -107,4 +111,5 @@ if __name__ == "__main__":
         min_epochs=args.min_epochs,
         log_dir=args.log_dir,
         accumulate_grad_batches=args.acc_grad_batch,
+        accelerator=args.accelerator,
     )

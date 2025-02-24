@@ -37,6 +37,7 @@ class NodeEmbedding(nn.Module):
             dict_node_names: Dictionary mapping node names to indices.
             n_heads: Number of attention heads.
             negative_slope: Negative slope for the LeakyReLU activation.
+            dropout: Dropout rate.
         """
         super().__init__()
         self.input_dim = input_dim
@@ -44,7 +45,6 @@ class NodeEmbedding(nn.Module):
         self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
         self.n_heads = n_heads
-        # self.dropout = nn.Dropout(dropout)
         self.negative_slope = negative_slope
 
         self.embed = nn.Embedding(
@@ -153,6 +153,7 @@ class AMSGP(torch.nn.Module):
         threshold_subgraph_overlap: float,
         negative_slope: float,
         dropout: float = 0.1,
+        chunk_size: int = 1024,
     ):
         r"""
         Initialize the AMSGP model.
@@ -169,6 +170,7 @@ class AMSGP(torch.nn.Module):
             threshold_subgraph_overlap: The threshold for subgraph overlap.
             negative_slope: The negative slope for the LeakyReLU activation.
             dropout: The dropout rate for the model.
+            chunk_size: The chunk size for parallel processing.
         """
         super().__init__()
         self.dict_node_names = dict_node_names
@@ -177,6 +179,7 @@ class AMSGP(torch.nn.Module):
         self.threshold_edge_exist = threshold_edge_exist
         self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.dropout = dropout
+        self.chunk_size = chunk_size
 
         # Node embedding
         self.node_embedding_layers = NodeEmbedding(
@@ -219,7 +222,6 @@ class AMSGP(torch.nn.Module):
         #     use_reentrant=False,
         # )
         h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
-        # h = F.layer_norm(h, h.size()[1:])
 
         # Graph embedding
         unique_batches = torch.unique(batch)
@@ -266,10 +268,20 @@ class AMSGP(torch.nn.Module):
         return torch.stack(graph_embs), E_i, E_all
 
     def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
-        # Calculate edge importance
         row, col = edge_index
-        h_i, h_j = h[row], h[col]
-        cos_sim = F.cosine_similarity(h_i, h_j).abs()
+        num_edges = edge_index.size(1)
+        cos_sim = []
+
+        # Calculate cosine similarity for each edge in batches to reduce peak memory usage.
+        for i in range(0, num_edges, self.chunk_size):
+            idx = slice(i, min(i + self.chunk_size, num_edges))
+            h_i = h[row[idx]]
+            h_j = h[col[idx]]
+            # Cosine similarity and immediately release intermediate tensors
+            batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
+            cos_sim.append(batch_cos)
+
+        cos_sim = torch.cat(cos_sim, dim=0)
 
         # Combine with edge attributes
         edge_weight = cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
@@ -283,6 +295,7 @@ class AMSGP(torch.nn.Module):
         centrality = torch.zeros(h.size(0), device=h.device)
         centrality.scatter_add_(0, filtered_edge[0], filtered_weight)
         centrality.scatter_add_(0, filtered_edge[1], filtered_weight)
+
         return filtered_edge, centrality
 
     def _generate_multiscale_subgraphs(
@@ -305,6 +318,9 @@ class AMSGP(torch.nn.Module):
                 flow="source_to_target",
             )
 
+            if subset.size(0) < 2 or subg_edge_idx.size(1) == 0:
+                continue
+
             # Remap edge indices to local subgraph indices
             node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
             node_mapping[subset] = torch.arange(len(subset), device=device)
@@ -322,9 +338,10 @@ class AMSGP(torch.nn.Module):
             )
 
         # Node coverage-based merging
+        subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
         coverage = torch.zeros(num_nodes, device=device)
         merged = []
-        for subg in sorted(subgraphs, key=lambda x: -x.num_nodes):
+        for subg in subgraphs:
             overlap = coverage[subg.node_idx].mean()
             if overlap < self.threshold_subgraph_overlap:
                 merged.append(subg)
@@ -348,11 +365,11 @@ class AMSGP(torch.nn.Module):
         return self.global_att_pool(global_emb)
 
     def _process_subgraph(self, subgraph):
-        assert subgraph.edge_index.max() < subgraph.x.size(0), (
-            "Edge index exceeds node count"
-        )
+        assert (subgraph.edge_index.numel() == 0) or (
+            subgraph.edge_index.max() < subgraph.x.size(0)
+        ), "Edge index exceeds node count"
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
-        return self.att_pool(h.unsqueeze(0)).squeeze(0)
+        return self.att_pool(h.unsqueeze(0))  # .squeeze(0)
 
     def hist_fd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Freedman-Diaconis histogram calculation."""
@@ -398,11 +415,12 @@ class WGATLayer(MessagePassing):
         self.num_heads = num_heads
         self.dropout = dropout
 
-        self.trans = nn.Sequential(
-            nn.Linear(input_dim, input_dim * num_heads),
-            nn.LeakyReLU(negative_slope),
-            nn.Linear(input_dim * num_heads, output_dim * num_heads),
-        )
+        # self.trans = nn.Sequential(
+        #     nn.Linear(input_dim, input_dim * num_heads),
+        #     nn.LeakyReLU(negative_slope),
+        #     nn.Linear(input_dim * num_heads, output_dim * num_heads),
+        # )
+        self.trans = nn.Linear(input_dim, output_dim * num_heads)
         # Adjusted for per-head attention computation
         self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
         self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
@@ -413,7 +431,10 @@ class WGATLayer(MessagePassing):
         nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
 
     def forward(self, x, edge_index, edge_attr=None):
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        # return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        return checkpoint(
+            self.propagate, edge_index, x=x, edge_attr=edge_attr, use_reentrant=False
+        )
 
     def message(self, x_i, x_j, edge_attr):
         # Compute attention scores per head
@@ -431,18 +452,19 @@ class WGATLayer(MessagePassing):
             e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
 
         # Normalize attention scores
-        a = F.leaky_relu(e, self.negative_slope)
-        a = F.softmax(a, dim=0)  # Normalize over neighbors
+        # a = F.leaky_relu(e, self.negative_slope)
+        a = F.gelu(e)
+        a = F.softmax(a, dim=0)
         a = F.dropout(a, self.dropout, training=self.training)
 
         # Transform features and prepare multi-head output
-        x_trans = self.trans(x_j).view(
-            -1, self.num_heads, self.output_dim
-        )  # [E, num_heads, output_dim]
+        # [E, num_heads, output_dim]
+        x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
 
         # Weight features by attention scores
         # Average features across heads
-        h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
+        # h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
+        h = torch.einsum("ehd,eh->ed", x_trans, a)
 
         return h
 
@@ -460,6 +482,7 @@ class GE_Decoder(nn.Module):
         hidden_dim: int = 512,
         dropout: float = 0.1,
         negative_slope: float = 0.1,
+        chunk_size: int = 1024,
     ):
         r"""
         Initialize graph embedding decoder.
@@ -473,28 +496,55 @@ class GE_Decoder(nn.Module):
         self.h_dim = h_dim
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
+        self.chunk_size = chunk_size
 
         self.ffn_i = nn.Sequential(
-            SelfAtt_(z_dim + h_dim, dropout),
+            # SelfAtt_(z_dim + h_dim, dropout),
             nn.Linear(z_dim + h_dim, hidden_dim),
-            nn.ReLU(),
+            # nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, h_dim),
             nn.LayerNorm(h_dim),
         )
         self.ffn_q = nn.Sequential(
-            SelfAtt_(h_dim, dropout),
+            # SelfAtt_(h_dim, dropout),
             nn.Linear(h_dim, hidden_dim),
-            nn.LeakyReLU(negative_slope),
+            # nn.LeakyReLU(negative_slope),
+            nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, output_dim),
         )
 
     def forward(self, z: torch.Tensor, E_i: torch.Tensor, E_all: torch.Tensor):
-        z_expanded = z.unsqueeze(1).expand(-1, E_all.shape[0], -1)
-        E = E_all.unsqueeze(0).expand(z.size(0), -1, -1)
-        combined = torch.cat([z_expanded, E], dim=-1)
-        h_s = self.ffn_i(combined) + E
+        # z_expanded = z.unsqueeze(1).expand(-1, E_all.shape[0], -1)
+        # E = E_all.unsqueeze(0).expand(z.size(0), -1, -1)
+        # combined = torch.cat([z_expanded, E], dim=-1)
+        # h_s = self.ffn_i(combined) + E
+
+        total_nodes = E_all.size(0)
+        h_s_chunks = []
+
+        for i in range(0, total_nodes, self.chunk_size):
+            end_idx = min(i + self.chunk_size, total_nodes)
+            current_chunk = E_all[i:end_idx]
+
+            z_expanded = z.unsqueeze(1).expand(-1, current_chunk.size(0), -1)
+            E_chunk = current_chunk.unsqueeze(0).expand(z.size(0), -1, -1)
+
+            h_chunk = torch.cat([z_expanded, E_chunk], dim=-1)
+            h_chunk = self.ffn_i(h_chunk)
+            h_s_chunks.append(h_chunk)
+
+            # Free up memory
+            del z_expanded, E_chunk
+            # torch.cuda.empty_cache()
+
+        h_s = torch.cat(h_s_chunks, dim=1)
+
+        # Residual connection
+        h_s = h_s + E_all.unsqueeze(0).expand(z.size(0), -1, -1)
+
         h_ = self.ffn_q(h_s)
         return h_s, h_
 
@@ -559,15 +609,20 @@ class SelfAtt_(nn.Module):
 
     def __init__(self, dim: int, dropout: float = 0.1):
         super().__init__()
+        self.dim = dim
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
-        self.scale = dim**-0.5
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        q, k, v = self.qkv(x).chunk(3, dim=-1)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.dropout(attn)
-        x = attn @ v
+        qkv = self.qkv(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+
+        x = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            dropout_p=self.dropout.p if self.training else 0.0,
+            scale=self.dim**-0.5,
+        )
         return self.proj(x)

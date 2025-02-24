@@ -10,7 +10,13 @@ library(Seurat)
 seurat_object <- readRDS(path_rds)
 
 # 打印 orig.ident 列
-print(seurat_object@meta.data$orig.ident)
+# print(seurat_object@meta.data$orig.ident)
+
+# 打印矩阵信息
+print(colnames(seurat_object@assays[[1]]@data))
+
+# 查看特征信息
+head(seurat_object@assays[[1]]@data)
 
 # 查看元数据表
 head(seurat_object@meta.data)

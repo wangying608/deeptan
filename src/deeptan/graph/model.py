@@ -53,7 +53,7 @@ class DeepTAN(ltn.LightningModule):
         class_weights: Optional[List[float]] = None,
         node_emb_dim: int = 128,
         fusion_dims_node_emb: List[int] = [256, 512, 128],
-        output_dim_g_emb: int = 512,
+        output_dim_g_emb: int = 128,
         n_hop: int = 2,
         threshold_edge_exist: float = 0.1,
         threshold_subgraph_overlap: float = 0.99,
@@ -63,17 +63,37 @@ class DeepTAN(ltn.LightningModule):
         lr: float = 1e-4,
         negative_slope: float = 0.1,
         alpha: float = 0.5,
+        chunk_size: int = 1024,
     ):
+        r"""
+        Initialize the DeepTAN model.
+
+        Args:
+            dict_node_names (Dict[str, int]): A dictionary mapping node names to their respective indices.
+            input_dim (int): The dimension of the input features.
+            output_g_label_dim (Optional[int]): The dimension of the output graph label. If None, it defaults to 2.
+            is_regression (bool): Whether the task is a regression task.
+            class_weights (Optional[List[float]]): A list of label class weights for the loss function.
+            node_emb_dim (int): The dimension of the node embeddings.
+            fusion_dims_node_emb (List[int]): A list of dimensions for the fusion layers of node embeddings.
+            output_dim_g_emb (int): The dimension of the output graph embeddings.
+            n_hop (int): The number of hops for subgraph division.
+            threshold_edge_exist (float): The threshold for edge existence.
+            threshold_subgraph_overlap (float): The threshold for subgraph overlap. Similar subgraphs are merged if their overlap exceeds this threshold.
+            n_heads_node_emb (int): The number of attention heads for the node embedding layers.
+            n_heads_pooling (int): The number of attention heads for the pooling layers.
+            dropout (float): The dropout rate.
+            lr (float): The learning rate.
+            negative_slope (float): The negative slope for the LeakyReLU activation.
+            alpha (float): The alpha parameter for the weight of label prediction loss (alpha) and feature reconstruction loss (1 - alpha).
+            chunk_size (int): The chunk size for processing large matrices.
+        """
         super().__init__()
         self.save_hyperparameters()
         self.dict_node_names = dict_node_names
+        self.chunk_size = chunk_size
 
         self.output_dim = output_g_label_dim if output_g_label_dim is not None else 2
-        # self.class_weights = (
-        #     torch.tensor(class_weights, dtype=torch.float32, device=self.device)
-        #     if class_weights is not None
-        #     else None
-        # )
         self.class_weights = class_weights
 
         # Core components
@@ -90,6 +110,7 @@ class DeepTAN(ltn.LightningModule):
             threshold_subgraph_overlap=threshold_subgraph_overlap,
             negative_slope=negative_slope,
             dropout=dropout,
+            chunk_size=self.chunk_size,
         )
 
         # Multi-task decoders
@@ -100,6 +121,7 @@ class DeepTAN(ltn.LightningModule):
             hidden_dim=512,
             dropout=dropout,
             negative_slope=negative_slope,
+            chunk_size=self.chunk_size,
         )
 
         # Graph-level label predictor
@@ -112,12 +134,6 @@ class DeepTAN(ltn.LightningModule):
         self.ema_loss = None
 
     def forward(self, batch: GData) -> Dict[str, Any]:
-        # Check input dimension of x
-        # print(f"\nInput x shape: {batch.x.shape}")
-        # # Check data distribution of x
-        # print(f"Input x distribution: mean = {batch.x.mean()}, std = {batch.x.std()}")
-        # # Check if x has the correct number of dimensions
-        # print(f"Input x dimensions: {batch.x.dim()}\n")
         assert batch.x is not None, "Input x is None"
         assert batch.edge_index is not None, "Input edge_index is None"
         assert batch.x.dim() == 2, f"The input dim is wrong: {batch.x.shape}"
@@ -155,8 +171,6 @@ class DeepTAN(ltn.LightningModule):
 
         # Graph-level label prediction
         pred_labels = self.g_label_predictor(z)
-        # if not self.hparams.is_regression:
-        #     pred_labels = F.softmax(pred_labels, dim=1)
 
         # Node-level reconstruction loss
         recon_node_val_for_loss_list = [
@@ -209,7 +223,6 @@ class DeepTAN(ltn.LightningModule):
         if batch.y is not None:
             preds = outputs["label_pred"]
             targets = torch.as_tensor(batch.y, device=preds.device)
-            # print(f"\npreds:\n{preds.shape}\ntargets:{targets.shape}\n")
             if not self.hparams.is_regression:
                 if targets.ndim > 1 and targets.shape[1] > 1:
                     targets = torch.argmax(targets, dim=1)
@@ -221,19 +234,28 @@ class DeepTAN(ltn.LightningModule):
 
     def configure_optimizers(self):
         optimizer = AdamW(
-            self.parameters(), lr=self.hparams.lr, weight_decay=1e-4, betas=(0.9, 0.98)
+            self.parameters(),
+            lr=self.hparams.lr,  # weight_decay=1e-4, betas=(0.9, 0.98)
         )
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        #     optimizer,
+        #     T_0=10,
+        #     T_mult=2,
+        #     eta_min=1e-7,
+        # )
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            T_0=10,
-            T_mult=2,
-            eta_min=1e-6,
+            mode="min",
+            factor=0.1,
+            patience=1,
+            threshold=1e-4,
         )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step",
+                "interval": "epoch",
                 "frequency": 1,
                 "monitor": "val_loss",
             },
@@ -314,25 +336,25 @@ class DeepTAN(ltn.LightningModule):
         # Node reconstruction loss
         recon_loss = F.mse_loss(node_recon_for_loss, node_true_val_for_loss)
 
-        kl_loss = F.kl_div(
-            F.log_softmax(node_recon_for_loss, dim=1),
-            F.softmax(node_true_val_for_loss, dim=1),
-            log_target=True,
-            reduction="mean",
-        )
+        # kl_loss = F.kl_div(
+        #     F.log_softmax(node_recon_for_loss, dim=1),
+        #     F.softmax(node_true_val_for_loss, dim=1),
+        #     log_target=True,
+        #     reduction="mean",
+        # )
 
         recon_loss_zeros = F.mse_loss(
             outputs["node_recon_for_loss_zeros"].squeeze(1),
             torch.zeros_like(outputs["node_recon_for_loss_zeros"].squeeze(1)),
         )
 
-        losses["recon_KLD"] = kl_loss
+        # losses["recon_KLD"] = kl_loss
         losses["recon_MSE"] = recon_loss
         losses["recon_zeros"] = recon_loss_zeros
 
         # Total reconstruction loss
-        losses["recon"] = recon_loss + kl_loss + recon_loss_zeros
-        # losses["recon"] = recon_loss  # + 0.2 * recon_loss_zeros
+        # losses["recon"] = recon_loss + kl_loss + recon_loss_zeros
+        losses["recon"] = recon_loss + recon_loss_zeros
 
         # Graph-level label prediction loss
         if batch.y is None:
