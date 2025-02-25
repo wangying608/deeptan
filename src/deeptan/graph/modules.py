@@ -268,26 +268,30 @@ class AMSGP(torch.nn.Module):
         return torch.stack(graph_embs), E_i, E_all
 
     def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
-        row, col = edge_index
-        num_edges = edge_index.size(1)
-        cos_sim = []
+        with torch.no_grad():
+            row, col = edge_index
+            num_edges = edge_index.size(1)
+            cos_sim = []
 
-        # Calculate cosine similarity for each edge in batches to reduce peak memory usage.
-        for i in range(0, num_edges, self.chunk_size):
-            idx = slice(i, min(i + self.chunk_size, num_edges))
-            h_i = h[row[idx]]
-            h_j = h[col[idx]]
-            # Cosine similarity and immediately release intermediate tensors
-            batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
-            cos_sim.append(batch_cos)
+            # Calculate cosine similarity for each edge in batches to reduce peak memory usage.
+            for i in range(0, num_edges, self.chunk_size):
+                idx = slice(i, min(i + self.chunk_size, num_edges))
+                h_i = h[row[idx]]
+                h_j = h[col[idx]]
+                # Cosine similarity and immediately release intermediate tensors
+                batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
+                cos_sim.append(batch_cos)
 
-        cos_sim = torch.cat(cos_sim, dim=0)
+            cos_sim = torch.cat(cos_sim, dim=0)
 
-        # Combine with edge attributes
-        edge_weight = cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
+            # Combine with edge attributes
+            edge_weight = (
+                cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
+            )
 
-        # Filter edges
-        mask = edge_weight > self.threshold_edge_exist
+            # Filter edges
+            mask = edge_weight > self.threshold_edge_exist
+
         filtered_edge = edge_index[:, mask]
         filtered_weight = edge_weight[mask]
 
@@ -298,54 +302,111 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
+    # def _generate_multiscale_subgraphs(
+    #     self, edge_index, num_nodes, centrality, h, device
+    # ):
+    #     # Adaptive binning using quantiles
+    #     q_low, q_high = torch.quantile(
+    #         centrality, torch.tensor([0.2, 0.85], device=device)
+    #     )
+    #     central_nodes = torch.where(centrality > q_high)[0]
+
+    #     # Parallel subgraph generation with index remapping
+    #     subgraphs = []
+    #     for node_idx in central_nodes:
+    #         subset, subg_edge_idx, _, _ = k_hop_subgraph(
+    #             int(node_idx.item()),
+    #             self.n_hop,
+    #             edge_index,
+    #             num_nodes=num_nodes,
+    #             flow="source_to_target",
+    #         )
+
+    #         if subset.size(0) < 2 or subg_edge_idx.size(1) == 0:
+    #             continue
+
+    #         # Remap edge indices to local subgraph indices
+    #         node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
+    #         node_mapping[subset] = torch.arange(len(subset), device=device)
+    #         subg_edge_local = node_mapping[subg_edge_idx]
+
+    #         # Skip isolated nodes or invalid subgraphs
+    #         # if len(subset) >= 2 and subg_edge_local.size(1) > 0:
+    #         subgraphs.append(
+    #             GData(
+    #                 x=h[subset],
+    #                 edge_index=subg_edge_local,
+    #                 center_node=node_idx,
+    #                 node_idx=subset,
+    #             )
+    #         )
+
+    #     # Node coverage-based merging
+    #     subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
+    #     coverage = torch.zeros(num_nodes, device=device)
+    #     merged = []
+    #     for subg in subgraphs:
+    #         overlap = coverage[subg.node_idx].mean()
+    #         if overlap < self.threshold_subgraph_overlap:
+    #             merged.append(subg)
+    #             coverage[subg.node_idx] += 1
+
+    #     del coverage, subgraphs
+    #     torch.cuda.empty_cache()
+
+    #     return merged
+
     def _generate_multiscale_subgraphs(
         self, edge_index, num_nodes, centrality, h, device
     ):
-        # Adaptive binning using quantiles
-        q_low, q_high = torch.quantile(
-            centrality, torch.tensor([0.2, 0.85], device=device)
-        )
+        q_high = torch.quantile(centrality, 0.85) + 1e-6
         central_nodes = torch.where(centrality > q_high)[0]
 
-        # Parallel subgraph generation with index remapping
-        subgraphs = []
-        for node_idx in central_nodes:
-            subset, subg_edge_idx, _, _ = k_hop_subgraph(
-                int(node_idx.item()),
-                self.n_hop,
-                edge_index,
-                num_nodes=num_nodes,
-                flow="source_to_target",
-            )
+        node_degrees = torch.bincount(edge_index[0], minlength=num_nodes)
+        central_nodes = central_nodes[(node_degrees[central_nodes] >= 2)]
 
-            if subset.size(0) < 2 or subg_edge_idx.size(1) == 0:
-                continue
-
-            # Remap edge indices to local subgraph indices
-            node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
-            node_mapping[subset] = torch.arange(len(subset), device=device)
-            subg_edge_local = node_mapping[subg_edge_idx]
-
-            # Skip isolated nodes or invalid subgraphs
-            # if len(subset) >= 2 and subg_edge_local.size(1) > 0:
-            subgraphs.append(
-                GData(
-                    x=h[subset],
-                    edge_index=subg_edge_local,
-                    center_node=node_idx,
-                    node_idx=subset,
+        subsets, subg_edge_indices, _, _ = zip(
+            *[
+                k_hop_subgraph(
+                    int(node_idx),
+                    self.n_hop,
+                    edge_index,
+                    num_nodes,
+                    flow="source_to_target",
                 )
-            )
+                for node_idx in central_nodes
+            ]
+        )
 
-        # Node coverage-based merging
-        subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
-        coverage = torch.zeros(num_nodes, device=device)
+        subgraph_pool = []
+        for i, (subset, subg_edge_idx) in enumerate(zip(subsets, subg_edge_indices)):
+            if len(subset) >= 2 and subg_edge_idx.size(1) > 0:
+                node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
+                node_mapping[subset] = torch.arange(len(subset), device=device)
+                subg_edge_local = node_mapping[subg_edge_idx]
+
+                subgraph_pool.append(
+                    GData(
+                        x=h[subset],
+                        edge_index=subg_edge_local,
+                        center_node=central_nodes[i],
+                        node_idx=subset,
+                    )
+                )
+
+        subgraphs = sorted(subgraph_pool, key=lambda x: -x.num_nodes)
+
+        coverage_bits = torch.zeros(num_nodes, dtype=torch.int32, device=device)
         merged = []
         for subg in subgraphs:
-            overlap = coverage[subg.node_idx].mean()
-            if overlap < self.threshold_subgraph_overlap:
+            subg_bits = torch.zeros(num_nodes, dtype=torch.int32, device=device)
+            subg_bits[subg.node_idx] = 1
+
+            overlap_ratio = (coverage_bits & subg_bits).sum().float() / subg.num_nodes
+            if overlap_ratio < self.threshold_subgraph_overlap:
                 merged.append(subg)
-                coverage[subg.node_idx] += 1
+                coverage_bits |= subg_bits
+
         return merged
 
     def _create_graph_embeddings(self, subgraphs):
@@ -499,7 +560,7 @@ class GE_Decoder(nn.Module):
         self.chunk_size = chunk_size
 
         self.ffn_i = nn.Sequential(
-            # SelfAtt_(z_dim + h_dim, dropout),
+            SelfAtt_(z_dim + h_dim, dropout),
             nn.Linear(z_dim + h_dim, hidden_dim),
             # nn.ReLU(),
             nn.GELU(),

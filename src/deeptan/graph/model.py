@@ -3,9 +3,12 @@ DeepTAN:
 Trait-associated multi-omics network inference via multi-task NMIC-guided adaptive multi-scale graph embedding.
 """
 
+import os
 from typing import List, Dict, Optional, Any
 from sympy import flatten
 import pickle
+import polars as pl
+import optuna
 import torch
 import torch.nn.functional as F
 from torch.optim.adamw import AdamW
@@ -34,7 +37,12 @@ from torchmetrics.regression import (
 )
 import deeptan.constants as const
 from deeptan.graph.modules import AMSGP, GE_Decoder, GLabelPredictor
-from deeptan.utils.uni import collate_fn, get_map_location
+from deeptan.utils.uni import collate_fn, get_map_location, time_string, random_string
+from deeptan.utils.data import (
+    DeepTANDataModule,
+    DeepTANDataModuleLit,
+    celltypes_class_weights,
+)
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 
@@ -230,6 +238,10 @@ class DeepTAN(ltn.LightningModule):
 
         # Logging metrics and losses
         self._log_metrics(losses, stage)
+
+        del outputs
+        torch.cuda.empty_cache()
+
         return losses["loss"]
 
     def configure_optimizers(self):
@@ -522,6 +534,7 @@ def train_model(
     trainer = Trainer(
         fast_dev_run=fast_dev_run,
         # strategy="ddp_spawn",
+        enable_progress_bar=False,
         accumulate_grad_batches=accumulate_grad_batches,
         logger=logger_tr,
         log_every_n_steps=1,
@@ -549,6 +562,187 @@ def train_model(
     print(f"Best model path: {callback_ckpt.best_model_path}\n")
 
     return best_score
+
+
+class DeepTANTune:
+    r"""
+    DeepTAN hyperparameter tuning class with Optuna integration.
+    """
+
+    def __init__(self, args: Dict[str, Any]):
+        """Initialize tuning environment with parameters"""
+        # Store configuration parameters
+        self.args = args
+
+        self.log_dir = self.args["log_dir"]
+        if self.log_dir.endswith("/"):
+            self.log_dir = self.log_dir[:-1]
+
+        self.log_name = f"DeepTAN_{time_string()}_{random_string(5)}"
+        os.makedirs(os.path.join(self.log_dir, self.log_name), exist_ok=True)
+        self.path_optuna_db = (
+            "sqlite:///" + self.log_dir + f"/{self.log_name}/optuna.db"
+        )
+
+        # Initialize data module
+        self._init_data_module()
+
+        # Initialize class weights
+        self.class_weight = self._init_class_weights()
+
+    def _init_data_module(self):
+        """Initialize data module based on input parameters"""
+        if self.args.get("litdata"):
+            with open(os.path.join(self.args["litdata"], "others2save.pkl"), "rb") as f:
+                others2save = pickle.load(f)
+            self.dict_node_names = others2save["dict_node_names"]
+            self.output_g_label_dim = others2save["output_g_label_dim"]
+
+            self.datamodule = DeepTANDataModuleLit(
+                self.args["litdata"],
+                batch_size=self.args["bs"],
+                n_workers=self.args["nworker"],
+            )
+            self.datamodule.setup()
+        elif all([self.args.get(k) for k in ["trn_npz", "val_parquet", "tst_parquet"]]):
+            labels = self.args["labels"] if self.args.get("labels") else None
+            files_fit = {
+                "trn": self.args["trn_npz"],
+                "val": self.args["val_parquet"],
+                "tst": self.args["tst_parquet"],
+            }
+            self.datamodule = DeepTANDataModule(
+                files_fit, labels, batch_size=self.args["bs"]
+            )
+            self.datamodule.setup()
+            self.dict_node_names = self.datamodule.dict_node_names
+            self.output_g_label_dim = self.datamodule.label_dim
+
+        else:
+            raise ValueError("Invalid data configuration")
+
+    def _init_class_weights(self):
+        """Initialize class weights if provided"""
+        if self.args.get("onehot_class"):
+            return celltypes_class_weights(pl.read_parquet(self.args["onehot_class"]))
+        return None
+
+    def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
+        fusion_dims_node_emb = trial_params.get(
+            "fusion_dims_node_emb", self.args["fusion_dims_node_emb"]
+        )
+        if isinstance(fusion_dims_node_emb, str):
+            fusion_dims_node_emb = eval(fusion_dims_node_emb)
+
+        """Create model instance with trial parameters"""
+        return DeepTAN(
+            dict_node_names=self.dict_node_names,
+            input_dim=self.args["input_node_emb_dim"],
+            output_g_label_dim=self.output_g_label_dim,
+            is_regression=self.args["is_regression"],
+            class_weights=self.class_weight,
+            node_emb_dim=trial_params.get("node_emb_dim", self.args["node_emb_dim"]),
+            fusion_dims_node_emb=fusion_dims_node_emb,
+            output_dim_g_emb=trial_params.get(
+                "output_dim_g_emb", self.args["output_dim_g_emb"]
+            ),
+            n_hop=trial_params.get("n_hop", self.args["n_hop"]),
+            threshold_edge_exist=trial_params.get(
+                "threshold_edge_exist", self.args["threshold_edge_exist"]
+            ),
+            threshold_subgraph_overlap=trial_params.get(
+                "threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]
+            ),
+            n_heads_node_emb=trial_params.get(
+                "n_heads_node_emb", self.args["n_heads_node_emb"]
+            ),
+            n_heads_pooling=trial_params.get(
+                "n_heads_pooling", self.args["n_heads_pooling"]
+            ),
+            dropout=trial_params.get("dropout", self.args["dropout"]),
+            lr=trial_params.get("lr", self.args["lr"]),
+            negative_slope=trial_params.get(
+                "negative_slope", self.args["negative_slope"]
+            ),
+            alpha=trial_params.get("alpha", self.args["alpha"]),
+            chunk_size=self.args["chunk_size"],
+        )
+
+    def objective(self, trial: optuna.Trial) -> float:
+        """Optuna objective function for hyperparameter optimization"""
+        try:
+            fusion_dims_node_emb_lists_to_try = [[256, 512, 256], [256, 256, 256]]
+            fusion_dims_node_emb_list_strings = [
+                str(lst) for lst in fusion_dims_node_emb_lists_to_try
+            ]
+
+            # Suggest hyperparameters
+            params = {
+                "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=True),
+                "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.3),
+                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 256]),
+                "n_heads_node_emb": trial.suggest_categorical(
+                    "n_heads_node_emb", [1, 4]
+                ),
+                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [1, 4]),
+                "fusion_dims_node_emb": trial.suggest_categorical(
+                    "fusion_dims_node_emb",
+                    fusion_dims_node_emb_list_strings,
+                ),
+                "output_dim_g_emb": trial.suggest_categorical(
+                    "output_dim_g_emb", [128, 256, 512]
+                ),
+                "alpha": trial.suggest_float("alpha", 0.1, 0.9, step=0.2),
+            }
+
+            # Create model with suggested parameters
+            model = self.create_model(params)
+
+            # Execute training run
+            val_loss = train_model(
+                model=model,
+                datamodule=self.datamodule,
+                es_patience=self.args["es"],
+                max_epochs=self.args["max_ep"],
+                min_epochs=self.args["min_ep"],
+                log_dir=os.path.join(
+                    self.log_dir, self.log_name, f"trial_{trial.number}"
+                ),
+                accumulate_grad_batches=self.args["acc_grad_batch"],
+                accelerator=self.args["accelerator"],
+            )
+
+            if val_loss is None:
+                raise optuna.TrialPruned()
+
+            return val_loss
+
+        except torch.cuda.OutOfMemoryError:
+            print("Out of memory error, skipping trial")
+            raise optuna.TrialPruned()
+        except Exception as e:
+            print(f"An error occurred in trial {trial.number}: {e}")
+            raise optuna.TrialPruned()
+
+    def optimize(self, n_trials: int = 100, n_jobs: int = 1):
+        """Run hyperparameter optimization with Optuna"""
+        study = optuna.create_study(
+            direction="minimize",
+            study_name=self.log_name,
+            storage=self.path_optuna_db,
+            load_if_exists=True,
+        )
+
+        study.optimize(
+            self.objective, n_trials=n_trials, n_jobs=n_jobs, gc_after_trial=True
+        )
+
+        print("Best trial:")
+        trial = study.best_trial
+        print(f"  Value: {trial.value}")
+        print("  Params:")
+        for key, value in trial.params.items():
+            print(f"    {key}: {value}")
 
 
 def predict(
@@ -627,3 +821,58 @@ def process_results(pickle_path: str, output_pkl: str):
     print(f"Saving results to {output_pkl}")
     with open(output_pkl, "wb") as f:
         pickle.dump(results_dict, f)
+
+
+# import argparse
+
+
+# def parse_args():
+#     parser = argparse.ArgumentParser(description="DeepTAN tuning pipeline.")
+
+#     parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
+#     parser.add_argument('--bs', type=int, default=8, help='Batch size for training')
+#     parser.add_argument('--log_dir', type=str, default=".tmp_logs_tune", help='Directory for logging')
+#     parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
+#     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
+#     parser.add_argument('--onehot_class', type=str, default="", help='Path to a parquet file containing one-hot encoded class labels')
+#     parser.add_argument('--chunk_size', type=int, default=1024, help='A proper chunk size can balance memory usage and speed')
+#     parser.add_argument('--accelerator', type=str, default="auto", help="cpu, gpu, tpu, hpu, mps, auto")
+
+#     return parser.parse_args()
+
+
+# # Example usage
+# if __name__ == "__main__":
+#     args = parse_args()
+
+#     # Example configuration (should match original argparse parameters)
+#     config = {
+#         "log_dir": args.log_dir,
+#         "litdata": args.litdata,
+#         "bs": args.bs,
+#         "chunk_size": args.chunk_size,
+#         "is_regression": args.is_regression,
+#         "onehot_class": args.onehot_class,
+#         "accelerator": args.accelerator,
+#         "input_node_emb_dim": args.input_node_emb_dim,
+#         "acc_grad_batch": 8,
+#         "es": 5,
+#         "node_emb_dim": 128,
+#         "fusion_dims_node_emb": [256, 256, 256],
+#         "output_dim_g_emb": 256,
+#         "n_hop": 2,
+#         "threshold_edge_exist": 0.1,
+#         "threshold_subgraph_overlap": 0.99,
+#         "n_heads_node_emb": 2,
+#         "n_heads_pooling": 2,
+#         "dropout": 0.1,
+#         "lr": 1e-3,
+#         "negative_slope": 0.2,
+#         "alpha": 0.5,
+#         "max_ep": 1000,
+#         "min_ep": 2,
+#         "nworker": 1,
+#     }
+
+#     tuner = DeepTANTune(config)
+#     tuner.optimize(n_trials=50, n_jobs=1)

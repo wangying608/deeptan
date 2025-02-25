@@ -19,8 +19,8 @@ def parse_args():
     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
     parser.add_argument('--onehot_class', type=str, default="", help='Path to a parquet file containing one-hot encoded class labels')
     parser.add_argument('--bs', type=int, default=4, help='Batch size for training')
-    parser.add_argument('--acc_grad_batch', type=int, default=16, help='Accumulate gradients over multiple batches')
-    parser.add_argument('--es_patience', type=int, default=5, help='Early stopping patience')
+    parser.add_argument('--acc_grad_batch', type=int, default=8, help='Accumulate gradients over multiple batches')
+    parser.add_argument('--es', type=int, default=5, help='Early stopping patience')
     parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
     parser.add_argument('--trn_npz', type=str, default="", required=False, help='Path to training data in .npz format')
     parser.add_argument('--val_parquet', type=str, default="", required=False, help='Path to validation data in .parquet format')
@@ -37,8 +37,8 @@ def parse_args():
     parser.add_argument('--lr', type=float, default=1e-3, help='Learning rate')
     parser.add_argument('--negative_slope', type=float, default=0.2, help='Negative slope for LeakyReLU')
     parser.add_argument('--alpha', type=float, default=0.5, help='Alpha for balancing loss terms')
-    parser.add_argument('--max_epochs', type=int, default=1000, help='Maximum number of epochs')
-    parser.add_argument('--min_epochs', type=int, default=2, help='Minimum number of epochs')
+    parser.add_argument('--max_ep', type=int, default=1000, help='Maximum number of epochs')
+    parser.add_argument('--min_ep', type=int, default=2, help='Minimum number of epochs')
     parser.add_argument('--log_dir', type=str, default=".tmp_logs", help='Directory for logging')
     parser.add_argument('--accelerator', type=str, default="auto", help="cpu, gpu, tpu, hpu, mps, auto")
     parser.add_argument('--chunk_size', type=int, default=1024, help='A proper chunk size can balance memory usage and speed')
@@ -103,12 +103,14 @@ if __name__ == "__main__":
         chunk_size=args.chunk_size,
     )
 
+    # model.ge_decoder = torch.compile(model.ge_decoder, mode="reduce-overhead")
+
     train_model(
         model=model,
         datamodule=datamodule,
-        es_patience=args.es_patience,
-        max_epochs=args.max_epochs,
-        min_epochs=args.min_epochs,
+        es_patience=args.es,
+        max_epochs=args.max_ep,
+        min_epochs=args.min_ep,
         log_dir=args.log_dir,
         accumulate_grad_batches=args.acc_grad_batch,
         accelerator=args.accelerator,
