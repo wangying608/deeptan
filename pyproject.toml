@@ -59,6 +59,10 @@ Homepage = "https://github.com/cma2015/DeepTAN"
 
 [project.scripts]
 
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
 [tool.uv.pip]
 index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 

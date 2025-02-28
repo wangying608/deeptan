@@ -2,7 +2,6 @@ r"""
 DeepTAN hyperparameter tuning class with Optuna integration.
 """
 
-import os
 import argparse
 from deeptan.graph.model import DeepTANTune
 
@@ -19,6 +18,8 @@ def parse_args():
     parser.add_argument('--acc_grad_batch', type=int, default=8, help='Accumulate gradients over multiple batches')
     parser.add_argument('--chunk_size', type=int, default=1024, help='A proper chunk size can balance memory usage and speed')
     parser.add_argument('--accelerator', type=str, default="auto", help="cpu, gpu, tpu, hpu, mps, auto")
+    parser.add_argument('--ntrials', type=int, default=20, help='Number of trials for hyperparameter tuning')
+    parser.add_argument('--njobs', type=int, default=1, help='The number of parallel jobs for Optuna. If this argument is set to -1, the number is set to CPU count.')
 
     return parser.parse_args()
 
@@ -49,12 +50,10 @@ if __name__ == "__main__":
         "n_heads_pooling": 2,
         "dropout": 0.1,
         "lr": 1e-3,
-        "negative_slope": 0.2,
-        "alpha": 0.5,
         "max_ep": 1000,
         "min_ep": 2,
-        "nworker": 1,
+        "nworker": 4,
     }
 
     tuner = DeepTANTune(config)
-    tuner.optimize(n_trials=50, n_jobs=1)
+    tuner.optimize(n_trials=args.ntrials, n_jobs=args.njobs)

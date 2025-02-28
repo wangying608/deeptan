@@ -24,7 +24,6 @@ class NodeEmbedding(nn.Module):
         fusion_dims: List[int],
         dict_node_names: Dict[str, int],
         n_heads: int,
-        negative_slope: float = 0.2,
         dropout: float = 0.1,
     ):
         r"""
@@ -36,7 +35,6 @@ class NodeEmbedding(nn.Module):
             fusion_dims: Dimensions for the fusion (fusing observation value and inherent feature) layers.
             dict_node_names: Dictionary mapping node names to indices.
             n_heads: Number of attention heads.
-            negative_slope: Negative slope for the LeakyReLU activation.
             dropout: Dropout rate.
         """
         super().__init__()
@@ -45,15 +43,11 @@ class NodeEmbedding(nn.Module):
         self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
         self.n_heads = n_heads
-        self.negative_slope = negative_slope
 
         self.embed = nn.Embedding(
             len(dict_node_names), embedding_dim, scale_grad_by_freq=True, sparse=True
         )
 
-        # self.mlp1 = nn.Sequential(
-        #     nn.Linear(input_dim, embedding_dim), nn.LayerNorm(embedding_dim), nn.GELU()
-        # )
         self.mlp2 = nn.Sequential(
             nn.Linear(2 * embedding_dim, embedding_dim),
             nn.LayerNorm(embedding_dim),
@@ -66,7 +60,6 @@ class NodeEmbedding(nn.Module):
                 WGATLayer(
                     dim_in if i else embedding_dim,
                     dim_out,
-                    negative_slope,
                     n_heads,
                     dropout,
                 )
@@ -151,9 +144,8 @@ class AMSGP(torch.nn.Module):
         n_hop: int,
         threshold_edge_exist: float,
         threshold_subgraph_overlap: float,
-        negative_slope: float,
         dropout: float = 0.1,
-        chunk_size: int = 1024,
+        chunk_size: int = 8192,
     ):
         r"""
         Initialize the AMSGP model.
@@ -168,7 +160,6 @@ class AMSGP(torch.nn.Module):
             n_hop: The number of hops for subgraph extraction.
             threshold_edge_exist: The threshold for edge existence in subgraphs.
             threshold_subgraph_overlap: The threshold for subgraph overlap.
-            negative_slope: The negative slope for the LeakyReLU activation.
             dropout: The dropout rate for the model.
             chunk_size: The chunk size for parallel processing.
         """
@@ -188,23 +179,20 @@ class AMSGP(torch.nn.Module):
             fusion_dims_node_emb,
             dict_node_names,
             n_heads_node_emb,
-            negative_slope,
         )
 
         # Multi-scale pooling architecture
         self._init_pooling_layers(
-            fusion_dims_node_emb[-1], output_dim_g_emb, negative_slope, n_heads_pooling
+            fusion_dims_node_emb[-1], output_dim_g_emb, n_heads_pooling
         )
 
-    def _init_pooling_layers(self, input_dim, output_dim, slope, heads):
+    def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
-        self.xgat_pool = WGATLayer(input_dim, output_dim, slope, heads, self.dropout)
+        self.xgat_pool = WGATLayer(input_dim, output_dim, heads, self.dropout)
         self.att_pool = SelfAttPool(output_dim, self.dropout)
 
         # Global graph pooling
-        self.global_xgat_pool = WGATLayer(
-            output_dim, output_dim, slope, heads, self.dropout
-        )
+        self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout)
         self.global_att_pool = SelfAttPool(output_dim, self.dropout)
 
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
@@ -212,15 +200,6 @@ class AMSGP(torch.nn.Module):
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
-        # h = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
-        # h, E_i, E_all = checkpoint(
-        #     self._forward_embedding,
-        #     node_names,
-        #     x,
-        #     edge_attr,
-        #     edge_index,
-        #     use_reentrant=False,
-        # )
         h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
 
         # Graph embedding
@@ -255,10 +234,10 @@ class AMSGP(torch.nn.Module):
 
             # Create graph embeddings
             if subgraphs:
-                # g_emb = self._create_graph_embeddings(subgraphs)
-                g_emb = checkpoint(
-                    self._create_graph_embeddings, subgraphs, use_reentrant=False
-                )
+                g_emb = self._create_graph_embeddings(subgraphs)
+                # g_emb = checkpoint(
+                #     self._create_graph_embeddings, subgraphs, use_reentrant=False
+                # )
                 graph_embs.append(g_emb)
             else:
                 # Process empty subgraph case
@@ -282,6 +261,8 @@ class AMSGP(torch.nn.Module):
                 batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
                 cos_sim.append(batch_cos)
 
+                del h_i, h_j, batch_cos
+
             cos_sim = torch.cat(cos_sim, dim=0)
 
             # Combine with edge attributes
@@ -301,60 +282,6 @@ class AMSGP(torch.nn.Module):
         centrality.scatter_add_(0, filtered_edge[1], filtered_weight)
 
         return filtered_edge, centrality
-
-    # def _generate_multiscale_subgraphs(
-    #     self, edge_index, num_nodes, centrality, h, device
-    # ):
-    #     # Adaptive binning using quantiles
-    #     q_low, q_high = torch.quantile(
-    #         centrality, torch.tensor([0.2, 0.85], device=device)
-    #     )
-    #     central_nodes = torch.where(centrality > q_high)[0]
-
-    #     # Parallel subgraph generation with index remapping
-    #     subgraphs = []
-    #     for node_idx in central_nodes:
-    #         subset, subg_edge_idx, _, _ = k_hop_subgraph(
-    #             int(node_idx.item()),
-    #             self.n_hop,
-    #             edge_index,
-    #             num_nodes=num_nodes,
-    #             flow="source_to_target",
-    #         )
-
-    #         if subset.size(0) < 2 or subg_edge_idx.size(1) == 0:
-    #             continue
-
-    #         # Remap edge indices to local subgraph indices
-    #         node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
-    #         node_mapping[subset] = torch.arange(len(subset), device=device)
-    #         subg_edge_local = node_mapping[subg_edge_idx]
-
-    #         # Skip isolated nodes or invalid subgraphs
-    #         # if len(subset) >= 2 and subg_edge_local.size(1) > 0:
-    #         subgraphs.append(
-    #             GData(
-    #                 x=h[subset],
-    #                 edge_index=subg_edge_local,
-    #                 center_node=node_idx,
-    #                 node_idx=subset,
-    #             )
-    #         )
-
-    #     # Node coverage-based merging
-    #     subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
-    #     coverage = torch.zeros(num_nodes, device=device)
-    #     merged = []
-    #     for subg in subgraphs:
-    #         overlap = coverage[subg.node_idx].mean()
-    #         if overlap < self.threshold_subgraph_overlap:
-    #             merged.append(subg)
-    #             coverage[subg.node_idx] += 1
-
-    #     del coverage, subgraphs
-    #     torch.cuda.empty_cache()
-
-    #     return merged
 
     def _generate_multiscale_subgraphs(
         self, edge_index, num_nodes, centrality, h, device
@@ -456,7 +383,6 @@ class WGATLayer(MessagePassing):
         self,
         input_dim: int,
         output_dim: int,
-        negative_slope: float,
         num_heads: int,
         dropout: float = 0.1,
     ):
@@ -466,21 +392,14 @@ class WGATLayer(MessagePassing):
         Args:
             input_dim: The dimension of the input embeddings.
             output_dim: The dimension of the output embeddings.
-            negative_slope: The negative slope of the LeakyReLU activation.
             num_heads: The number of attention heads.
             dropout: The dropout probability for the attention weights.
         """
         super().__init__(aggr="add")
         self.output_dim = output_dim
-        self.negative_slope = negative_slope
         self.num_heads = num_heads
         self.dropout = dropout
 
-        # self.trans = nn.Sequential(
-        #     nn.Linear(input_dim, input_dim * num_heads),
-        #     nn.LeakyReLU(negative_slope),
-        #     nn.Linear(input_dim * num_heads, output_dim * num_heads),
-        # )
         self.trans = nn.Linear(input_dim, output_dim * num_heads)
         # Adjusted for per-head attention computation
         self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
@@ -492,10 +411,10 @@ class WGATLayer(MessagePassing):
         nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
 
     def forward(self, x, edge_index, edge_attr=None):
-        # return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        return checkpoint(
-            self.propagate, edge_index, x=x, edge_attr=edge_attr, use_reentrant=False
-        )
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+        # return checkpoint(
+        #     self.propagate, edge_index, x=x, edge_attr=edge_attr, use_reentrant=False
+        # )
 
     def message(self, x_i, x_j, edge_attr):
         # Compute attention scores per head
@@ -513,10 +432,9 @@ class WGATLayer(MessagePassing):
             e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
 
         # Normalize attention scores
-        # a = F.leaky_relu(e, self.negative_slope)
         a = F.gelu(e)
         a = F.softmax(a, dim=0)
-        a = F.dropout(a, self.dropout, training=self.training)
+        # a = F.dropout(a, self.dropout, training=self.training)
 
         # Transform features and prepare multi-head output
         # [E, num_heads, output_dim]
@@ -542,7 +460,6 @@ class GE_Decoder(nn.Module):
         output_dim: int,
         hidden_dim: int = 512,
         dropout: float = 0.1,
-        negative_slope: float = 0.1,
         chunk_size: int = 1024,
     ):
         r"""
@@ -562,16 +479,15 @@ class GE_Decoder(nn.Module):
         self.ffn_i = nn.Sequential(
             SelfAtt_(z_dim + h_dim, dropout),
             nn.Linear(z_dim + h_dim, hidden_dim),
-            # nn.ReLU(),
             nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, h_dim),
             nn.LayerNorm(h_dim),
         )
+        # self.lstm = nn.LSTM(h_dim, h_dim, batch_first=True)
         self.ffn_q = nn.Sequential(
             # SelfAtt_(h_dim, dropout),
             nn.Linear(h_dim, hidden_dim),
-            # nn.LeakyReLU(negative_slope),
             nn.GELU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, output_dim),
@@ -595,10 +511,11 @@ class GE_Decoder(nn.Module):
 
             h_chunk = torch.cat([z_expanded, E_chunk], dim=-1)
             h_chunk = self.ffn_i(h_chunk)
+            # h_chunk, _ = self.lstm(h_chunk)
             h_s_chunks.append(h_chunk)
 
             # Free up memory
-            del z_expanded, E_chunk
+            del z_expanded, E_chunk, h_chunk
             # torch.cuda.empty_cache()
 
         h_s = torch.cat(h_s_chunks, dim=1)
@@ -657,9 +574,11 @@ class SelfAttPool(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.dropout(attn)
-        x = (attn @ v).mean(dim=0)
+        # x = (attn @ v).mean(dim=0)
+        x = attn @ v
+        x = x.mean(dim=0)# + x.std(dim=0)
         x = self.proj(x)
-        x = self.dropout(x)
+        # x = self.dropout(x)
         return x
 
 

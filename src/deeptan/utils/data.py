@@ -41,7 +41,9 @@ def read_csv_celltypes2onehot(csv_path):
 def read_h5ad_celltypes2onehot(h5ad_path, celltype_key="Celltype"):
     celltypes = sc.read_h5ad(h5ad_path).obs[celltype_key]
     print(celltypes.value_counts())
-    celltypes_pl = pl.DataFrame({"bc": celltypes.index, "ct": celltypes.values.astype(str)})
+    celltypes_pl = pl.DataFrame(
+        {"bc": celltypes.index, "ct": celltypes.values.astype(str)}
+    )
     celltypes_onehot = celltypes_pl.to_dummies(columns=["ct"])
 
     # Add a new column "ct_unknown" which all values are 0 (type: u8)
@@ -254,8 +256,7 @@ class DeepTANDataModule(LightningDataModule):
         self,
         files: dict[str, str],
         labels: str | None,
-        batch_size: int,
-        # num_workers: int | None = None,
+        batch_size: int = 1,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:
@@ -265,9 +266,6 @@ class DeepTANDataModule(LightningDataModule):
         self.files = files
         self.labels = labels
         self.batch_size = batch_size
-        # self.num_workers = (
-        #     get_avail_cpu_count(num_workers) if num_workers else get_avail_cpu_count(28)
-        # )
 
     def setup(self, stage=None):
         self.train = NMICGraphDataset(self.files["trn"], self.labels)
@@ -327,21 +325,26 @@ class DeepTANDataModuleLit(LightningDataModule):
             StreamingDataset(os.path.join(self.litdata_dir, "trn")),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
+            persistent_workers=True,
             shuffle=True,
             pin_memory=True,
             collate_fn=collate_fn,
+            drop_last=True,
         )
         self.dataloader_val = StreamingDataLoader(
             StreamingDataset(os.path.join(self.litdata_dir, "val")),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
-            pin_memory=True,
+            persistent_workers=True,
+            pin_memory=False,
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(
             StreamingDataset(os.path.join(self.litdata_dir, "tst")),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
+            persistent_workers=True,
+            pin_memory=False,
             collate_fn=collate_fn,
         )
 

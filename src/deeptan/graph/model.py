@@ -47,6 +47,40 @@ from deeptan.utils.data import (
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 
 
+class FocalLoss(torch.nn.Module):
+    r"""Multi-class Focal Loss
+    Formula: loss = -alpha * (1-p)^gamma * log(p)
+    """
+
+    def __init__(
+        self,
+        gamma: float = 0.0,
+        alpha: Optional[torch.Tensor] = None,
+        reduction: str = "mean",
+    ):
+        super().__init__()
+        self.gamma = gamma
+        self.alpha = alpha
+        self.reduction = reduction
+
+    def forward(self, inputs, targets):
+        ce_loss = F.cross_entropy(
+            inputs,
+            targets,
+            weight=None,
+            reduction="none",
+        )
+        pt = torch.exp(-ce_loss)  # p = exp(-CE)
+        loss = (1 - pt) ** self.gamma * ce_loss
+
+        if self.alpha is not None:
+            alpha = self.alpha.to(inputs.device)
+            alpha_weight = alpha[targets]
+            loss = alpha_weight * loss
+
+        return loss.mean() if self.reduction == "mean" else loss
+
+
 class DeepTAN(ltn.LightningModule):
     r"""
     DeepTAN.
@@ -59,6 +93,9 @@ class DeepTAN(ltn.LightningModule):
         output_g_label_dim: Optional[int],
         is_regression: bool,
         class_weights: Optional[List[float]] = None,
+        use_focal_loss: bool = True,
+        # focal_gamma: float = 2.0,
+        focal_alpha: Optional[List[float]] = None,
         node_emb_dim: int = 128,
         fusion_dims_node_emb: List[int] = [256, 512, 128],
         output_dim_g_emb: int = 128,
@@ -69,8 +106,6 @@ class DeepTAN(ltn.LightningModule):
         n_heads_pooling: int = 4,
         dropout: float = 0.1,
         lr: float = 1e-4,
-        negative_slope: float = 0.1,
-        alpha: float = 0.5,
         chunk_size: int = 1024,
     ):
         r"""
@@ -92,17 +127,31 @@ class DeepTAN(ltn.LightningModule):
             n_heads_pooling (int): The number of attention heads for the pooling layers.
             dropout (float): The dropout rate.
             lr (float): The learning rate.
-            negative_slope (float): The negative slope for the LeakyReLU activation.
-            alpha (float): The alpha parameter for the weight of label prediction loss (alpha) and feature reconstruction loss (1 - alpha).
             chunk_size (int): The chunk size for processing large matrices.
         """
         super().__init__()
+        # self.save_hyperparameters(ignore=["dict_node_names"])
         self.save_hyperparameters()
+
         self.dict_node_names = dict_node_names
         self.chunk_size = chunk_size
+        self.input_dim = input_dim
+        self.is_regression = is_regression
+        self.lr = lr
+        self.output_g_label_dim = output_g_label_dim
 
         self.output_dim = output_g_label_dim if output_g_label_dim is not None else 2
         self.class_weights = class_weights
+
+        self.use_focal_loss = use_focal_loss
+        if focal_alpha is None:
+            if class_weights is not None:
+                self.focal_alpha = torch.tensor(class_weights)
+            else:
+                self.focal_alpha = torch.tensor([1.0] * self.output_dim)
+        else:
+            self.focal_alpha = torch.tensor(focal_alpha)
+        # self.focal_gamma = focal_gamma
 
         # Core components
         self.amsgp = AMSGP(
@@ -116,7 +165,6 @@ class DeepTAN(ltn.LightningModule):
             n_hop=n_hop,
             threshold_edge_exist=threshold_edge_exist,
             threshold_subgraph_overlap=threshold_subgraph_overlap,
-            negative_slope=negative_slope,
             dropout=dropout,
             chunk_size=self.chunk_size,
         )
@@ -128,7 +176,6 @@ class DeepTAN(ltn.LightningModule):
             output_dim=input_dim,
             hidden_dim=512,
             dropout=dropout,
-            negative_slope=negative_slope,
             chunk_size=self.chunk_size,
         )
 
@@ -140,6 +187,10 @@ class DeepTAN(ltn.LightningModule):
         # Metrics and initialization
         self._init_metrics()
         self.ema_loss = None
+
+        # Learnable uncertainty parameters
+        self.log_var_label = torch.nn.Parameter(torch.zeros(1))
+        self.log_var_recon = torch.nn.Parameter(torch.zeros(1))
 
     def forward(self, batch: GData) -> Dict[str, Any]:
         assert batch.x is not None, "Input x is None"
@@ -231,7 +282,7 @@ class DeepTAN(ltn.LightningModule):
         if batch.y is not None:
             preds = outputs["label_pred"]
             targets = torch.as_tensor(batch.y, device=preds.device)
-            if not self.hparams.is_regression:
+            if not self.is_regression:
                 if targets.ndim > 1 and targets.shape[1] > 1:
                     targets = torch.argmax(targets, dim=1)
             self.metrics_task_label[f"{stage}_metrics"].update(preds, targets)
@@ -245,33 +296,38 @@ class DeepTAN(ltn.LightningModule):
         return losses["loss"]
 
     def configure_optimizers(self):
-        optimizer = AdamW(
-            self.parameters(),
-            lr=self.hparams.lr,  # weight_decay=1e-4, betas=(0.9, 0.98)
-        )
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-        #     optimizer,
-        #     T_0=10,
-        #     T_mult=2,
-        #     eta_min=1e-7,
-        # )
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer = AdamW(self.parameters(), lr=self.lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            mode="min",
-            factor=0.1,
-            patience=1,
-            threshold=1e-4,
+            T_0=1,
+            T_mult=1,
+            eta_min=1e-7,
         )
+        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer,
+        #     mode="min",
+        #     factor=0.1,
+        #     patience=1,
+        #     threshold=1e-4,
+        # )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
                 "interval": "epoch",
                 "frequency": 1,
-                "monitor": "val_loss",
+                "monitor": const.dkey.title_val_loss,
             },
         }
+
+    def on_train_epoch_start(self) -> None:
+        if self.current_epoch < 10:
+            # Initially focused on overall distribution
+            self.focal_gamma = 0.5
+        else:
+            # Focus on difficult samples in the later stage
+            self.focal_gamma = 2.0
 
     def _init_metrics(self):
         if hasattr(self, "metrics"):
@@ -279,12 +335,12 @@ class DeepTAN(ltn.LightningModule):
 
         metrics_common = MetricCollection(
             {
-                "MSE": MeanSquaredError(num_outputs=self.hparams.input_dim),
-                "MAE": MeanAbsoluteError(num_outputs=self.hparams.input_dim),
-                "PCC": PearsonCorrCoef(num_outputs=self.hparams.input_dim),
+                "MSE": MeanSquaredError(num_outputs=self.input_dim),
+                "MAE": MeanAbsoluteError(num_outputs=self.input_dim),
+                "PCC": PearsonCorrCoef(num_outputs=self.input_dim),
             }
         )
-        if self.hparams.is_regression:
+        if self.is_regression:
             metrics_task_label = MetricCollection(
                 {
                     "MSE": MeanSquaredError(num_outputs=self.output_dim),
@@ -323,13 +379,13 @@ class DeepTAN(ltn.LightningModule):
         # Create metrics for all stages
         self.metrics_common = torch.nn.ModuleDict(
             {
-                f"{k}_metrics": metrics_common.clone(prefix=k + "_recon_")
+                f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_")
                 for k in ["train", "val", "test"]
             }
         )
         self.metrics_task_label = torch.nn.ModuleDict(
             {
-                f"{k}_metrics": metrics_task_label.clone(prefix=k + "_label_")
+                f"{k}_metrics": metrics_task_label.clone(prefix=k + "/label_")
                 for k in ["train", "val", "test"]
             }
         )
@@ -378,22 +434,30 @@ class DeepTAN(ltn.LightningModule):
             else:
                 _y = torch.tensor(batch.y, device=self.device)
 
-            if self.hparams.is_regression:
+            if self.is_regression:
                 pred_loss = F.mse_loss(outputs["label_pred"], _y)
             else:
                 if _y.ndim > 1 and _y.shape[1] > 1:
                     _y = torch.argmax(_y, dim=1)
 
-                if self.class_weights is None:
-                    pred_loss = F.cross_entropy(outputs["label_pred"], _y)
-                else:
-                    pred_loss = F.cross_entropy(
-                        outputs["label_pred"],
-                        _y,
-                        weight=torch.tensor(
-                            self.class_weights, dtype=torch.float32, device=self.device
-                        ),
+                if self.use_focal_loss:
+                    focal_loss = FocalLoss(
+                        gamma=self.focal_gamma, alpha=self.focal_alpha, reduction="mean"
                     )
+                    pred_loss = focal_loss(outputs["label_pred"], _y)
+                else:
+                    if self.class_weights is None:
+                        pred_loss = F.cross_entropy(outputs["label_pred"], _y)
+                    else:
+                        pred_loss = F.cross_entropy(
+                            outputs["label_pred"],
+                            _y,
+                            weight=torch.tensor(
+                                self.class_weights,
+                                dtype=torch.float32,
+                                device=self.device,
+                            ),
+                        )
 
             losses["label"] = pred_loss
 
@@ -402,38 +466,75 @@ class DeepTAN(ltn.LightningModule):
         return {**losses, "loss": total_loss}
 
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
-        # Dynamic weight adjustment
-        if stage == "train" and self.current_epoch > 0:
-            with torch.no_grad():
-                loss_values = torch.stack([losses[k] for k in ["label", "recon"]])
-                mean_loss = loss_values.mean() + 1e-8
-                task_weights = F.softmax(loss_values / mean_loss, dim=0)
-                self.hparams.alpha = 0.8 * task_weights[0] + 0.2 * self.hparams.alpha
+        # Dynamic loss scaling
+        loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
+        rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
 
-        # EMA stableization
-        # total = (
-        #     self.hparams.alpha * losses["label"]
-        #     + (1 - self.hparams.alpha) * losses["recon"]
-        # )
+        # Initialize scale factors if not present
+        if not hasattr(self, "scale_factors"):
+            self.scale_factors = torch.ones_like(loss_ratio)
+        else:
+            self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
 
-        # if self.ema_loss is None:
-        #     self.ema_loss = total.detach()
-        # else:
-        #     self.ema_loss = 0.9 * self.ema_loss + 0.1 * total.detach()
+        # Uncertainty weighting
+        label_precision = torch.exp(-self.log_var_label)
+        recon_precision = torch.exp(-self.log_var_recon)
 
-        # return total + 0.1 * (total - self.ema_loss).abs()
+        scaled_label_loss = (
+            label_precision * losses["label"] + self.log_var_label
+        ) * self.scale_factors[0]
+        scaled_recon_loss = (
+            recon_precision * losses["recon"] + self.log_var_recon
+        ) * self.scale_factors[1]
 
-        total_loss = (
-            self.hparams.alpha * losses["label"]
-            + (1 - self.hparams.alpha) * losses["recon"]
-        )
+        # Regularization
+        var_reg = 0.5 * (label_precision + recon_precision)
+        l2_reg = 0.1 * (self.log_var_label**2 + self.log_var_recon**2)
+
+        total_loss = scaled_label_loss + scaled_recon_loss + var_reg + l2_reg
+
+        # EMA stabilization
+        if self.ema_loss is None:
+            self.ema_loss = total_loss.detach().clone()
+        else:
+            self.ema_loss = 0.9 * self.ema_loss.detach() + 0.1 * total_loss.detach()
+
+        stabilization_term = 0.1 * (total_loss.detach() - self.ema_loss.detach()).abs()
+        total_loss = total_loss + stabilization_term
         return total_loss
-        # return losses["label"]
+
+    def on_before_optimizer_step(self, optimizer):
+        # Ensure the log_var does not go out of a reasonable range
+        self.log_var_label.data.clamp_(min=-3.0, max=3.0)
+        self.log_var_recon.data.clamp_(min=-3.0, max=3.0)
+
+        # Ensure that the weights do not drop below a certain threshold to maintain model stability.
+        min_weight = 0.1
+        label_weight = torch.exp(-self.log_var_label)
+        recon_weight = torch.exp(-self.log_var_recon)
+        if label_weight < min_weight:
+            self.log_var_label.data = -torch.log(torch.tensor(min_weight))
+        if recon_weight < min_weight:
+            self.log_var_recon.data = -torch.log(torch.tensor(min_weight))
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        self.log("loss_params/focal_gamma", self.focal_gamma)
+        self.log("loss_params/focal_alpha_mean", self.focal_alpha.mean())
+
+        # Log the weights and scale factors for monitoring
+        self.log("weights/label", torch.exp(-self.log_var_label))
+        self.log("weights/recon", torch.exp(-self.log_var_recon))
+        self.log("scale_factors/label", self.scale_factors[0])
+        self.log("scale_factors/recon", self.scale_factors[1])
+
+        # Detect anomalies in variance
+        if torch.exp(self.log_var_label) > 100:
+            self.logger.experiment.alert("Label variance anomaly!")
 
     def _log_metrics(self, losses: Dict, stage: str):
         for k, v in losses.items():
             self.log(
-                f"{stage}_{k}",
+                f"{stage}/{k}",
                 v,
                 prog_bar=(k == "loss"),
                 sync_dist=True,
@@ -452,7 +553,7 @@ class DeepTAN(ltn.LightningModule):
                 )
             self.metrics_common[f"{stage}_metrics"].reset()
 
-            if self.hparams.output_g_label_dim is not None:
+            if self.output_g_label_dim is not None:
                 metrics_task_label = self.metrics_task_label[
                     f"{stage}_metrics"
                 ].compute()
@@ -508,12 +609,10 @@ def train_model(
     min_epochs: int,
     log_dir: str,
     accumulate_grad_batches: int = 4,
-    # devices: Union[list[int], str, int] = const.default.devices,
     accelerator: str = const.default.accelerator,
     fast_dev_run: bool = False,
 ):
     r"""Fit the model."""
-    # avail_dev = get_avail_nvgpu(devices)
 
     torch.autograd.set_detect_anomaly(True)
 
@@ -534,12 +633,11 @@ def train_model(
     trainer = Trainer(
         fast_dev_run=fast_dev_run,
         # strategy="ddp_spawn",
-        enable_progress_bar=False,
+        enable_progress_bar=True,
         accumulate_grad_batches=accumulate_grad_batches,
         logger=logger_tr,
-        log_every_n_steps=1,
+        log_every_n_steps=2,
         precision="16-mixed",
-        # devices=avail_dev,
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
@@ -547,6 +645,7 @@ def train_model(
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
         gradient_clip_val=1.0,
+        gradient_clip_algorithm="norm",
     )
 
     trainer.fit(model=model, datamodule=datamodule)
@@ -661,17 +760,13 @@ class DeepTANTune:
             ),
             dropout=trial_params.get("dropout", self.args["dropout"]),
             lr=trial_params.get("lr", self.args["lr"]),
-            negative_slope=trial_params.get(
-                "negative_slope", self.args["negative_slope"]
-            ),
-            alpha=trial_params.get("alpha", self.args["alpha"]),
             chunk_size=self.args["chunk_size"],
         )
 
     def objective(self, trial: optuna.Trial) -> float:
         """Optuna objective function for hyperparameter optimization"""
         try:
-            fusion_dims_node_emb_lists_to_try = [[256, 512, 256], [256, 256, 256]]
+            fusion_dims_node_emb_lists_to_try = [[512, 512, 256], [512, 256, 256]]
             fusion_dims_node_emb_list_strings = [
                 str(lst) for lst in fusion_dims_node_emb_lists_to_try
             ]
@@ -679,12 +774,14 @@ class DeepTANTune:
             # Suggest hyperparameters
             params = {
                 "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=True),
-                "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.3),
+                "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
                 "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 256]),
                 "n_heads_node_emb": trial.suggest_categorical(
-                    "n_heads_node_emb", [1, 4]
+                    "n_heads_node_emb", [1, 4, 8]
                 ),
-                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [1, 4]),
+                "n_heads_pooling": trial.suggest_categorical(
+                    "n_heads_pooling", [1, 4, 8]
+                ),
                 "fusion_dims_node_emb": trial.suggest_categorical(
                     "fusion_dims_node_emb",
                     fusion_dims_node_emb_list_strings,
@@ -692,11 +789,16 @@ class DeepTANTune:
                 "output_dim_g_emb": trial.suggest_categorical(
                     "output_dim_g_emb", [128, 256, 512]
                 ),
-                "alpha": trial.suggest_float("alpha", 0.1, 0.9, step=0.2),
+                "n_hop": trial.suggest_int("n_hop", 1, 3),
             }
 
             # Create model with suggested parameters
             model = self.create_model(params)
+
+            # model.ge_decoder.compile()
+            # model.g_label_predictor.compile()
+            # model.amsgp.compile()
+            # model.compile()
 
             # Execute training run
             val_loss = train_model(
@@ -713,15 +815,18 @@ class DeepTANTune:
             )
 
             if val_loss is None:
+                print(
+                    f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n"
+                )
                 raise optuna.TrialPruned()
 
             return val_loss
 
         except torch.cuda.OutOfMemoryError:
-            print("Out of memory error, skipping trial")
+            print("\n\nOut of memory error, skipping trial\n")
             raise optuna.TrialPruned()
         except Exception as e:
-            print(f"An error occurred in trial {trial.number}: {e}")
+            print(f"\n\nAn error occurred in trial {trial.number}: {e}\n")
             raise optuna.TrialPruned()
 
     def optimize(self, n_trials: int = 100, n_jobs: int = 1):
@@ -821,58 +926,3 @@ def process_results(pickle_path: str, output_pkl: str):
     print(f"Saving results to {output_pkl}")
     with open(output_pkl, "wb") as f:
         pickle.dump(results_dict, f)
-
-
-# import argparse
-
-
-# def parse_args():
-#     parser = argparse.ArgumentParser(description="DeepTAN tuning pipeline.")
-
-#     parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
-#     parser.add_argument('--bs', type=int, default=8, help='Batch size for training')
-#     parser.add_argument('--log_dir', type=str, default=".tmp_logs_tune", help='Directory for logging')
-#     parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
-#     parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
-#     parser.add_argument('--onehot_class', type=str, default="", help='Path to a parquet file containing one-hot encoded class labels')
-#     parser.add_argument('--chunk_size', type=int, default=1024, help='A proper chunk size can balance memory usage and speed')
-#     parser.add_argument('--accelerator', type=str, default="auto", help="cpu, gpu, tpu, hpu, mps, auto")
-
-#     return parser.parse_args()
-
-
-# # Example usage
-# if __name__ == "__main__":
-#     args = parse_args()
-
-#     # Example configuration (should match original argparse parameters)
-#     config = {
-#         "log_dir": args.log_dir,
-#         "litdata": args.litdata,
-#         "bs": args.bs,
-#         "chunk_size": args.chunk_size,
-#         "is_regression": args.is_regression,
-#         "onehot_class": args.onehot_class,
-#         "accelerator": args.accelerator,
-#         "input_node_emb_dim": args.input_node_emb_dim,
-#         "acc_grad_batch": 8,
-#         "es": 5,
-#         "node_emb_dim": 128,
-#         "fusion_dims_node_emb": [256, 256, 256],
-#         "output_dim_g_emb": 256,
-#         "n_hop": 2,
-#         "threshold_edge_exist": 0.1,
-#         "threshold_subgraph_overlap": 0.99,
-#         "n_heads_node_emb": 2,
-#         "n_heads_pooling": 2,
-#         "dropout": 0.1,
-#         "lr": 1e-3,
-#         "negative_slope": 0.2,
-#         "alpha": 0.5,
-#         "max_ep": 1000,
-#         "min_ep": 2,
-#         "nworker": 1,
-#     }
-
-#     tuner = DeepTANTune(config)
-#     tuner.optimize(n_trials=50, n_jobs=1)
