@@ -10,6 +10,7 @@ from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 from torch_geometric.data import Data as GData
+import deeptan.constants as const
 
 
 class NodeEmbedding(nn.Module):
@@ -24,7 +25,8 @@ class NodeEmbedding(nn.Module):
         fusion_dims: List[int],
         dict_node_names: Dict[str, int],
         n_heads: int,
-        dropout: float = 0.1,
+        dropout: float = const.default.dropout,
+        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Embedding nodes in a graph like embedding words in a sentence.
@@ -36,6 +38,7 @@ class NodeEmbedding(nn.Module):
             dict_node_names: Dictionary mapping node names to indices.
             n_heads: Number of attention heads.
             dropout: Dropout rate.
+            chunk_size: Size of chunks for large tensors.
         """
         super().__init__()
         self.input_dim = input_dim
@@ -62,6 +65,7 @@ class NodeEmbedding(nn.Module):
                     dim_out,
                     n_heads,
                     dropout,
+                    chunk_size,
                 )
                 for i, (dim_in, dim_out) in enumerate(
                     zip([embedding_dim] + fusion_dims[:-1], fusion_dims)
@@ -144,8 +148,8 @@ class AMSGP(torch.nn.Module):
         n_hop: int,
         threshold_edge_exist: float,
         threshold_subgraph_overlap: float,
-        dropout: float = 0.1,
-        chunk_size: int = 8192,
+        dropout: float = const.default.dropout,
+        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Initialize the AMSGP model.
@@ -179,6 +183,8 @@ class AMSGP(torch.nn.Module):
             fusion_dims_node_emb,
             dict_node_names,
             n_heads_node_emb,
+            dropout,
+            chunk_size,
         )
 
         # Multi-scale pooling architecture
@@ -188,11 +194,15 @@ class AMSGP(torch.nn.Module):
 
     def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
-        self.xgat_pool = WGATLayer(input_dim, output_dim, heads, self.dropout)
+        self.xgat_pool = WGATLayer(
+            input_dim, output_dim, heads, self.dropout, self.chunk_size
+        )
         self.att_pool = SelfAttPool(output_dim, self.dropout)
 
         # Global graph pooling
-        self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout)
+        self.global_xgat_pool = WGATLayer(
+            output_dim, output_dim, heads, self.dropout, self.chunk_size
+        )
         self.global_att_pool = SelfAttPool(output_dim, self.dropout)
 
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
@@ -384,7 +394,8 @@ class WGATLayer(MessagePassing):
         input_dim: int,
         output_dim: int,
         num_heads: int,
-        dropout: float = 0.1,
+        dropout: float = const.default.dropout,
+        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Initialize the Weighted Graph Attention Layer.
@@ -394,11 +405,13 @@ class WGATLayer(MessagePassing):
             output_dim: The dimension of the output embeddings.
             num_heads: The number of attention heads.
             dropout: The dropout probability for the attention weights.
+            chunk_size: The chunk size for processing large tensors.
         """
         super().__init__(aggr="add")
         self.output_dim = output_dim
         self.num_heads = num_heads
         self.dropout = dropout
+        self.chunk_size = chunk_size
 
         self.trans = nn.Linear(input_dim, output_dim * num_heads)
         # Adjusted for per-head attention computation
@@ -417,35 +430,88 @@ class WGATLayer(MessagePassing):
         # )
 
     def message(self, x_i, x_j, edge_attr):
-        # Compute attention scores per head
-        h = (torch.cat([x_i, x_j], -1) @ self.W).view(
-            -1, self.num_heads, self.output_dim
-        )
+        num_edges = x_i.size(0)
+        # if num_edges < 7:
+        # raise ValueError("\nNumber of edges is too small.")
+        # raise Warning("\nNumber of edges is too small.")
+        # print("\nNumber of edges is too small.")
+        # return torch.zeros_like(x_i)
 
-        # Calculate attention coefficients [E, num_heads]
-        # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
-        e = torch.einsum("ehd,hd->eh", h, self.attn)
+        if num_edges > self.chunk_size:
+            h_chunks = []
+            e_chunks = []
 
-        # Integrate edge attributes
-        if edge_attr is not None:
-            # Expand edge_attr to match num_heads [E, num_heads]
-            e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
+            for i in range(0, num_edges, self.chunk_size):
+                idx = slice(i, min(i + self.chunk_size, num_edges))
 
-        # Normalize attention scores
+                x_i_chunk = x_i[idx]
+                x_j_chunk = x_j[idx]
+                edge_attr_chunk = edge_attr[idx] if edge_attr is not None else None
+
+                h = (torch.cat([x_i_chunk, x_j_chunk], -1) @ self.W).view(
+                    -1, self.num_heads, self.output_dim
+                )
+                e = torch.einsum("ehd,hd->eh", h, self.attn)
+
+                if edge_attr_chunk is not None:
+                    e = e * edge_attr_chunk.view(-1, 1).expand(-1, self.num_heads)
+
+                h_chunks.append(h)
+                e_chunks.append(e)
+
+            e = torch.cat(e_chunks, dim=0)
+            h = torch.cat(h_chunks, dim=0)
+
+        else:
+            # Compute attention scores per head
+            h = (torch.cat([x_i, x_j], -1) @ self.W).view(
+                -1, self.num_heads, self.output_dim
+            )
+
+            # Calculate attention coefficients [E, num_heads]
+            # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+            e = torch.einsum("ehd,hd->eh", h, self.attn)
+
+            # Integrate edge attributes
+            if edge_attr is not None:
+                # Expand edge_attr to match num_heads [E, num_heads]
+                e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
+
         a = F.gelu(e)
         a = F.softmax(a, dim=0)
-        # a = F.dropout(a, self.dropout, training=self.training)
-
-        # Transform features and prepare multi-head output
-        # [E, num_heads, output_dim]
         x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
+        return torch.einsum("ehd,eh->ed", x_trans, a)
 
-        # Weight features by attention scores
-        # Average features across heads
-        # h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
-        h = torch.einsum("ehd,eh->ed", x_trans, a)
+    # def message(self, x_i, x_j, edge_attr):
+    #     # Compute attention scores per head
+    #     h = (torch.cat([x_i, x_j], -1) @ self.W).view(
+    #         -1, self.num_heads, self.output_dim
+    #     )
 
-        return h
+    #     # Calculate attention coefficients [E, num_heads]
+    #     # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
+    #     e = torch.einsum("ehd,hd->eh", h, self.attn)
+
+    #     # Integrate edge attributes
+    #     if edge_attr is not None:
+    #         # Expand edge_attr to match num_heads [E, num_heads]
+    #         e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
+
+    #     # Normalize attention scores
+    #     a = F.gelu(e)
+    #     a = F.softmax(a, dim=0)
+    #     # a = F.dropout(a, self.dropout, training=self.training)
+
+    #     # Transform features and prepare multi-head output
+    #     # [E, num_heads, output_dim]
+    #     x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
+
+    #     # Weight features by attention scores
+    #     # Average features across heads
+    #     # h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
+    #     h = torch.einsum("ehd,eh->ed", x_trans, a)
+
+    #     return h
 
 
 class GE_Decoder(nn.Module):
@@ -459,8 +525,8 @@ class GE_Decoder(nn.Module):
         h_dim: int,
         output_dim: int,
         hidden_dim: int = 512,
-        dropout: float = 0.1,
-        chunk_size: int = 1024,
+        dropout: float = const.default.dropout,
+        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Initialize graph embedding decoder.
@@ -468,6 +534,10 @@ class GE_Decoder(nn.Module):
         Args:
             z_dim: Dimension of the latent representation.
             h_dim: Dimension of node features.
+            output_dim: Dimension of the output node features.
+            hidden_dim: Dimension of the hidden layer.
+            dropout: Dropout rate.
+            chunk_size: The chunk size for processing large tensors.
         """
         super().__init__()
         self.z_dim = z_dim
@@ -562,7 +632,7 @@ class SelfAttPool(nn.Module):
     Self-attention pooling layer with optional Dropout.
     """
 
-    def __init__(self, dim: int, dropout: float = 0.1):
+    def __init__(self, dim: int, dropout: float = const.default.dropout):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
@@ -576,7 +646,7 @@ class SelfAttPool(nn.Module):
         attn = self.dropout(attn)
         # x = (attn @ v).mean(dim=0)
         x = attn @ v
-        x = x.mean(dim=0)# + x.std(dim=0)
+        x = x.mean(dim=0)  # + x.std(dim=0)
         x = self.proj(x)
         # x = self.dropout(x)
         return x
@@ -587,7 +657,7 @@ class SelfAtt_(nn.Module):
     Self-attention layer.
     """
 
-    def __init__(self, dim: int, dropout: float = 0.1):
+    def __init__(self, dim: int, dropout: float = const.default.dropout):
         super().__init__()
         self.dim = dim
         self.qkv = nn.Linear(dim, 3 * dim)

@@ -7,10 +7,13 @@ from numpy import ceil
 from multiprocessing import cpu_count
 
 
+bs = 32
+accumulate_grad_batches = 1
 lr = 0.0001
+es = 5
+chunk_size = 8192
+dropout = 0.1
 negative_slope = 0.2
-node_feature_dim = 32
-hidden_dim_dyn_cen = 64
 
 matmul_precision = "high"
 accelerator = "auto"
@@ -23,5 +26,8 @@ time_delay = 11.7
 ckpt_fname_format = "best-model-{epoch:04d}-{val_loss:.4f}"
 optuna_db = "sqlite:///optuna.db"
 n_jobs = 1
-n_trials = 10
+n_trials = 30
 n_workers = 1
+
+lit_chunk_bytes = "512MB"
+lit_compression = "zstd"

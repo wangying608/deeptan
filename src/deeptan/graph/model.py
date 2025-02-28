@@ -104,9 +104,9 @@ class DeepTAN(ltn.LightningModule):
         threshold_subgraph_overlap: float = 0.99,
         n_heads_node_emb: int = 4,
         n_heads_pooling: int = 4,
-        dropout: float = 0.1,
-        lr: float = 1e-4,
-        chunk_size: int = 1024,
+        dropout: float = const.default.dropout,
+        lr: float = const.default.lr,
+        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Initialize the DeepTAN model.
@@ -130,8 +130,8 @@ class DeepTAN(ltn.LightningModule):
             chunk_size (int): The chunk size for processing large matrices.
         """
         super().__init__()
-        # self.save_hyperparameters(ignore=["dict_node_names"])
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["dict_node_names"])
+        # self.save_hyperparameters()
 
         self.dict_node_names = dict_node_names
         self.chunk_size = chunk_size
@@ -181,7 +181,7 @@ class DeepTAN(ltn.LightningModule):
 
         # Graph-level label predictor
         self.g_label_predictor = GLabelPredictor(
-            output_dim_g_emb, self.output_dim, [512, 512, 256], dropout
+            output_dim_g_emb, self.output_dim, [512, 256, 128], dropout
         )
 
         # Metrics and initialization
@@ -518,6 +518,7 @@ class DeepTAN(ltn.LightningModule):
             self.log_var_recon.data = -torch.log(torch.tensor(min_weight))
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
+        self.log("lr", self.lr_scheduler.get_last_lr()[0])
         self.log("loss_params/focal_gamma", self.focal_gamma)
         self.log("loss_params/focal_alpha_mean", self.focal_alpha.mean())
 
@@ -608,7 +609,7 @@ def train_model(
     max_epochs: int,
     min_epochs: int,
     log_dir: str,
-    accumulate_grad_batches: int = 4,
+    accumulate_grad_batches: int = const.default.accumulate_grad_batches,
     accelerator: str = const.default.accelerator,
     fast_dev_run: bool = False,
 ):
@@ -636,12 +637,13 @@ def train_model(
         enable_progress_bar=True,
         accumulate_grad_batches=accumulate_grad_batches,
         logger=logger_tr,
-        log_every_n_steps=2,
+        log_every_n_steps=1,
         precision="16-mixed",
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
-        callbacks=[callback_es, callback_ckpt, StochasticWeightAveraging(swa_lrs=1e-4)],
+        # callbacks=[callback_es, callback_ckpt, StochasticWeightAveraging(swa_lrs=1e-4)],
+        callbacks=[callback_es, callback_ckpt],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
         gradient_clip_val=1.0,
@@ -692,10 +694,21 @@ class DeepTANTune:
     def _init_data_module(self):
         """Initialize data module based on input parameters"""
         if self.args.get("litdata"):
-            with open(os.path.join(self.args["litdata"], "others2save.pkl"), "rb") as f:
+            with open(
+                os.path.join(self.args["litdata"], const.fname.litdata_others2save_pkl),
+                "rb",
+            ) as f:
                 others2save = pickle.load(f)
             self.dict_node_names = others2save["dict_node_names"]
             self.output_g_label_dim = others2save["output_g_label_dim"]
+
+            path_label_onehot = os.path.join(
+                self.args["litdata"], const.fname.label_class_onehot
+            )
+            if os.path.exists(path_label_onehot):
+                self.path_label_onehot = path_label_onehot
+            else:
+                self.path_label_onehot = None
 
             self.datamodule = DeepTANDataModuleLit(
                 self.args["litdata"],
@@ -703,6 +716,7 @@ class DeepTANTune:
                 n_workers=self.args["nworker"],
             )
             self.datamodule.setup()
+
         elif all([self.args.get(k) for k in ["trn_npz", "val_parquet", "tst_parquet"]]):
             labels = self.args["labels"] if self.args.get("labels") else None
             files_fit = {
@@ -717,13 +731,26 @@ class DeepTANTune:
             self.dict_node_names = self.datamodule.dict_node_names
             self.output_g_label_dim = self.datamodule.label_dim
 
+            path_label_onehot = os.path.join(
+                os.path.dirname(self.args["val_parquet"]),
+                const.fname.label_class_onehot,
+            )
+            if os.path.exists(path_label_onehot):
+                self.path_label_onehot = path_label_onehot
+            else:
+                self.path_label_onehot = None
+
         else:
             raise ValueError("Invalid data configuration")
 
     def _init_class_weights(self):
         """Initialize class weights if provided"""
-        if self.args.get("onehot_class"):
-            return celltypes_class_weights(pl.read_parquet(self.args["onehot_class"]))
+        if self.path_label_onehot is not None:
+            print("\nPre-defined label onehot file found. Computing class weights...\n")
+            return celltypes_class_weights(pl.read_parquet(self.path_label_onehot))
+        print(
+            f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n"
+        )
         return None
 
     def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
@@ -775,19 +802,19 @@ class DeepTANTune:
             params = {
                 "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=True),
                 "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
-                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 256]),
+                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 192, 256]),
                 "n_heads_node_emb": trial.suggest_categorical(
-                    "n_heads_node_emb", [1, 4, 8]
+                    "n_heads_node_emb", [2, 4, 8]
                 ),
                 "n_heads_pooling": trial.suggest_categorical(
-                    "n_heads_pooling", [1, 4, 8]
+                    "n_heads_pooling", [2, 4, 8]
                 ),
                 "fusion_dims_node_emb": trial.suggest_categorical(
                     "fusion_dims_node_emb",
                     fusion_dims_node_emb_list_strings,
                 ),
                 "output_dim_g_emb": trial.suggest_categorical(
-                    "output_dim_g_emb", [128, 256, 512]
+                    "output_dim_g_emb", [128, 192, 256, 512]
                 ),
                 "n_hop": trial.suggest_int("n_hop", 1, 3),
             }

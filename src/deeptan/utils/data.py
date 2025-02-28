@@ -106,8 +106,11 @@ class NMICGraphDataset(GDataset):
 
     def get(self, idx):
         values: np.ndarray = self.mat[idx]
-        avail_col_indices = np.where(values > 0)[0]
+        avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
         avail_feat_indices = self.mat_feat_indices[avail_col_indices]
+
+        # If no features are available?
+        print("\nNumber of available features is too small.")
 
         x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
 
