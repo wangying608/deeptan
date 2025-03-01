@@ -5,7 +5,6 @@ Trait-associated multi-omics network inference via multi-task NMIC-guided adapti
 
 import os
 from typing import List, Dict, Optional, Any
-from sympy import flatten
 import pickle
 import polars as pl
 import optuna
@@ -14,11 +13,7 @@ import torch.nn.functional as F
 from torch.optim.adamw import AdamW
 import lightning as ltn
 from lightning import Trainer, LightningDataModule
-from lightning.pytorch.callbacks import (
-    EarlyStopping,
-    ModelCheckpoint,
-    StochasticWeightAveraging,
-)
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
 from litdata import StreamingDataset, StreamingDataLoader
 from torch_geometric.data import Data as GData
@@ -97,13 +92,13 @@ class DeepTAN(ltn.LightningModule):
         # focal_gamma: float = 2.0,
         focal_alpha: Optional[List[float]] = None,
         node_emb_dim: int = 128,
-        fusion_dims_node_emb: List[int] = [256, 512, 128],
+        fusion_dims_node_emb: List[int] = [64, 32, 32],
         output_dim_g_emb: int = 128,
         n_hop: int = 2,
-        threshold_edge_exist: float = 0.1,
+        threshold_edge_exist: float = 0.05,
         threshold_subgraph_overlap: float = 0.99,
-        n_heads_node_emb: int = 4,
-        n_heads_pooling: int = 4,
+        n_heads_node_emb: int = 2,
+        n_heads_pooling: int = 2,
         dropout: float = const.default.dropout,
         lr: float = const.default.lr,
         chunk_size: int = const.default.chunk_size,
@@ -134,6 +129,14 @@ class DeepTAN(ltn.LightningModule):
         # self.save_hyperparameters()
 
         self.dict_node_names = dict_node_names
+        self.all_node_names = list(dict_node_names.keys())
+        self.num_all_nodes = len(self.all_node_names)
+        self.register_buffer(
+            "all_node_indices",
+            torch.arange(self.num_all_nodes, dtype=torch.long),
+            persistent=False,
+        )
+
         self.chunk_size = chunk_size
         self.input_dim = input_dim
         self.is_regression = is_regression
@@ -174,14 +177,16 @@ class DeepTAN(ltn.LightningModule):
             z_dim=output_dim_g_emb,
             h_dim=node_emb_dim,
             output_dim=input_dim,
-            hidden_dim=512,
+            hidden_dim=node_emb_dim,
             dropout=dropout,
             chunk_size=self.chunk_size,
+            n_heads=2,
+            n_res_blocks=3,
         )
 
         # Graph-level label predictor
         self.g_label_predictor = GLabelPredictor(
-            output_dim_g_emb, self.output_dim, [512, 256, 128], dropout
+            output_dim_g_emb, self.output_dim, [256, 128], dropout
         )
 
         # Metrics and initialization
@@ -232,29 +237,48 @@ class DeepTAN(ltn.LightningModule):
         pred_labels = self.g_label_predictor(z)
 
         # Node-level reconstruction loss
-        recon_node_val_for_loss_list = [
-            recon_node_val_for_loss_all[
-                i, self.pick_avail_node_in_x(batch.node_names[i]), :
-            ]
-            for i in range(len(batch.node_names))
-        ]
-        recon_node_val_for_loss = torch.cat(recon_node_val_for_loss_list)
 
-        # Node-level reconstruction loss for zeros
-        recon_node_val_for_loss_list = [
-            recon_node_val_for_loss_all[
-                i, self.pick_unavail_node_in_x(batch.node_names[i]), :
-            ]
-            for i in range(len(batch.node_names))
-        ]
-        recon_node_val_for_loss_zeros = torch.cat(recon_node_val_for_loss_list)
+        batch_size = len(batch.node_names)
+
+        # Generate a boolean mask for available nodes [batch_size, num_all_nodes]
+        avail_masks = torch.zeros(
+            (batch_size, self.num_all_nodes), dtype=torch.bool, device=self.device
+        )
+
+        # en: For each batch, fill the mask for available nodes
+        for i, nodes in enumerate(batch.node_names):
+            node_indices = [self.dict_node_names[n] for n in nodes]
+            avail_masks[i, node_indices] = True
+
+        # Extract data directly through the mask index
+        avail_recon = recon_node_val_for_loss_all[avail_masks]
+        unavail_recon = recon_node_val_for_loss_all[~avail_masks]
+
+        # recon_node_val_for_loss_list = [
+        #     recon_node_val_for_loss_all[
+        #         i, self.pick_avail_node_in_x(batch.node_names[i]), :
+        #     ]
+        #     for i in range(len(batch.node_names))
+        # ]
+        # recon_node_val_for_loss = torch.cat(recon_node_val_for_loss_list)
+
+        # # Node-level reconstruction loss for zeros
+        # recon_node_val_for_loss_list = [
+        #     recon_node_val_for_loss_all[
+        #         i, self.pick_unavail_node_in_x(batch.node_names[i]), :
+        #     ]
+        #     for i in range(len(batch.node_names))
+        # ]
+        # recon_node_val_for_loss_zeros = torch.cat(recon_node_val_for_loss_list)
 
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
             "label_pred": pred_labels,
-            "node_recon_for_loss": recon_node_val_for_loss,
-            "node_recon_for_loss_zeros": recon_node_val_for_loss_zeros,
+            # "node_recon_for_loss": recon_node_val_for_loss,
+            # "node_recon_for_loss_zeros": recon_node_val_for_loss_zeros,
+            "node_recon_for_loss": avail_recon,
+            "node_recon_for_loss_zeros": unavail_recon,
             "node_recon_for_loss_all": recon_node_val_for_loss_all,
         }
 
@@ -290,8 +314,8 @@ class DeepTAN(ltn.LightningModule):
         # Logging metrics and losses
         self._log_metrics(losses, stage)
 
-        del outputs
-        torch.cuda.empty_cache()
+        # del outputs
+        # torch.cuda.empty_cache()
 
         return losses["loss"]
 
@@ -301,7 +325,7 @@ class DeepTAN(ltn.LightningModule):
             optimizer,
             T_0=1,
             T_mult=1,
-            eta_min=1e-7,
+            # eta_min=1e-7,
         )
         # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -465,42 +489,65 @@ class DeepTAN(ltn.LightningModule):
         total_loss = self._balance_losses(losses, stage)
         return {**losses, "loss": total_loss}
 
+    # def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
+    #     # Dynamic loss scaling
+    #     loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
+    #     rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+
+    #     # Initialize scale factors if not present
+    #     if not hasattr(self, "scale_factors"):
+    #         self.scale_factors = torch.ones_like(loss_ratio)
+    #     else:
+    #         self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
+
+    #     # Uncertainty weighting
+    #     label_precision = torch.exp(-self.log_var_label)
+    #     recon_precision = torch.exp(-self.log_var_recon)
+
+    #     scaled_label_loss = (
+    #         label_precision * losses["label"] + self.log_var_label
+    #     ) * self.scale_factors[0]
+    #     scaled_recon_loss = (
+    #         recon_precision * losses["recon"] + self.log_var_recon
+    #     ) * self.scale_factors[1]
+
+    #     # Regularization
+    #     var_reg = 0.5 * (label_precision + recon_precision)
+    #     l2_reg = 0.1 * (self.log_var_label**2 + self.log_var_recon**2)
+
+    #     total_loss = scaled_label_loss + scaled_recon_loss + var_reg + l2_reg
+
+    #     # EMA stabilization
+    #     if self.ema_loss is None:
+    #         self.ema_loss = total_loss.detach().clone()
+    #     else:
+    #         self.ema_loss = 0.9 * self.ema_loss.detach() + 0.1 * total_loss.detach()
+
+    #     stabilization_term = 0.1 * (total_loss.detach() - self.ema_loss.detach()).abs()
+    #     total_loss = total_loss + stabilization_term
+    #     return total_loss
+
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
         # Dynamic loss scaling
         loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
         rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
 
         # Initialize scale factors if not present
-        if not hasattr(self, "scale_factors"):
-            self.scale_factors = torch.ones_like(loss_ratio)
-        else:
-            self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
+        if stage == "train":
+            if not hasattr(self, "scale_factors"):
+                self.scale_factors = torch.ones_like(loss_ratio)
+            else:
+                # EMA update only during training
+                self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
 
-        # Uncertainty weighting
-        label_precision = torch.exp(-self.log_var_label)
-        recon_precision = torch.exp(-self.log_var_recon)
-
-        scaled_label_loss = (
-            label_precision * losses["label"] + self.log_var_label
-        ) * self.scale_factors[0]
-        scaled_recon_loss = (
-            recon_precision * losses["recon"] + self.log_var_recon
-        ) * self.scale_factors[1]
-
-        # Regularization
-        var_reg = 0.5 * (label_precision + recon_precision)
-        l2_reg = 0.1 * (self.log_var_label**2 + self.log_var_recon**2)
-
-        total_loss = scaled_label_loss + scaled_recon_loss + var_reg + l2_reg
-
-        # EMA stabilization
-        if self.ema_loss is None:
-            self.ema_loss = total_loss.detach().clone()
-        else:
-            self.ema_loss = 0.9 * self.ema_loss.detach() + 0.1 * total_loss.detach()
-
-        stabilization_term = 0.1 * (total_loss.detach() - self.ema_loss.detach()).abs()
-        total_loss = total_loss + stabilization_term
+        # Calculate learnable weights with regularization
+        label_weight = torch.exp(-self.log_var_label)
+        recon_weight = torch.exp(-self.log_var_recon)
+        total_loss = (
+            0.5 * label_weight * losses["label"] * self.scale_factors[0]
+            + 0.5 * recon_weight * losses["recon"] * self.scale_factors[1]
+            + 0.5 * (self.log_var_label + self.log_var_recon)
+        )
         return total_loss
 
     def on_before_optimizer_step(self, optimizer):
@@ -518,7 +565,6 @@ class DeepTAN(ltn.LightningModule):
             self.log_var_recon.data = -torch.log(torch.tensor(min_weight))
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
-        self.log("lr", self.lr_scheduler.get_last_lr()[0])
         self.log("loss_params/focal_gamma", self.focal_gamma)
         self.log("loss_params/focal_alpha_mean", self.focal_alpha.mean())
 
@@ -529,8 +575,8 @@ class DeepTAN(ltn.LightningModule):
         self.log("scale_factors/recon", self.scale_factors[1])
 
         # Detect anomalies in variance
-        if torch.exp(self.log_var_label) > 100:
-            self.logger.experiment.alert("Label variance anomaly!")
+        # if torch.exp(self.log_var_label) > 100:
+        #     self.logger.experiment.alert("Label variance anomaly!")
 
     def _log_metrics(self, losses: Dict, stage: str):
         for k, v in losses.items():
@@ -575,31 +621,6 @@ class DeepTAN(ltn.LightningModule):
         elif stage == "test":
             return self.trainer.test_dataloaders.batch_size
         return 1
-
-    def pick_avail_node_in_x(self, x_node_names: List[str]):
-        r"""
-        Pick available features (nodes) from self.hparams.dict_node_names in x_node_names.
-        Returns:
-            List[str]: A list of available node indices (the indices in self.hparams.dict_node_names).
-        """
-        # Extract all node names from x_node_names, even if they are nested lists or tuples.
-        node_names = flatten(x_node_names)
-        avail_node_ind = [self.dict_node_names[node] for node in node_names]
-        return avail_node_ind
-
-    def pick_unavail_node_in_x(self, x_node_names: List[str]):
-        r"""
-        Pick unavailable features (nodes) from self.hparams.dict_node_names in x_node_names.
-        Returns:
-            List[str]: A list of unavailable node indices (the indices in self.hparams.dict_node_names).
-        """
-        # Extract all node names from x_node_names, even if they are nested lists or tuples.
-        node_names = flatten(x_node_names)
-        unavail_node_ind: List[int] = []
-        for node in self.dict_node_names:
-            if node not in node_names:
-                unavail_node_ind.append(self.dict_node_names[node])
-        return unavail_node_ind
 
 
 def train_model(
@@ -793,7 +814,7 @@ class DeepTANTune:
     def objective(self, trial: optuna.Trial) -> float:
         """Optuna objective function for hyperparameter optimization"""
         try:
-            fusion_dims_node_emb_lists_to_try = [[512, 512, 256], [512, 256, 256]]
+            fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32], [64, 32, 16]]
             fusion_dims_node_emb_list_strings = [
                 str(lst) for lst in fusion_dims_node_emb_lists_to_try
             ]
@@ -802,7 +823,9 @@ class DeepTANTune:
             params = {
                 "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=True),
                 "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
-                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 192, 256]),
+                "node_emb_dim": trial.suggest_categorical(
+                    "node_emb_dim", [64, 128, 192, 256]
+                ),
                 "n_heads_node_emb": trial.suggest_categorical(
                     "n_heads_node_emb", [2, 4, 8]
                 ),
@@ -814,7 +837,7 @@ class DeepTANTune:
                     fusion_dims_node_emb_list_strings,
                 ),
                 "output_dim_g_emb": trial.suggest_categorical(
-                    "output_dim_g_emb", [128, 192, 256, 512]
+                    "output_dim_g_emb", [64, 128, 192, 256]
                 ),
                 "n_hop": trial.suggest_int("n_hop", 1, 3),
             }
@@ -824,6 +847,7 @@ class DeepTANTune:
 
             # model.ge_decoder.compile()
             # model.g_label_predictor.compile()
+            # model.amsgp.node_embedding_layers.compile()
             # model.amsgp.compile()
             # model.compile()
 

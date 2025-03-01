@@ -15,7 +15,7 @@ import deeptan.constants as const
 
 class NodeEmbedding(nn.Module):
     r"""
-    For node embedding.
+    Embedding nodes in a graph like embedding words in a sentence.
     """
 
     def __init__(
@@ -197,13 +197,13 @@ class AMSGP(torch.nn.Module):
         self.xgat_pool = WGATLayer(
             input_dim, output_dim, heads, self.dropout, self.chunk_size
         )
-        self.att_pool = SelfAttPool(output_dim, self.dropout)
+        self.att_pool = SelfAtt_(output_dim, self.dropout, True)
 
         # Global graph pooling
         self.global_xgat_pool = WGATLayer(
             output_dim, output_dim, heads, self.dropout, self.chunk_size
         )
-        self.global_att_pool = SelfAttPool(output_dim, self.dropout)
+        self.global_att_pool = SelfAtt_(output_dim, self.dropout, True)
 
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
         return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
@@ -271,7 +271,7 @@ class AMSGP(torch.nn.Module):
                 batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
                 cos_sim.append(batch_cos)
 
-                del h_i, h_j, batch_cos
+                # del h_i, h_j, batch_cos
 
             cos_sim = torch.cat(cos_sim, dim=0)
 
@@ -296,7 +296,7 @@ class AMSGP(torch.nn.Module):
     def _generate_multiscale_subgraphs(
         self, edge_index, num_nodes, centrality, h, device
     ):
-        q_high = torch.quantile(centrality, 0.85) + 1e-6
+        q_high = torch.quantile(centrality, const.default.threshold_centrality)
         central_nodes = torch.where(centrality > q_high)[0]
 
         node_degrees = torch.bincount(edge_index[0], minlength=num_nodes)
@@ -516,7 +516,7 @@ class WGATLayer(MessagePassing):
 
 class GE_Decoder(nn.Module):
     r"""
-    Graph Embedding Decoder for reconstructing node features from latent representations (biological state-specific embeddings).
+    Enhanced Graph Embedding Decoder with cross-attention and residual blocks
     """
 
     def __init__(
@@ -524,21 +524,12 @@ class GE_Decoder(nn.Module):
         z_dim: int,
         h_dim: int,
         output_dim: int,
-        hidden_dim: int = 512,
+        hidden_dim: int,
         dropout: float = const.default.dropout,
         chunk_size: int = const.default.chunk_size,
+        n_heads: int = 4,
+        n_res_blocks: int = 3,
     ):
-        r"""
-        Initialize graph embedding decoder.
-
-        Args:
-            z_dim: Dimension of the latent representation.
-            h_dim: Dimension of node features.
-            output_dim: Dimension of the output node features.
-            hidden_dim: Dimension of the hidden layer.
-            dropout: Dropout rate.
-            chunk_size: The chunk size for processing large tensors.
-        """
         super().__init__()
         self.z_dim = z_dim
         self.h_dim = h_dim
@@ -546,17 +537,35 @@ class GE_Decoder(nn.Module):
         self.hidden_dim = hidden_dim
         self.chunk_size = chunk_size
 
-        self.ffn_i = nn.Sequential(
-            SelfAtt_(z_dim + h_dim, dropout),
-            nn.Linear(z_dim + h_dim, hidden_dim),
-            nn.GELU(),
-            nn.Dropout(p=dropout),
-            nn.Linear(hidden_dim, h_dim),
-            nn.LayerNorm(h_dim),
+        # Cross-attention layer
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=h_dim, num_heads=n_heads, dropout=dropout, batch_first=True
         )
-        # self.lstm = nn.LSTM(h_dim, h_dim, batch_first=True)
+
+        # Feature fusion layer
+        self.fusion = nn.Sequential(
+            nn.Linear(z_dim + h_dim, h_dim),
+            nn.GELU(),
+            nn.LayerNorm(h_dim),
+            nn.Dropout(dropout),
+        )
+
+        # Residual blocks
+        self.res_blocks = nn.ModuleList(
+            [
+                nn.Sequential(
+                    nn.Linear(h_dim, 2 * h_dim),
+                    nn.GELU(),
+                    nn.Linear(2 * h_dim, h_dim),
+                    nn.LayerNorm(h_dim),
+                    nn.Dropout(dropout),
+                )
+                for _ in range(n_res_blocks)
+            ]
+        )
+
+        # Final projection
         self.ffn_q = nn.Sequential(
-            # SelfAtt_(h_dim, dropout),
             nn.Linear(h_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(p=dropout),
@@ -564,37 +573,63 @@ class GE_Decoder(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, E_i: torch.Tensor, E_all: torch.Tensor):
-        # z_expanded = z.unsqueeze(1).expand(-1, E_all.shape[0], -1)
-        # E = E_all.unsqueeze(0).expand(z.size(0), -1, -1)
-        # combined = torch.cat([z_expanded, E], dim=-1)
-        # h_s = self.ffn_i(combined) + E
+        """
+        Args:
+            z: Graph embeddings [batch_size, z_dim]
+            E_i: Initial node embeddings [batch_size, num_nodes, h_dim]
+            E_all: All node embeddings [num_all_nodes, h_dim]
 
-        total_nodes = E_all.size(0)
-        h_s_chunks = []
+        Returns:
+            h_s: Refined node embeddings [batch_size, num_all_nodes, h_dim]
+            h_: Reconstructed features [batch_size, num_all_nodes, output_dim]
+        """
+        batch_size = z.size(0)
+        num_all_nodes = E_all.size(0)
 
-        for i in range(0, total_nodes, self.chunk_size):
-            end_idx = min(i + self.chunk_size, total_nodes)
-            current_chunk = E_all[i:end_idx]
+        if num_all_nodes <= self.chunk_size:
+            # Create cross-attention input [batch_size, num_all_nodes, z_dim + h_dim]
+            # [B, N, z_dim]
+            z_expanded = z.unsqueeze(1).expand(-1, num_all_nodes, -1)
+            # [B, N, h_dim]
+            E_all_expanded = E_all.unsqueeze(0).expand(batch_size, -1, -1)
 
-            z_expanded = z.unsqueeze(1).expand(-1, current_chunk.size(0), -1)
-            E_chunk = current_chunk.unsqueeze(0).expand(z.size(0), -1, -1)
+            # Feature fusion
+            # [B, N, 2h_dim]
+            fused = self.fusion(torch.cat([z_expanded, E_all_expanded], dim=-1))
 
-            h_chunk = torch.cat([z_expanded, E_chunk], dim=-1)
-            h_chunk = self.ffn_i(h_chunk)
-            # h_chunk, _ = self.lstm(h_chunk)
-            h_s_chunks.append(h_chunk)
+            # Cross-attention
+            # [B, N, h_dim]
+            attn_out, _ = self.cross_attn(query=fused, key=fused, value=fused)
 
-            # Free up memory
-            del z_expanded, E_chunk, h_chunk
-            # torch.cuda.empty_cache()
+            # Residual learning
+            for block in self.res_blocks:
+                attn_out = attn_out + block(attn_out)
 
-        h_s = torch.cat(h_s_chunks, dim=1)
+        else:
+            h_chunks = []
 
-        # Residual connection
-        h_s = h_s + E_all.unsqueeze(0).expand(z.size(0), -1, -1)
+            for i in range(0, num_all_nodes, self.chunk_size):
+                end_idx = min(i + self.chunk_size, num_all_nodes)
+                current_chunk = E_all[i:end_idx]
 
-        h_ = self.ffn_q(h_s)
-        return h_s, h_
+                z_chunk = z.unsqueeze(1).expand(-1, end_idx - i, -1)
+                E_chunk = current_chunk.unsqueeze(0).expand(z.size(0), -1, -1)
+
+                fused_chunk = self.fusion(torch.cat([z_chunk, E_chunk], dim=-1))
+                attn_chunk, _ = self.cross_attn(fused_chunk, fused_chunk, fused_chunk)
+
+                for block in self.res_blocks:
+                    attn_chunk = attn_chunk + block(attn_chunk)
+
+                h_chunks.append(attn_chunk)
+
+            attn_out = torch.cat(h_chunks, dim=1)
+
+        # Final reconstruction
+        # [B, N, output_dim]
+        h_ = self.ffn_q(attn_out)
+
+        return attn_out, h_
 
 
 class GLabelPredictor(nn.Module):
@@ -627,52 +662,27 @@ class GLabelPredictor(nn.Module):
         return self.net(x)
 
 
-class SelfAttPool(nn.Module):
+class SelfAtt_(nn.Module):
     r"""
-    Self-attention pooling layer with optional Dropout.
+    Self-attention (pooling) layer.
     """
 
-    def __init__(self, dim: int, dropout: float = const.default.dropout):
+    def __init__(
+        self, dim: int, dropout: float = const.default.dropout, pool: bool = False
+    ):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)
         self.scale = dim**-0.5
         self.dropout = nn.Dropout(dropout)
+        self.pool = pool
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         q, k, v = self.qkv(x).chunk(3, dim=-1)
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.dropout(attn)
-        # x = (attn @ v).mean(dim=0)
-        x = attn @ v
-        x = x.mean(dim=0)  # + x.std(dim=0)
-        x = self.proj(x)
-        # x = self.dropout(x)
-        return x
-
-
-class SelfAtt_(nn.Module):
-    r"""
-    Self-attention layer.
-    """
-
-    def __init__(self, dim: int, dropout: float = const.default.dropout):
-        super().__init__()
-        self.dim = dim
-        self.qkv = nn.Linear(dim, 3 * dim)
-        self.proj = nn.Linear(dim, dim)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-
         x = F.scaled_dot_product_attention(
-            q,
-            k,
-            v,
-            dropout_p=self.dropout.p if self.training else 0.0,
-            scale=self.dim**-0.5,
+            q, k, v, dropout_p=self.dropout.p if self.dropout else 0.0, scale=self.scale
         )
-        return self.proj(x)
+        if self.pool:
+            x = x.mean(dim=0)
+        x = self.proj(x)
+        return x

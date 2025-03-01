@@ -15,6 +15,8 @@ chunk_size = 8192
 dropout = 0.1
 negative_slope = 0.2
 
+threshold_centrality = 0.8
+
 matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
