@@ -13,7 +13,11 @@ import torch.nn.functional as F
 from torch.optim.adamw import AdamW
 import lightning as ltn
 from lightning import Trainer, LightningDataModule
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
+from lightning.pytorch.callbacks import (
+    EarlyStopping,
+    ModelCheckpoint,
+    LearningRateMonitor,
+)
 from lightning.pytorch.loggers import TensorBoardLogger
 from litdata import StreamingDataset, StreamingDataLoader
 from torch_geometric.data import Data as GData
@@ -186,7 +190,10 @@ class DeepTAN(ltn.LightningModule):
 
         # Graph-level label predictor
         self.g_label_predictor = GLabelPredictor(
-            output_dim_g_emb, self.output_dim, [256, 128], dropout
+            output_dim_g_emb,
+            self.output_dim,
+            const.default.label_pred_hidden_dims,
+            dropout,
         )
 
         # Metrics and initialization
@@ -327,7 +334,7 @@ class DeepTAN(ltn.LightningModule):
         }
 
     def on_train_epoch_start(self) -> None:
-        if self.current_epoch < 10:
+        if self.current_epoch < 2:
             # Initially focused on overall distribution
             self.focal_gamma = 0.5
         else:
@@ -644,6 +651,7 @@ def train_model(
         filename=const.default.ckpt_fname_format,
         monitor=const.dkey.title_val_loss,
     )
+    lr_monitor = LearningRateMonitor(logging_interval="step")
 
     logger_tr = TensorBoardLogger(save_dir=log_dir, name="")
 
@@ -658,7 +666,7 @@ def train_model(
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
-        callbacks=[callback_es, callback_ckpt],
+        callbacks=[callback_es, callback_ckpt, lr_monitor],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
         gradient_clip_val=1.0,
@@ -815,7 +823,7 @@ class DeepTANTune:
 
             # Suggest hyperparameters
             params = {
-                "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=True),
+                "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
                 "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
                 "node_emb_dim": trial.suggest_categorical(
                     "node_emb_dim", [64, 128, 192, 256]

@@ -43,6 +43,7 @@ class NodeEmbedding(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.embedding_dim = embedding_dim
+        self.x_increased_dim = embedding_dim // 2
         self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
         self.n_heads = n_heads
@@ -51,10 +52,12 @@ class NodeEmbedding(nn.Module):
             len(dict_node_names), embedding_dim, scale_grad_by_freq=True, sparse=True
         )
 
-        self.mlp2 = nn.Sequential(
-            nn.Linear(2 * embedding_dim, embedding_dim),
+        # Embedding feature values like position embeddings
+        self.quant_emb = nn.Sequential(
+            SelfAtt_(self.embedding_dim + self.x_increased_dim, dropout),
+            nn.Linear(self.embedding_dim + self.x_increased_dim, embedding_dim),
             nn.LayerNorm(embedding_dim),
-            nn.GELU(),
+            # nn.GELU(),
         )
 
         # WGAT layers with skip connections
@@ -104,22 +107,18 @@ class NodeEmbedding(nn.Module):
         # Get embeddings for current nodes
         # E_i = self.embed(ids)
 
-        # x_increased = self.mlp1(x)
-        # Do not use mlp1 for increasing input feature values
         # But use repeating method
-        x_increased = x.repeat(1, self.embedding_dim)
+        x_increased = x.repeat(1, self.x_increased_dim)
 
-        combined = torch.cat([x_increased, E_i], dim=-1)
-        # combined = self.dropout(combined)
-        x_mlp2 = self.mlp2(combined)
-        emb = x_mlp2 + E_i
+        emb = self.quant_emb(torch.cat([x_increased, E_i], dim=-1))
+        emb = emb + E_i
 
         # Multi-scale processing
         skips = []
         if self.skips:
             for i, layer in enumerate(self.layers):
-                # emb = layer(emb, edge_index, edge_attr)
-                emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
+                emb = layer(emb, edge_index, edge_attr)
+                # emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
                 if i < len(self.skips):
                     skips.append(self.skips[i](emb))
 
@@ -612,7 +611,8 @@ class GLabelPredictor(nn.Module):
 
         layers = [
             SelfAtt_(input_dim, dropout),
-            nn.GELU(),
+            # nn.GELU(),
+            nn.LayerNorm(input_dim),
         ]
         for dim in hidden_dims:
             layers += [
@@ -622,6 +622,7 @@ class GLabelPredictor(nn.Module):
             input_dim = dim
         layers.append(nn.LayerNorm(dim))
         layers.append(nn.Linear(input_dim, output_dim))
+        layers.append(nn.GELU())
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
