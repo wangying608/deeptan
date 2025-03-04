@@ -254,29 +254,10 @@ class DeepTAN(ltn.LightningModule):
         avail_recon = recon_node_val_for_loss_all[avail_masks]
         unavail_recon = recon_node_val_for_loss_all[~avail_masks]
 
-        # recon_node_val_for_loss_list = [
-        #     recon_node_val_for_loss_all[
-        #         i, self.pick_avail_node_in_x(batch.node_names[i]), :
-        #     ]
-        #     for i in range(len(batch.node_names))
-        # ]
-        # recon_node_val_for_loss = torch.cat(recon_node_val_for_loss_list)
-
-        # # Node-level reconstruction loss for zeros
-        # recon_node_val_for_loss_list = [
-        #     recon_node_val_for_loss_all[
-        #         i, self.pick_unavail_node_in_x(batch.node_names[i]), :
-        #     ]
-        #     for i in range(len(batch.node_names))
-        # ]
-        # recon_node_val_for_loss_zeros = torch.cat(recon_node_val_for_loss_list)
-
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
             "label_pred": pred_labels,
-            # "node_recon_for_loss": recon_node_val_for_loss,
-            # "node_recon_for_loss_zeros": recon_node_val_for_loss_zeros,
             "node_recon_for_loss": avail_recon,
             "node_recon_for_loss_zeros": unavail_recon,
             "node_recon_for_loss_all": recon_node_val_for_loss_all,
@@ -489,44 +470,6 @@ class DeepTAN(ltn.LightningModule):
         total_loss = self._balance_losses(losses, stage)
         return {**losses, "loss": total_loss}
 
-    # def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
-    #     # Dynamic loss scaling
-    #     loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
-    #     rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
-
-    #     # Initialize scale factors if not present
-    #     if not hasattr(self, "scale_factors"):
-    #         self.scale_factors = torch.ones_like(loss_ratio)
-    #     else:
-    #         self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
-
-    #     # Uncertainty weighting
-    #     label_precision = torch.exp(-self.log_var_label)
-    #     recon_precision = torch.exp(-self.log_var_recon)
-
-    #     scaled_label_loss = (
-    #         label_precision * losses["label"] + self.log_var_label
-    #     ) * self.scale_factors[0]
-    #     scaled_recon_loss = (
-    #         recon_precision * losses["recon"] + self.log_var_recon
-    #     ) * self.scale_factors[1]
-
-    #     # Regularization
-    #     var_reg = 0.5 * (label_precision + recon_precision)
-    #     l2_reg = 0.1 * (self.log_var_label**2 + self.log_var_recon**2)
-
-    #     total_loss = scaled_label_loss + scaled_recon_loss + var_reg + l2_reg
-
-    #     # EMA stabilization
-    #     if self.ema_loss is None:
-    #         self.ema_loss = total_loss.detach().clone()
-    #     else:
-    #         self.ema_loss = 0.9 * self.ema_loss.detach() + 0.1 * total_loss.detach()
-
-    #     stabilization_term = 0.1 * (total_loss.detach() - self.ema_loss.detach()).abs()
-    #     total_loss = total_loss + stabilization_term
-    #     return total_loss
-
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
         # Dynamic loss scaling
         loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
@@ -615,12 +558,52 @@ class DeepTAN(ltn.LightningModule):
 
     def _get_batch_size(self, stage: str) -> int:
         if stage == "train":
-            return self.trainer.train_dataloader.batch_size
+            return (
+                self.trainer.train_dataloader.batch_size
+                if self.trainer.train_dataloader is not None
+                else 1
+            )
         elif stage == "val":
-            return self.trainer.val_dataloaders.batch_size
+            return (
+                self.trainer.val_dataloaders.batch_size
+                if self.trainer.val_dataloaders is not None
+                else 1
+            )
         elif stage == "test":
-            return self.trainer.test_dataloaders.batch_size
+            return (
+                self.trainer.test_dataloaders.batch_size
+                if self.trainer.test_dataloaders is not None
+                else 1
+            )
         return 1
+
+    def save_components(self, save_dir: str):
+        """
+        Save core components separately
+        """
+        os.makedirs(save_dir, exist_ok=True)
+        components = {
+            "amsgp": self.amsgp,
+            "ge_decoder": self.ge_decoder,
+            "g_label_predictor": self.g_label_predictor,
+        }
+        for name, module in components.items():
+            torch.save(
+                {"state_dict": module.state_dict()},
+                os.path.join(save_dir, f"{name}.pt"),
+            )
+
+    @classmethod
+    def load_component(cls, ckpt_path: str, target_class: Any):
+        """
+        Load a specific component
+        """
+        ckpt = torch.load(
+            ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu"
+        )
+        instance = target_class.__new__(target_class)
+        instance.load_state_dict(ckpt["state_dict"])
+        return instance
 
 
 def train_model(
@@ -634,7 +617,19 @@ def train_model(
     accelerator: str = const.default.accelerator,
     fast_dev_run: bool = False,
 ):
-    r"""Fit the model."""
+    r"""Fit the model.
+
+    Args:
+        model (Any): The model to train.
+        datamodule (LightningDataModule): The data module.
+        es_patience (int): The patience for early stopping.
+        max_epochs (int): The maximum number of epochs.
+        min_epochs (int): The minimum number of epochs.
+        log_dir (str): The directory to log the training results.
+        accumulate_grad_batches (int): The number of batches to accumulate gradients over.
+        accelerator (str): The accelerator to use.
+        fast_dev_run (bool): Whether to run a fast development run.
+    """
 
     torch.autograd.set_detect_anomaly(True)
 
@@ -663,7 +658,6 @@ def train_model(
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
-        # callbacks=[callback_es, callback_ckpt, StochasticWeightAveraging(swa_lrs=1e-4)],
         callbacks=[callback_es, callback_ckpt],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,

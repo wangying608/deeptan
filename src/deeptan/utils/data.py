@@ -5,7 +5,7 @@ Graph data module.
 import os
 from typing import List
 from pathlib import Path
-import mudata
+# import mudata
 import numpy as np
 import polars as pl
 import scanpy as sc
@@ -520,16 +520,16 @@ def read_h5ad(h5ad_file: str) -> anndata.AnnData:
     return adata
 
 
-def read_h5mu(h5mu_file: str):
-    r"""Read h5mu file and return AnnData object.
-    Args:
-        h5mu_file (str): Path to h5mu file.
-    Returns:
-        anndata.AnnData: AnnData object.
-    """
-    adata = mudata.read_h5mu(Path(h5mu_file))
-    print(adata)
-    return adata
+# def read_h5mu(h5mu_file: str):
+#     r"""Read h5mu file and return AnnData object.
+#     Args:
+#         h5mu_file (str): Path to h5mu file.
+#     Returns:
+#         anndata.AnnData: AnnData object.
+#     """
+#     adata = mudata.read_h5mu(Path(h5mu_file))
+#     print(adata)
+#     return adata
 
 
 def adata_to_parquet(
@@ -622,28 +622,28 @@ def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True
     )
 
 
-def h5mu_to_parquet(h5mu_file: str, output_parquet: str):
-    r"""Read single-cell multi-modal data from an H5MU file and save it to a Parquet file.
-    Args:
-        h5mu_file (str): Path to the H5MU file.
-        output_parquet (str): Path to the output Parquet file.
-    """
-    # Read the H5MU file using mudata
-    mdata = mudata.read_h5mu(Path(h5mu_file))
+# def h5mu_to_parquet(h5mu_file: str, output_parquet: str):
+#     r"""Read single-cell multi-modal data from an H5MU file and save it to a Parquet file.
+#     Args:
+#         h5mu_file (str): Path to the H5MU file.
+#         output_parquet (str): Path to the output Parquet file.
+#     """
+#     # Read the H5MU file using mudata
+#     mdata = mudata.read_h5mu(Path(h5mu_file))
 
-    adata_rna = mdata.mod["rna"]
-    adata_atac = mdata.mod["atac"]
-    # Concatenate RNA and ATAC data into a single AnnData object
-    adata_combined = anndata.concat([adata_rna, adata_atac], axis=1, join="outer")
+#     adata_rna = mdata.mod["rna"]
+#     adata_atac = mdata.mod["atac"]
+#     # Concatenate RNA and ATAC data into a single AnnData object
+#     adata_combined = anndata.concat([adata_rna, adata_atac], axis=1, join="outer")
 
-    adata_combined.obs_names_make_unique(join="_")
-    adata_combined.var_names_make_unique(join="_")
+#     adata_combined.obs_names_make_unique(join="_")
+#     adata_combined.var_names_make_unique(join="_")
 
-    adata_to_parquet(
-        adata_combined,
-        os.path.dirname(output_parquet),
-        os.path.basename(output_parquet),
-    )
+#     adata_to_parquet(
+#         adata_combined,
+#         os.path.dirname(output_parquet),
+#         os.path.basename(output_parquet),
+#     )
 
 
 def split_parquet(

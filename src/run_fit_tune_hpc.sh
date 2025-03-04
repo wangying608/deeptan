@@ -1,9 +1,20 @@
 #!/bin/bash
-myhome=/storage/public/home/2022051346
-log_err=$myhome/mylogs/error.%J
-log_out=$myhome/mylogs/output.%J
+#JSUB -J deeptan
+#JSUB -q gpu
+#JSUB -n 4
+#JSUB -gpgpu '1 mig=4'
+#JSUB -o log_out.%J
+#JSUB -e log_err.%J
 
-mypython=$myhome/prj/deeptan/.venv/bin/python
+module purge
+module load singularity-4.2.1
+
+MY_HOME=/storage/public/home/2022051346
+# log_err=$myhome/mylogs/error.%J
+# log_out=$myhome/mylogs/output.%J
+
+DEEPTAN_HOME=$MY_HOME/prj/deeptan
+
 myscript=run_05_fit_tune.py
 
 seed=$1
@@ -14,14 +25,8 @@ bsize=$5
 agd=$6
 ck=$7
 
-# for seed in $(seq 42 51)
-# do
-
-dirlitdata=$myhome/prj/deeptan/optimized_data/$optdata/seed_$seed
-dirlogs=$myhome/prj/deeptan/logs/$optdata/seed_$seed
+dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
+dirlogs=$DEEPTAN_HOME/logs/$optdata/seed_$seed
 mkdir -p $dirlogs
 
-jsub -q gpu -n 5 -gpgpu "1 mig=4" -e $log_err -o $log_out -J deeptan_$2+$1 "$mypython $myscript --litdata $dirlitdata --bs $bsize --log_dir $dirlogs --ntrials $ntrial --njobs $njob --chunk_size $ck --acc_grad_batch $agd"
-
-# sleep 8
-# done
+singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --litdata $dirlitdata --bs $bsize --log_dir $dirlogs --ntrials $ntrial --njobs $njob --chunk_size $ck --acc_grad_batch $agd

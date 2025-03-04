@@ -425,9 +425,6 @@ class WGATLayer(MessagePassing):
 
     def forward(self, x, edge_index, edge_attr=None):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-        # return checkpoint(
-        #     self.propagate, edge_index, x=x, edge_attr=edge_attr, use_reentrant=False
-        # )
 
     def message(self, x_i, x_j, edge_attr):
         num_edges = x_i.size(0)
@@ -480,38 +477,9 @@ class WGATLayer(MessagePassing):
         a = F.gelu(e)
         a = F.softmax(a, dim=0)
         x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
+        # Weight features by attention scores
         return torch.einsum("ehd,eh->ed", x_trans, a)
-
-    # def message(self, x_i, x_j, edge_attr):
-    #     # Compute attention scores per head
-    #     h = (torch.cat([x_i, x_j], -1) @ self.W).view(
-    #         -1, self.num_heads, self.output_dim
-    #     )
-
-    #     # Calculate attention coefficients [E, num_heads]
-    #     # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
-    #     e = torch.einsum("ehd,hd->eh", h, self.attn)
-
-    #     # Integrate edge attributes
-    #     if edge_attr is not None:
-    #         # Expand edge_attr to match num_heads [E, num_heads]
-    #         e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
-
-    #     # Normalize attention scores
-    #     a = F.gelu(e)
-    #     a = F.softmax(a, dim=0)
-    #     # a = F.dropout(a, self.dropout, training=self.training)
-
-    #     # Transform features and prepare multi-head output
-    #     # [E, num_heads, output_dim]
-    #     x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
-
-    #     # Weight features by attention scores
-    #     # Average features across heads
-    #     # h = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
-    #     h = torch.einsum("ehd,eh->ed", x_trans, a)
-
-    #     return h
+        #  = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
 
 
 class GE_Decoder(nn.Module):
