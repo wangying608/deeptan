@@ -3,23 +3,24 @@ DeepTAN hyperparameter tuning class with Optuna integration.
 """
 
 import argparse
+
 import deeptan.constants as const
 from deeptan.graph.model import DeepTANTune
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DeepTAN tuning pipeline.")
-    
-    parser.add_argument('--litdata', type=str, default="", required=False, help='Path to litdata directory')
-    parser.add_argument('--bs', type=int, default=const.default.bs, help='Batch size for training')
-    parser.add_argument('--log_dir', type=str, default=".tmp_logs_tune", help='Directory for logging')
-    parser.add_argument('--input_node_emb_dim', type=int, default=1, help='Input node embedding dimension')
-    parser.add_argument('--is_regression', action='store_true', help='Whether the task is regression')
-    parser.add_argument('--acc_grad_batch', type=int, default=const.default.accumulate_grad_batches, help='Accumulate gradients over multiple batches')
-    parser.add_argument('--chunk_size', type=int, default=const.default.chunk_size, help='A proper chunk size can balance memory usage and speed')
-    parser.add_argument('--accelerator', type=str, default=const.default.accelerator, help="cpu, gpu, tpu, hpu, mps, auto")
-    parser.add_argument('--ntrials', type=int, default=const.default.n_trials, help='Number of trials for hyperparameter tuning')
-    parser.add_argument('--njobs', type=int, default=const.default.n_jobs, help='The number of parallel jobs for Optuna. If this argument is set to -1, the number is set to CPU count.')
+
+    parser.add_argument("--litdata", type=str, default="", required=False, help="Path to litdata directory")
+    parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
+    parser.add_argument("--log_dir", type=str, default=".tmp_logs_tune", help="Directory for logging")
+    parser.add_argument("--input_node_emb_dim", type=int, default=1, help="Input node embedding dimension")
+    parser.add_argument("--is_regression", action="store_true", help="Whether the task is regression")
+    parser.add_argument("--acc_grad_batch", type=int, default=const.default.accumulate_grad_batches, help="Accumulate gradients over multiple batches")
+    parser.add_argument("--chunk_size", type=int, default=const.default.chunk_size, help="A proper chunk size can balance memory usage and speed")
+    parser.add_argument("--accelerator", type=str, default=const.default.accelerator, help="cpu, gpu, tpu, hpu, mps, auto")
+    parser.add_argument("--ntrials", type=int, default=const.default.n_trials, help="Number of trials for hyperparameter tuning")
+    parser.add_argument("--njobs", type=int, default=const.default.n_jobs, help="The number of parallel jobs for Optuna. If this argument is set to -1, the number is set to CPU count.")
 
     return parser.parse_args()
 
@@ -27,7 +28,7 @@ def parse_args():
 # Example usage
 if __name__ == "__main__":
     args = parse_args()
-    
+
     # Example configuration (should match original argparse parameters)
     config = {
         "log_dir": args.log_dir,

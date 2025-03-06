@@ -4,28 +4,31 @@ Trait-associated multi-omics network inference via multi-task NMIC-guided adapti
 """
 
 import os
-from typing import List, Dict, Optional, Any
 import pickle
-import polars as pl
+from typing import Any, Dict, List, Optional
+
+import lightning as ltn
 import optuna
+import polars as pl
 import torch
 import torch.nn.functional as F
-from torch.optim.adamw import AdamW
-import lightning as ltn
-from lightning import Trainer, LightningDataModule
+from lightning import LightningDataModule, Trainer
 from lightning.pytorch.callbacks import (
     EarlyStopping,
-    ModelCheckpoint,
     LearningRateMonitor,
+    ModelCheckpoint,
 )
 from lightning.pytorch.loggers import TensorBoardLogger
-from litdata import StreamingDataset, StreamingDataLoader
+
+# from lightning.pytorch.profilers import AdvancedProfiler
+from litdata import StreamingDataLoader, StreamingDataset
+from torch.optim.adamw import AdamW
 from torch_geometric.data import Data as GData
 from torchmetrics import MetricCollection
 from torchmetrics.classification import (
     MulticlassAccuracy,
-    MulticlassF1Score,
     MulticlassAUROC,
+    MulticlassF1Score,
     MulticlassPrecision,
     MulticlassRecall,
 )
@@ -34,14 +37,15 @@ from torchmetrics.regression import (
     MeanSquaredError,
     PearsonCorrCoef,
 )
+
 import deeptan.constants as const
 from deeptan.graph.modules import AMSGP, GE_Decoder, GLabelPredictor
-from deeptan.utils.uni import collate_fn, get_map_location, time_string, random_string
 from deeptan.utils.data import (
     DeepTANDataModule,
     DeepTANDataModuleLit,
     celltypes_class_weights,
 )
+from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_string
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 
@@ -208,15 +212,11 @@ class DeepTAN(ltn.LightningModule):
         assert batch.x is not None, "Input x is None"
         assert batch.edge_index is not None, "Input edge_index is None"
         assert batch.x.dim() == 2, f"The input dim is wrong: {batch.x.shape}"
-        assert batch.edge_index.max() < batch.x.size(0), (
-            f"The edge index is wrong: {batch.edge_index.shape}"
-        )
+        assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
 
         # Check if all node names are valid
         for nodes in batch.node_names:
-            assert all(n in self.dict_node_names for n in nodes), (
-                f"Node names are not valid: {batch.node_names}"
-            )
+            assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
 
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(
@@ -248,9 +248,7 @@ class DeepTAN(ltn.LightningModule):
         batch_size = len(batch.node_names)
 
         # Generate a boolean mask for available nodes [batch_size, num_all_nodes]
-        avail_masks = torch.zeros(
-            (batch_size, self.num_all_nodes), dtype=torch.bool, device=self.device
-        )
+        avail_masks = torch.zeros((batch_size, self.num_all_nodes), dtype=torch.bool, device=self.device)
 
         # en: For each batch, fill the mask for available nodes
         for i, nodes in enumerate(batch.node_names):
@@ -358,49 +356,25 @@ class DeepTAN(ltn.LightningModule):
                     "MSE": MeanSquaredError(num_outputs=self.output_dim),
                     "MAE": MeanAbsoluteError(num_outputs=self.output_dim),
                     "PCC": PearsonCorrCoef(num_outputs=self.output_dim),
-                    "RMSE": MeanSquaredError(
-                        num_outputs=self.output_dim, squared=False
-                    ),
+                    "RMSE": MeanSquaredError(num_outputs=self.output_dim, squared=False),
                 }
             )
         else:
             metrics_task_label = MetricCollection(
                 {
-                    "F1_weighted": MulticlassF1Score(
-                        num_classes=self.output_dim, average="weighted"
-                    ),
-                    "F1_macro": MulticlassF1Score(
-                        num_classes=self.output_dim, average="macro"
-                    ),
-                    "F1_micro": MulticlassF1Score(
-                        num_classes=self.output_dim, average="micro"
-                    ),
+                    "F1_weighted": MulticlassF1Score(num_classes=self.output_dim, average="weighted"),
+                    "F1_macro": MulticlassF1Score(num_classes=self.output_dim, average="macro"),
+                    "F1_micro": MulticlassF1Score(num_classes=self.output_dim, average="micro"),
                     "Accuracy": MulticlassAccuracy(num_classes=self.output_dim),
-                    "Precision": MulticlassPrecision(
-                        num_classes=self.output_dim, average="weighted"
-                    ),
-                    "Recall": MulticlassRecall(
-                        num_classes=self.output_dim, average="weighted"
-                    ),
-                    "AUROC": MulticlassAUROC(
-                        num_classes=self.output_dim, average="macro"
-                    ),
+                    "Precision": MulticlassPrecision(num_classes=self.output_dim, average="weighted"),
+                    "Recall": MulticlassRecall(num_classes=self.output_dim, average="weighted"),
+                    "AUROC": MulticlassAUROC(num_classes=self.output_dim, average="macro"),
                 }
             )
 
         # Create metrics for all stages
-        self.metrics_common = torch.nn.ModuleDict(
-            {
-                f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_")
-                for k in ["train", "val", "test"]
-            }
-        )
-        self.metrics_task_label = torch.nn.ModuleDict(
-            {
-                f"{k}_metrics": metrics_task_label.clone(prefix=k + "/label_")
-                for k in ["train", "val", "test"]
-            }
-        )
+        self.metrics_common = torch.nn.ModuleDict({f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_") for k in ["train", "val", "test"]})
+        self.metrics_task_label = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_label.clone(prefix=k + "/label_") for k in ["train", "val", "test"]})
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
         assert batch.x is not None
@@ -409,9 +383,7 @@ class DeepTAN(ltn.LightningModule):
         node_recon_for_loss = outputs["node_recon_for_loss"].squeeze(1)
         node_true_val_for_loss = batch.x.squeeze(1)
 
-        self.metrics_common[f"{stage}_metrics"].update(
-            node_recon_for_loss, node_true_val_for_loss
-        )
+        self.metrics_common[f"{stage}_metrics"].update(node_recon_for_loss, node_true_val_for_loss)
 
         # Node reconstruction loss
         recon_loss = F.mse_loss(node_recon_for_loss, node_true_val_for_loss)
@@ -453,9 +425,7 @@ class DeepTAN(ltn.LightningModule):
                     _y = torch.argmax(_y, dim=1)
 
                 if self.use_focal_loss:
-                    focal_loss = FocalLoss(
-                        gamma=self.focal_gamma, alpha=self.focal_alpha, reduction="mean"
-                    )
+                    focal_loss = FocalLoss(gamma=self.focal_gamma, alpha=self.focal_alpha, reduction="mean")
                     pred_loss = focal_loss(outputs["label_pred"], _y)
                 else:
                     if self.class_weights is None:
@@ -493,11 +463,7 @@ class DeepTAN(ltn.LightningModule):
         # Calculate learnable weights with regularization
         label_weight = torch.exp(-self.log_var_label)
         recon_weight = torch.exp(-self.log_var_recon)
-        total_loss = (
-            0.5 * label_weight * losses["label"] * self.scale_factors[0]
-            + 0.5 * recon_weight * losses["recon"] * self.scale_factors[1]
-            + 0.5 * (self.log_var_label + self.log_var_recon)
-        )
+        total_loss = 0.5 * label_weight * losses["label"] * self.scale_factors[0] + 0.5 * recon_weight * losses["recon"] * self.scale_factors[1] + 0.5 * (self.log_var_label + self.log_var_recon)
         return total_loss
 
     def on_before_optimizer_step(self, optimizer):
@@ -551,9 +517,7 @@ class DeepTAN(ltn.LightningModule):
             self.metrics_common[f"{stage}_metrics"].reset()
 
             if self.output_g_label_dim is not None:
-                metrics_task_label = self.metrics_task_label[
-                    f"{stage}_metrics"
-                ].compute()
+                metrics_task_label = self.metrics_task_label[f"{stage}_metrics"].compute()
                 for name, val in metrics_task_label.items():
                     self.log(
                         name,
@@ -565,23 +529,11 @@ class DeepTAN(ltn.LightningModule):
 
     def _get_batch_size(self, stage: str) -> int:
         if stage == "train":
-            return (
-                self.trainer.train_dataloader.batch_size
-                if self.trainer.train_dataloader is not None
-                else 1
-            )
+            return self.trainer.train_dataloader.batch_size if self.trainer.train_dataloader is not None else 1
         elif stage == "val":
-            return (
-                self.trainer.val_dataloaders.batch_size
-                if self.trainer.val_dataloaders is not None
-                else 1
-            )
+            return self.trainer.val_dataloaders.batch_size if self.trainer.val_dataloaders is not None else 1
         elif stage == "test":
-            return (
-                self.trainer.test_dataloaders.batch_size
-                if self.trainer.test_dataloaders is not None
-                else 1
-            )
+            return self.trainer.test_dataloaders.batch_size if self.trainer.test_dataloaders is not None else 1
         return 1
 
     def save_components(self, save_dir: str):
@@ -605,9 +557,7 @@ class DeepTAN(ltn.LightningModule):
         """
         Load a specific component
         """
-        ckpt = torch.load(
-            ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu"
-        )
+        ckpt = torch.load(ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
         instance = target_class.__new__(target_class)
         instance.load_state_dict(ckpt["state_dict"])
         return instance
@@ -655,8 +605,11 @@ def train_model(
 
     logger_tr = TensorBoardLogger(save_dir=log_dir, name="")
 
+    # profiler = AdvancedProfiler(dirpath=log_dir, filename="perf_logs")
+
     trainer = Trainer(
         fast_dev_run=fast_dev_run,
+        # profiler=profiler,
         # strategy="ddp_spawn",
         enable_progress_bar=True,
         accumulate_grad_batches=accumulate_grad_batches,
@@ -704,9 +657,7 @@ class DeepTANTune:
 
         self.log_name = f"DeepTAN_{time_string()}_{random_string(5)}"
         os.makedirs(os.path.join(self.log_dir, self.log_name), exist_ok=True)
-        self.path_optuna_db = (
-            "sqlite:///" + self.log_dir + f"/{self.log_name}/optuna.db"
-        )
+        self.path_optuna_db = "sqlite:///" + self.log_dir + f"/{self.log_name}/optuna.db"
 
         # Initialize data module
         self._init_data_module()
@@ -725,9 +676,7 @@ class DeepTANTune:
             self.dict_node_names = others2save["dict_node_names"]
             self.output_g_label_dim = others2save["output_g_label_dim"]
 
-            path_label_onehot = os.path.join(
-                self.args["litdata"], const.fname.label_class_onehot
-            )
+            path_label_onehot = os.path.join(self.args["litdata"], const.fname.label_class_onehot)
             if os.path.exists(path_label_onehot):
                 self.path_label_onehot = path_label_onehot
             else:
@@ -747,9 +696,7 @@ class DeepTANTune:
                 "val": self.args["val_parquet"],
                 "tst": self.args["tst_parquet"],
             }
-            self.datamodule = DeepTANDataModule(
-                files_fit, labels, batch_size=self.args["bs"]
-            )
+            self.datamodule = DeepTANDataModule(files_fit, labels, batch_size=self.args["bs"])
             self.datamodule.setup()
             self.dict_node_names = self.datamodule.dict_node_names
             self.output_g_label_dim = self.datamodule.label_dim
@@ -771,15 +718,11 @@ class DeepTANTune:
         if self.path_label_onehot is not None:
             print("\nPre-defined label onehot file found. Computing class weights...\n")
             return celltypes_class_weights(pl.read_parquet(self.path_label_onehot))
-        print(
-            f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n"
-        )
+        print(f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n")
         return None
 
     def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
-        fusion_dims_node_emb = trial_params.get(
-            "fusion_dims_node_emb", self.args["fusion_dims_node_emb"]
-        )
+        fusion_dims_node_emb = trial_params.get("fusion_dims_node_emb", self.args["fusion_dims_node_emb"])
         if isinstance(fusion_dims_node_emb, str):
             fusion_dims_node_emb = eval(fusion_dims_node_emb)
 
@@ -792,22 +735,12 @@ class DeepTANTune:
             class_weights=self.class_weight,
             node_emb_dim=trial_params.get("node_emb_dim", self.args["node_emb_dim"]),
             fusion_dims_node_emb=fusion_dims_node_emb,
-            output_dim_g_emb=trial_params.get(
-                "output_dim_g_emb", self.args["output_dim_g_emb"]
-            ),
+            output_dim_g_emb=trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"]),
             n_hop=trial_params.get("n_hop", self.args["n_hop"]),
-            threshold_edge_exist=trial_params.get(
-                "threshold_edge_exist", self.args["threshold_edge_exist"]
-            ),
-            threshold_subgraph_overlap=trial_params.get(
-                "threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]
-            ),
-            n_heads_node_emb=trial_params.get(
-                "n_heads_node_emb", self.args["n_heads_node_emb"]
-            ),
-            n_heads_pooling=trial_params.get(
-                "n_heads_pooling", self.args["n_heads_pooling"]
-            ),
+            threshold_edge_exist=trial_params.get("threshold_edge_exist", self.args["threshold_edge_exist"]),
+            threshold_subgraph_overlap=trial_params.get("threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]),
+            n_heads_node_emb=trial_params.get("n_heads_node_emb", self.args["n_heads_node_emb"]),
+            n_heads_pooling=trial_params.get("n_heads_pooling", self.args["n_heads_pooling"]),
             dropout=trial_params.get("dropout", self.args["dropout"]),
             lr=trial_params.get("lr", self.args["lr"]),
             chunk_size=self.args["chunk_size"],
@@ -817,30 +750,20 @@ class DeepTANTune:
         """Optuna objective function for hyperparameter optimization"""
         try:
             fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32], [64, 32, 16]]
-            fusion_dims_node_emb_list_strings = [
-                str(lst) for lst in fusion_dims_node_emb_lists_to_try
-            ]
+            fusion_dims_node_emb_list_strings = [str(lst) for lst in fusion_dims_node_emb_lists_to_try]
 
             # Suggest hyperparameters
             params = {
                 "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
                 "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
-                "node_emb_dim": trial.suggest_categorical(
-                    "node_emb_dim", [64, 128, 192, 256]
-                ),
-                "n_heads_node_emb": trial.suggest_categorical(
-                    "n_heads_node_emb", [2, 4, 8]
-                ),
-                "n_heads_pooling": trial.suggest_categorical(
-                    "n_heads_pooling", [2, 4, 8]
-                ),
+                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [64, 128, 192, 256]),
+                "n_heads_node_emb": trial.suggest_categorical("n_heads_node_emb", [2, 4, 8]),
+                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4, 8]),
                 "fusion_dims_node_emb": trial.suggest_categorical(
                     "fusion_dims_node_emb",
                     fusion_dims_node_emb_list_strings,
                 ),
-                "output_dim_g_emb": trial.suggest_categorical(
-                    "output_dim_g_emb", [64, 128, 192, 256]
-                ),
+                "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 512]),
                 "n_hop": trial.suggest_int("n_hop", 1, 3),
             }
 
@@ -860,17 +783,14 @@ class DeepTANTune:
                 es_patience=self.args["es"],
                 max_epochs=self.args["max_ep"],
                 min_epochs=self.args["min_ep"],
-                log_dir=os.path.join(
-                    self.log_dir, self.log_name, f"trial_{trial.number}"
-                ),
+                log_dir=os.path.join(self.log_dir, self.log_name, f"trial_{trial.number}"),
                 accumulate_grad_batches=self.args["acc_grad_batch"],
                 accelerator=self.args["accelerator"],
+                # fast_dev_run=True,
             )
 
             if val_loss is None:
-                print(
-                    f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n"
-                )
+                print(f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n")
                 raise optuna.TrialPruned()
 
             return val_loss
@@ -891,9 +811,7 @@ class DeepTANTune:
             load_if_exists=True,
         )
 
-        study.optimize(
-            self.objective, n_trials=n_trials, n_jobs=n_jobs, gc_after_trial=True
-        )
+        study.optimize(self.objective, n_trials=n_trials, n_jobs=n_jobs, gc_after_trial=True)
 
         print("Best trial:")
         trial = study.best_trial
@@ -911,17 +829,13 @@ def predict(
     batch_size: int = 1,
 ):
     # Load a DeepTAN model
-    model = DeepTAN.load_from_checkpoint(
-        model_ckpt_path, map_location=get_map_location(map_location)
-    )
+    model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
     # Freeze the model
     model.eval()
     model.freeze()
 
     # Load the LitData dataset
-    dataloader = StreamingDataLoader(
-        StreamingDataset(litdata_dir), batch_size=batch_size, collate_fn=collate_fn
-    )
+    dataloader = StreamingDataLoader(StreamingDataset(litdata_dir), batch_size=batch_size, collate_fn=collate_fn)
 
     # Predict
     trainer = Trainer(logger=False)

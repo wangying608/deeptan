@@ -1,15 +1,16 @@
 import numpy as np
-from sklearn.metrics import mean_squared_error as MSE
-from sklearn.metrics import f1_score as F1
-from sklearn.metrics import adjusted_mutual_info_score as AMI
-from sklearn.metrics import adjusted_rand_score as ARI
-from sklearn.metrics import homogeneity_score as HOM
-from sklearn.metrics import normalized_mutual_info_score as NMI
-# from sklearn.metrics import silhouette_score
-from sklearn.metrics import roc_auc_score as AUROC
-from scipy.stats import pearsonr, entropy
 from scib.metrics import kBET
 from scib.metrics import silhouette as ASW
+from scipy.stats import entropy, pearsonr
+from sklearn.metrics import adjusted_mutual_info_score as AMI
+from sklearn.metrics import adjusted_rand_score as ARI
+from sklearn.metrics import f1_score as F1
+from sklearn.metrics import homogeneity_score as HOM
+from sklearn.metrics import mean_squared_error as MSE
+from sklearn.metrics import normalized_mutual_info_score as NMI
+
+# from sklearn.metrics import silhouette_score
+from sklearn.metrics import roc_auc_score as AUROC
 
 
 def calculate_mse(x_true, x_pred):
@@ -20,9 +21,7 @@ def calculate_mse(x_true, x_pred):
 def calculate_pcc(x_true, x_pred):
     pcc = []
     for i in range(x_true.shape[1]):
-        if np.all(x_true[:, i] == x_true[:, i][0]) or np.all(
-            x_pred[:, i] == x_pred[:, i][0]
-        ):
+        if np.all(x_true[:, i] == x_true[:, i][0]) or np.all(x_pred[:, i] == x_pred[:, i][0]):
             # If all elements in the column are the same, the correlation is undefined. Set it to 0.0.
             pcc.append(0.0)
         else:

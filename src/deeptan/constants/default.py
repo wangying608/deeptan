@@ -31,5 +31,5 @@ n_jobs = 1
 n_trials = 30
 n_workers = 1
 
-lit_chunk_bytes = "512MB"
+lit_chunk_bytes = "256MB"
 lit_compression = "zstd"

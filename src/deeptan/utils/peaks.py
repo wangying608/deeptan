@@ -1,15 +1,13 @@
+import numpy as np
+import pandas as pd
 import polars as pl
 import scanpy as sc
 from scipy.sparse import csr_matrix, hstack
-import numpy as np
-import pandas as pd
 
 
 def read_peaks(adata: sc.AnnData) -> pl.DataFrame:
     """Read the peaks data from the AnnData object"""
-    peaks: list[str] = (
-        adata.var[adata.var["feature_types"] == "Peaks"].copy().index.to_list()
-    )
+    peaks: list[str] = adata.var[adata.var["feature_types"] == "Peaks"].copy().index.to_list()
     peak_chr = []
     peak_sta = []
     peak_end = []
@@ -90,9 +88,7 @@ class MergePeaks:
             )
 
         # Create final DataFrame with proper sorting
-        self.merged_peaks = pl.DataFrame(
-            merged_peaks, schema=["chr", "start", "end", "peak"], orient="row"
-        ).sort(by=["chr", "start", "end"])
+        self.merged_peaks = pl.DataFrame(merged_peaks, schema=["chr", "start", "end", "peak"], orient="row").sort(by=["chr", "start", "end"])
 
         return self.merged_peaks
 
@@ -127,9 +123,7 @@ def map_peaks_to_ref(new_h5ad: str, merged_peaks: pl.DataFrame):
 
     # Separate peaks and RNA features based on feature_types
     if "feature_types" not in adata.var.columns:
-        raise ValueError(
-            "The 'feature_types' column is missing in adata.var. Please ensure it exists to distinguish between Peaks and Gene Expression."
-        )
+        raise ValueError("The 'feature_types' column is missing in adata.var. Please ensure it exists to distinguish between Peaks and Gene Expression.")
 
     # Split the var into peaks and RNA features
     peaks_mask = adata.var["feature_types"] == "Peaks"
@@ -145,14 +139,10 @@ def map_peaks_to_ref(new_h5ad: str, merged_peaks: pl.DataFrame):
     original_peaks_df = read_peaks(peaks_adata)
 
     # Prepare merged peaks with index column
-    merged_peaks = merged_peaks.with_row_count("merged_index").sort(
-        by=["chr", "start", "end"]
-    )
+    merged_peaks = merged_peaks.with_row_count("merged_index").sort(by=["chr", "start", "end"])
 
     # Join original peaks with merged peaks using interval overlap condition
-    overlap_condition = (pl.col("start") <= pl.col("end_merged")) & (
-        pl.col("end") >= pl.col("start_merged")
-    )
+    overlap_condition = (pl.col("start") <= pl.col("end_merged")) & (pl.col("end") >= pl.col("start_merged"))
 
     # Perform join and filter overlaps
     mapping_df = original_peaks_df.join(
@@ -175,21 +165,13 @@ def map_peaks_to_ref(new_h5ad: str, merged_peaks: pl.DataFrame):
     cols = list(mapping.values())
     data = np.ones(len(rows))
 
-    transform_matrix = csr_matrix(
-        (data, (rows, cols)), shape=(peaks_adata.shape[1], merged_peaks.shape[0])
-    )
+    transform_matrix = csr_matrix((data, (rows, cols)), shape=(peaks_adata.shape[1], merged_peaks.shape[0]))
 
     # Apply matrix transformation
     new_X_peaks = peaks_adata.X @ transform_matrix
 
     # Create new AnnData object
-    new_var_peaks = (
-        merged_peaks.select(
-            [pl.col("chr"), pl.col("start"), pl.col("end"), pl.col("peak")]
-        )
-        .to_pandas()
-        .set_index("peak")
-    )
+    new_var_peaks = merged_peaks.select([pl.col("chr"), pl.col("start"), pl.col("end"), pl.col("peak")]).to_pandas().set_index("peak")
 
     new_var_peaks["feature_types"] = "Peaks"
 

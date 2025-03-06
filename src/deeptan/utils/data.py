@@ -4,20 +4,22 @@ Graph data module.
 
 import os
 from typing import List
-from pathlib import Path
+
+import anndata
+
 # import mudata
 import numpy as np
 import polars as pl
 import scanpy as sc
-import anndata
 import torch
+from lightning import LightningDataModule
+from litdata import StreamingDataLoader, StreamingDataset
 from torch_geometric.data import Data as GData
 from torch_geometric.data import Dataset as GDataset
 from torch_geometric.loader import DataLoader as GDataLoader
 from torch_geometric.utils import erdos_renyi_graph
-from lightning import LightningDataModule
-from litdata import StreamingDataset, StreamingDataLoader
-from deeptan.utils.uni import get_avail_cpu_count, collate_fn
+
+from deeptan.utils.uni import collate_fn, get_avail_cpu_count
 
 
 def read_csv_celltypes2onehot(csv_path):
@@ -41,9 +43,7 @@ def read_csv_celltypes2onehot(csv_path):
 def read_h5ad_celltypes2onehot(h5ad_path, celltype_key="Celltype"):
     celltypes = sc.read_h5ad(h5ad_path).obs[celltype_key]
     print(celltypes.value_counts())
-    celltypes_pl = pl.DataFrame(
-        {"bc": celltypes.index, "ct": celltypes.values.astype(str)}
-    )
+    celltypes_pl = pl.DataFrame({"bc": celltypes.index, "ct": celltypes.values.astype(str)})
     celltypes_onehot = celltypes_pl.to_dummies(columns=["ct"])
 
     # Add a new column "ct_unknown" which all values are 0 (type: u8)
@@ -54,9 +54,7 @@ def read_h5ad_celltypes2onehot(h5ad_path, celltype_key="Celltype"):
     celltypes_onehot = celltypes_onehot.sort("bc")
 
     # Save the one-hot encoded DataFrame
-    celltypes_onehot.write_parquet(
-        h5ad_path.replace(".h5ad", "_celltypes_onehot.parquet")
-    )
+    celltypes_onehot.write_parquet(h5ad_path.replace(".h5ad", "_celltypes_onehot.parquet"))
 
 
 def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
@@ -115,17 +113,13 @@ class NMICGraphDataset(GDataset):
         x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
 
         # Filter edges based on available nodes
-        edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(
-            self.edge_index[1], avail_feat_indices
-        )
+        edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
 
         edge_indices = self.edge_index[:, edge_mask]
 
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {
-            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
-        }
+        feat_index_to_avail_index = {feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)}
         # Apply the mapping to edge_indices
         mapped_edge_indices = edge_indices.copy()
         for i in range(edge_indices.shape[1]):
@@ -133,9 +127,7 @@ class NMICGraphDataset(GDataset):
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
         edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
-        edge_attrs = torch.tensor(
-            self.edge_attr[edge_mask], dtype=torch.float32
-        ).unsqueeze(1)
+        edge_attrs = torch.tensor(self.edge_attr[edge_mask], dtype=torch.float32).unsqueeze(1)
 
         node_names = [self.node_names[i] for i in avail_col_indices]
 
@@ -181,12 +173,7 @@ class NMICGraphDataset(GDataset):
         if self.labels is None:
             return None
         else:
-            _label = (
-                self.labels.filter(pl.col("bc") == obs_name)
-                .drop("bc")
-                .to_numpy()
-                .astype(np.float32)
-            )
+            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy().astype(np.float32)
             return _label
 
 
@@ -210,17 +197,13 @@ class NMICGraphDatasetRely(GDataset):
 
         avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
         # Filter edges based on available nodes
-        edge_mask = np.isin(
-            self.depGDataset.edge_index[0], avail_feat_indices
-        ) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
+        edge_mask = np.isin(self.depGDataset.edge_index[0], avail_feat_indices) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
 
         edge_indices = self.depGDataset.edge_index[:, edge_mask]
 
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {
-            feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)
-        }
+        feat_index_to_avail_index = {feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)}
         # Apply the mapping to edge_indices
         mapped_edge_indices = edge_indices.copy()
         for i in range(edge_indices.shape[1]):
@@ -319,9 +302,7 @@ class DeepTANDataModuleLit(LightningDataModule):
         super().__init__()
         self.litdata_dir = litdata_dir
         self.batch_size = batch_size
-        self.n_workers = (
-            get_avail_cpu_count(n_workers) if n_workers else get_avail_cpu_count(28)
-        )
+        self.n_workers = get_avail_cpu_count(n_workers) if n_workers else get_avail_cpu_count(28)
 
     def setup(self, stage=None):
         self.dataloder_trn = StreamingDataLoader(
@@ -361,9 +342,7 @@ class DeepTANDataModuleLit(LightningDataModule):
         return self.dataloader_test
 
 
-def generate_random_graph(
-    num_nodes: int, num_features: int, num_classes: int | None, is_regression: bool
-) -> GData:
+def generate_random_graph(num_nodes: int, num_features: int, num_classes: int | None, is_regression: bool) -> GData:
     """
     Generate a random graph data object with graph-level labels.
 
@@ -377,19 +356,13 @@ def generate_random_graph(
         Data: Randomly generated graph data object.
     """
     # Randomly generate node features
-    x = torch.randn(
-        num_nodes, num_features
-    )  # Node feature matrix (num_nodes, num_features)
+    x = torch.randn(num_nodes, num_features)  # Node feature matrix (num_nodes, num_features)
 
     # Randomly generate edge indices (using Erdős-Rényi model to generate a random graph)
-    edge_index = erdos_renyi_graph(
-        num_nodes, edge_prob=0.2
-    )  # Edge indices (2, num_edges)
+    edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.2)  # Edge indices (2, num_edges)
 
     # Randomly generate edge attributes
-    edge_attr = torch.rand(
-        edge_index.size(1), 1
-    )  # Edge attribute matrix (num_edges, 1)
+    edge_attr = torch.rand(edge_index.size(1), 1)  # Edge attribute matrix (num_edges, 1)
 
     # Randomly generate node names (assuming node names are strings)
     node_names = [f"node_{i}" for i in range(num_nodes)]
@@ -397,9 +370,7 @@ def generate_random_graph(
     # Remove edges with weights less than the threshold 0.2
     mask = edge_attr.squeeze() > 0.2
     edge_index = edge_index[:, mask]
-    edge_attr = edge_attr[
-        mask
-    ]  # Filtered edge attribute matrix (num_filtered_edges, 1)
+    edge_attr = edge_attr[mask]  # Filtered edge attribute matrix (num_filtered_edges, 1)
 
     if num_classes is None:
         # Create the graph data object
@@ -412,13 +383,9 @@ def generate_random_graph(
     else:
         # Randomly generate graph-level labels
         if is_regression:
-            y = torch.rand(
-                1, num_classes
-            )  # Regression task labels (1, output_dim), representing the entire graph
+            y = torch.rand(1, num_classes)  # Regression task labels (1, output_dim), representing the entire graph
         else:
-            y = torch.randint(
-                0, num_classes, (1,)
-            )  # Classification task labels (1,), representing the entire graph
+            y = torch.randint(0, num_classes, (1,))  # Classification task labels (1,), representing the entire graph
 
         # Create the graph data object
         graph_data = GData(
@@ -492,15 +459,9 @@ def random_g_datamodule(
     is_regression: bool = False,
     batch_size: int = 4,
 ):
-    train_dataset = RandomGraphDataset(
-        num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression
-    )
-    val_dataset = RandomGraphDataset(
-        num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression
-    )
-    test_dataset = RandomGraphDataset(
-        num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression
-    )
+    train_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+    val_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+    test_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
     # pred_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
 
     ltn_dm = GraphDataModule(train_dataset, val_dataset, test_dataset, batch_size)
@@ -558,9 +519,7 @@ def adata_to_parquet(
         rands = np.random.choice(X.shape[1], randomly_select_features, replace=False)
         var_names = [var_names[i] for i in rands.tolist()]
         X = X[:, rands]
-    df = pl.DataFrame({"obs_names": obs_names}).hstack(
-        pl.DataFrame(X, schema=var_names)
-    )
+    df = pl.DataFrame({"obs_names": obs_names}).hstack(pl.DataFrame(X, schema=var_names))
     print(f"DataFrame shape: {df.shape}")
     print(f"Head of DataFrame:\n{df.head()}\n")
 
@@ -596,9 +555,7 @@ def h5_to_parquet(h5_file: str, output_parquet: str):
 
     adata.var_names_make_unique(join="_")
     adata.obs_names_make_unique(join="_")
-    adata_to_parquet(
-        adata, os.path.dirname(output_parquet), os.path.basename(output_parquet)
-    )
+    adata_to_parquet(adata, os.path.dirname(output_parquet), os.path.basename(output_parquet))
 
 
 def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True):
@@ -608,18 +565,14 @@ def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True
         output_parquet (str): Path to the output Parquet file.
     """
     adata = read_h5ad(h5ad_file)
-    print(
-        f"Read {h5ad_file} with {adata.shape[0]} cells and {adata.shape[1]} features."
-    )
+    print(f"Read {h5ad_file} with {adata.shape[0]} cells and {adata.shape[1]} features.")
     print(f"Saving to {output_parquet}...")
 
     if uniq_names:
         adata.var_names_make_unique(join="_")
         adata.obs_names_make_unique(join="_")
 
-    adata_to_parquet(
-        adata, os.path.dirname(output_parquet), os.path.basename(output_parquet)
-    )
+    adata_to_parquet(adata, os.path.dirname(output_parquet), os.path.basename(output_parquet))
 
 
 # def h5mu_to_parquet(h5mu_file: str, output_parquet: str):
@@ -646,9 +599,7 @@ def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True
 #     )
 
 
-def split_parquet(
-    parquet_file: str, output_dir: str, ratio: List[float], seeds: List[int]
-):
+def split_parquet(parquet_file: str, output_dir: str, ratio: List[float], seeds: List[int]):
     r"""
     Read a dataframe from a parquet file and split it into multiple parts based on the given ratios.
     The splits are saved as separate parquet files in the specified output directory.
@@ -683,9 +634,7 @@ def split_parquet_with_celltypes(
     df = pl.read_parquet(parquet_file)
     assert len(seeds) > 0, "Seeds list must not be empty."
     assert abs(sum(ratio) - 1.0) < 1e-9, "Ratios must sum to 1"
-    assert len(cell_types) == len(df), (
-        "Cell types list must match the number of rows in the dataframe."
-    )
+    assert len(cell_types) == len(df), "Cell types list must match the number of rows in the dataframe."
     os.makedirs(output_dir, exist_ok=True)
 
     # Create a list of unique cell types
@@ -705,9 +654,7 @@ def split_parquet_with_celltypes(
             # Shuffle the indices
             shuffled_indices = np.random.permutation(cell_type_indices)
             # Calculate the split points based on the ratio
-            split_points = np.cumsum(
-                np.array(ratio[:-1]) * len(shuffled_indices)
-            ).astype(int)
+            split_points = np.cumsum(np.array(ratio[:-1]) * len(shuffled_indices)).astype(int)
             cell_type_split_indices = np.split(shuffled_indices, split_points)
 
             # Append the split indices for each cell type to the overall split indices
@@ -775,9 +722,7 @@ class JointStratifiedSplitter:
 
         # Precompute strata labels.
         strata = np.array(list(zip(self.cell_types, self.orig_idents)))
-        self.unique_strata, self.stratum_labels = np.unique(
-            strata, axis=0, return_inverse=True
-        )
+        self.unique_strata, self.stratum_labels = np.unique(strata, axis=0, return_inverse=True)
 
         os.makedirs(self.output_dir, exist_ok=True)
 
@@ -817,9 +762,7 @@ class JointStratifiedSplitter:
         for stratum_idx in range(len(self.unique_strata)):
             stratum_indices = self._get_stratum_indices(stratum_idx)
             repeat_factor = int(np.ceil(max_stratum_size / len(stratum_indices)))
-            balanced_indices.extend(
-                np.tile(stratum_indices, repeat_factor)[:max_stratum_size]
-            )
+            balanced_indices.extend(np.tile(stratum_indices, repeat_factor)[:max_stratum_size])
 
     def _undersample_strategy(self, balanced_indices: list):
         """Undersample majority strata to match minority size."""
@@ -843,9 +786,7 @@ class JointStratifiedSplitter:
                 repeat_factor = int(np.ceil(target_stratum_size / len(stratum_indices)))
                 sampled = np.tile(stratum_indices, repeat_factor)[:target_stratum_size]
             else:
-                sampled = np.random.choice(
-                    stratum_indices, target_stratum_size, replace=False
-                )
+                sampled = np.random.choice(stratum_indices, target_stratum_size, replace=False)
             balanced_indices.extend(sampled)
 
     def _none_strategy_split(self, seed: int) -> List[np.ndarray]:
@@ -880,9 +821,7 @@ class JointStratifiedSplitter:
             cumulative += split_size
         return split_sizes
 
-    def _distribute_indices(
-        self, indices: np.ndarray, split_sizes: List[int], split_indices: List[list]
-    ):
+    def _distribute_indices(self, indices: np.ndarray, split_sizes: List[int], split_indices: List[list]):
         """Distribute indices based on split sizes and store them in split_indices."""
         current = 0
         for i, size in enumerate(split_sizes):
@@ -908,14 +847,10 @@ class JointStratifiedSplitter:
     def _save_splits(self, splits: List[np.ndarray], seed: int):
         """Write the splits to parquet files."""
         for split_idx, indices in enumerate(splits):
-            output_path = os.path.join(
-                self.output_dir, f"split_{seed}_{split_idx}.parquet"
-            )
+            output_path = os.path.join(self.output_dir, f"split_{seed}_{split_idx}.parquet")
             try:
                 self.df[indices].write_parquet(output_path)
-                print(
-                    f"Created split {split_idx} (seed {seed}) with {len(indices)} samples"
-                )
+                print(f"Created split {split_idx} (seed {seed}) with {len(indices)} samples")
             except Exception as e:
                 print(f"Failed to write split {split_idx} (seed {seed}): {e}")
 

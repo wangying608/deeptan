@@ -2,14 +2,16 @@ r"""
 Universal functions.
 """
 
-import time
 import random
 import string
+import time
+from multiprocessing import cpu_count
 from typing import Optional
+
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from torch.cuda import device_count
 from torch_geometric.data import Batch
-from multiprocessing import cpu_count
+
 import deeptan.constants as const
 
 

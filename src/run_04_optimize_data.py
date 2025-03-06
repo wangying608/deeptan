@@ -1,9 +1,11 @@
-import os
-import shutil
 import argparse
 import json
+import os
 import pickle
+import shutil
+
 import litdata
+
 import deeptan.constants as const
 from deeptan.utils.data import DeepTANDataModule
 
@@ -45,20 +47,14 @@ if __name__ == "__main__":
     }
     os.makedirs(args.output_dir, exist_ok=True)
     # Save as json
-    with open(
-        os.path.join(args.output_dir, const.fname.litdata_others2save_json), "w"
-    ) as f:
+    with open(os.path.join(args.output_dir, const.fname.litdata_others2save_json), "w") as f:
         json.dump(others2save, f)
     # Save as pickle
-    with open(
-        os.path.join(args.output_dir, const.fname.litdata_others2save_pkl), "wb"
-    ) as f:
+    with open(os.path.join(args.output_dir, const.fname.litdata_others2save_pkl), "wb") as f:
         pickle.dump(others2save, f)
 
     if labels is not None:
-        shutil.copy(
-            labels, os.path.join(args.output_dir, const.fname.label_class_onehot)
-        )
+        shutil.copy(labels, os.path.join(args.output_dir, const.fname.label_class_onehot))
 
     # Optimize
     litdata.optimize(

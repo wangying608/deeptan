@@ -1,6 +1,6 @@
 import os
-from deeptan.utils.uni import predict, process_results
 
+from deeptan.graph.model import predict, process_results
 
 if __name__ == "__main__":
     model_path = "/mnt/hdd1/wuch/logs/GSE155304_SRP273996/seed_42_20250212152331_170LZ/best-model-epoch=0003-val_loss=2.5736.ckpt"

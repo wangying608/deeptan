@@ -6,16 +6,13 @@ build-backend = "hatchling.build"
 name = "deeptan"
 version = "0.1.0"
 description = "DeepTAN: A multi-task framework designed to infer multi-omics trait-associated networks and reconstruct phenotype-specific omics states from mosaic data input."
-authors = [
-    {name = "Chenhua Wu", email = "chanhuawu@outlook.com"},
-]
+authors = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 readme = "README.md"
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.12, <3.13"
 dependencies = [
     "lightning>=2.5.0.post0",
     "litdata==0.2.39",
     "mosaicml-streaming>=0.11.0",
-    "muon>=0.1.7",
     "optuna>=4.2.0",
     "optuna-dashboard>=0.17.0",
     "polars>=1.22.0",
@@ -27,18 +24,18 @@ dependencies = [
     "scipy>=1.15.1",
     "shortuuid>=1.0.13",
     "tensorboard>=2.18.0",
-    "torch==2.4.1",
+    "torch==2.5.1",
     "torch-cluster>=1.6.3",
     "torch-geometric>=2.6.1",
     "torch-scatter>=2.1.2",
     "torch-sparse>=0.6.18",
     "torch-spline-conv>=1.2.2",
-    "torchaudio==2.4.1",
+    "torchaudio==2.5.1",
     "torchmetrics>=1.6.1",
-    "torchvision==0.19.1",
+    "torchvision==0.20.1",
     "zstd>=1.5.6.2",
 ]
-license = {file = "LICENSE"}
+license = { file = "LICENSE" }
 keywords = ["bioinformatics", "deep learning", "pytorch"]
 classifiers = [
     "Environment :: Console",
@@ -66,7 +63,39 @@ default = true
 [tool.uv.pip]
 index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 
-[tool.uv]
-find-links = [
-    "https://data.pyg.org/whl/torch-2.4.1+cu121.html",
+
+[project.optional-dependencies]
+build = ["torch", "torch-geometric"]
+compile = [
+    "pyg_lib",
+    "torch_scatter",
+    "torch_sparse",
+    "torch_cluster",
+    "torch_spline_conv",
 ]
+
+[tool.uv]
+no-build-isolation-package = [
+    "pyg_lib",
+    "torch_scatter",
+    "torch_sparse",
+    "torch_cluster",
+    "torch_spline_conv",
+]
+environments = ["sys_platform == 'linux'"]
+find-links = [
+    "https://data.pyg.org/whl/torch-2.5.1+cu124.html",
+    "https://download.pytorch.org/whl/cu124",
+]
+
+# [[tool.uv.dependency-metadata]]
+# name = "torch-cluster"
+# version = "1.6.3"
+# requires-dist = ["torch"]
+
+[tool.ruff]
+line-length = 288
+
+# Run these commands to sync the environment:
+# uv sync --extra build
+# uv sync --extra build --extra compile

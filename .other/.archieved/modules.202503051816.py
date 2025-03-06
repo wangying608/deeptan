@@ -165,8 +165,8 @@ class AMSGP(torch.nn.Module):
         self.dict_node_names = dict_node_names
         self.output_dim_g_emb = output_dim_g_emb
         self.n_hop = n_hop
-        self.thre_edge_exist = threshold_edge_exist
-        self.thre_sg_overlap = threshold_subgraph_overlap
+        self.threshold_edge_exist = threshold_edge_exist
+        self.threshold_subgraph_overlap = threshold_subgraph_overlap
         self.dropout = dropout
         self.chunk_size = chunk_size
 
@@ -265,7 +265,7 @@ class AMSGP(torch.nn.Module):
             edge_weight = cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
 
             # Filter edges
-            mask = edge_weight > self.thre_edge_exist
+            mask = edge_weight > self.threshold_edge_exist
 
         filtered_edge = edge_index[:, mask]
         filtered_weight = edge_weight[mask]
@@ -277,16 +277,23 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
+    @staticmethod
+    def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
+        """Custom implementation of batch k-hop subgraph extraction"""
+        subsets = []
+        edge_indices = []
+        for node in nodes:
+            subset, sub_edge_index, _, _ = k_hop_subgraph(node.item(), num_hops, edge_index, num_nodes)
+            subsets.append(subset)
+            edge_indices.append(sub_edge_index)
+        return subsets, edge_indices
+
     def _generate_multiscale_subgraphs(self, edge_index, num_nodes, centrality, h, device):
         """Generate hierarchical subgraphs using centrality histogram bins.
-        基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
 
         This method generates multiscale subgraphs by dividing nodes into bins based on their centrality.
         It processes nodes in descending order of centrality and merges subgraphs with significant overlap.
         Subgraphs are created and stored in a pool, and the method ensures that all nodes are covered.
-
-        根据FD规则将不同中心性的节点分组，按节点中心性从高到低的顺序逐个作为中心节点生成k跳子图，
-        收集到覆盖全部节点的多尺度子图，合并重叠程度超过指定阈值的子图，最终返回按节点数降序排列的子图列表。
 
         Args:
             edge_index: The edge index tensor representing the graph edges.
@@ -349,7 +356,7 @@ class AMSGP(torch.nn.Module):
                         intersection = (existing_mask & new_mask).sum()
                         min_size = min(existing_mask.sum().item(), new_mask.sum().item())
                         overlap_ratio = intersection.float() / (min_size + 1e-8)
-                        if overlap_ratio > self.thre_sg_overlap:
+                        if overlap_ratio > self.threshold_subgraph_overlap:
                             to_merge.append(existing_gdata)
 
                     # Merge overlapping subgraphs
@@ -408,28 +415,6 @@ class AMSGP(torch.nn.Module):
 
         return sorted(subgraph_pool, key=lambda x: -x.num_nodes)
 
-    @staticmethod
-    def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
-        """Custom implementation of batch k-hop subgraph extraction"""
-        subsets = []
-        edge_indices = []
-        for node in nodes:
-            subset, sub_edge_index, _, _ = k_hop_subgraph(node.item(), num_hops, edge_index, num_nodes)
-            subsets.append(subset)
-            edge_indices.append(sub_edge_index)
-        return subsets, edge_indices
-
-    @staticmethod
-    def hist_fd(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Freedman-Diaconis histogram calculation."""
-        q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
-        iqr = q75 - q25
-        bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
-        num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
-        counts = torch.histc(tensor, bins=num_bins)
-        edges = torch.linspace(tensor.min(), tensor.max(), num_bins + 1, device=tensor.device)
-        return counts, edges
-
     def _create_graph_embeddings(self, subgraphs):
         # Process each subgraph
         embs = torch.cat([self._process_subgraph(g) for g in subgraphs], dim=0)
@@ -448,6 +433,16 @@ class AMSGP(torch.nn.Module):
         assert (subgraph.edge_index.numel() == 0) or (subgraph.edge_index.max() < subgraph.x.size(0)), "Edge index exceeds node count"
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
         return self.att_pool(h.unsqueeze(0))  # .squeeze(0)
+
+    def hist_fd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Freedman-Diaconis histogram calculation."""
+        q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
+        iqr = q75 - q25
+        bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
+        num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
+        counts = torch.histc(tensor, bins=num_bins)
+        edges = torch.linspace(tensor.min(), tensor.max(), num_bins + 1, device=tensor.device)
+        return counts, edges
 
 
 class WGATLayer(MessagePassing):
