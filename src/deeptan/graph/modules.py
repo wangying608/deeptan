@@ -2,7 +2,6 @@ r"""
 Modules for DeepTAN.
 """
 
-from collections import defaultdict
 from typing import Dict, List, Tuple
 
 import torch
@@ -285,8 +284,9 @@ class AMSGP(torch.nn.Module):
         It processes nodes in descending order of centrality and merges subgraphs with significant overlap.
         Subgraphs are created and stored in a pool, and the method ensures that all nodes are covered.
 
-        根据FD规则将不同中心性的节点分组，按节点中心性从高到低的顺序逐个作为中心节点生成k跳子图，
+        根据Freedman-Diaconis规则将不同中心性的节点分组，按节点中心性从高到低的顺序逐个作为中心节点生成k跳子图，
         收集到覆盖全部节点的多尺度子图，合并重叠程度超过指定阈值的子图，最终返回按节点数降序排列的子图列表。
+        生成的子图在后续的图嵌入过程中扮演重要角色，帮助模型更好地理解图的全局结构。
 
         Args:
             edge_index: The edge index tensor representing the graph edges.
@@ -302,111 +302,74 @@ class AMSGP(torch.nn.Module):
         _, edges = self.hist_fd(centrality)
         num_bins = len(edges) - 1
         covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
-        subgraph_pool = []
-        node_to_subgraphs = defaultdict(list)
+
+        # Use tensor-based storage for subgraphs
+        subgraph_masks = torch.zeros((0, num_nodes), dtype=torch.bool, device=device)
+        subgraph_centers = torch.zeros(0, dtype=torch.long, device=device)
 
         for bin_idx in reversed(range(num_bins)):
             bin_mask = (centrality >= edges[bin_idx]) & (centrality <= edges[bin_idx + 1])
             current_nodes = torch.where(bin_mask)[0]
 
-            for chunk in torch.split(current_nodes, self.chunk_size):
-                subsets, subg_edge_indices = self._batch_k_hop_subgraph(chunk, self.n_hop, edge_index, num_nodes)
+            if current_nodes.numel() == 0:
+                continue
 
-                for subgraph_idx, (subset, subg_edge_idx) in enumerate(zip(subsets, subg_edge_indices)):
-                    if len(subset) < 2 or subg_edge_idx.size(1) == 0:
+            # Batch process nodes in chunks
+            for nodes in current_nodes.split(self.chunk_size):
+                subsets, subg_edge_indices = self._batch_k_hop_subgraph(nodes, self.n_hop, edge_index, num_nodes)
+
+                for subset, subg_edge_idx, center_node in zip(subsets, subg_edge_indices, nodes.tolist()):
+                    if subset.numel() < 2 or subg_edge_idx.shape[1] == 0:
                         continue
 
-                    # Create mask for current subgraph
+                    # Create new subgraph mask
                     new_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
                     new_mask[subset] = True
-                    node_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
-                    node_mapping[subset] = torch.arange(len(subset), device=device)
-                    subg_edge_local = node_mapping[subg_edge_idx]
-                    center_node = chunk[subgraph_idx]
 
-                    new_gdata = GData(
-                        x=h[subset],
-                        edge_index=subg_edge_local,
-                        center_node=center_node,
-                        node_idx=subset,
-                        mask=new_mask,
-                    )
-
-                    # Find candidate subgraphs using node_to_subgraphs
-                    candidate_subgraphs = []
-                    seen_gids = set()
-                    for node in subset:
-                        for g in node_to_subgraphs.get(node.item(), []):
-                            g_id = id(g)
-                            if g_id not in seen_gids:
-                                seen_gids.add(g_id)
-                                candidate_subgraphs.append(g)
-
-                    # Check overlaps using bitmask operations
-                    to_merge = []
-                    for existing_gdata in candidate_subgraphs:
-                        existing_mask = existing_gdata.mask
-                        intersection = (existing_mask & new_mask).sum()
-                        min_size = min(existing_mask.sum().item(), new_mask.sum().item())
-                        overlap_ratio = intersection.float() / (min_size + 1e-8)
-                        if overlap_ratio > self.thre_sg_overlap:
-                            to_merge.append(existing_gdata)
+                    # Vectorized overlap check
+                    if subgraph_masks.shape[0] > 0:
+                        intersections = (subgraph_masks & new_mask).sum(dim=1)
+                        min_sizes = torch.minimum(subgraph_masks.sum(dim=1), new_mask.sum())
+                        overlaps = intersections / (min_sizes + 1e-8)
+                        merge_candidates = overlaps > self.thre_sg_overlap
+                    else:
+                        merge_candidates = torch.zeros(0, dtype=torch.bool, device=device)
 
                     # Merge overlapping subgraphs
-                    if to_merge:
-                        merged_mask = new_mask.clone()
-                        for g in to_merge:
-                            merged_mask |= g.mask
+                    if merge_candidates.any():
+                        merged_mask = subgraph_masks[merge_candidates].any(dim=0) | new_mask
+                        subgraph_masks = subgraph_masks[~merge_candidates]
+                        subgraph_centers = subgraph_centers[~merge_candidates]
 
-                        # Create merged subgraph
-                        merged_node_idx = torch.where(merged_mask)[0]
-                        mask = merged_mask[edge_index[0]] & merged_mask[edge_index[1]]
-                        merged_edge_global = edge_index[:, mask]
-
-                        # Create local edge indices
-                        global_to_local = torch.zeros(num_nodes, dtype=torch.long, device=device)
-                        global_to_local[merged_node_idx] = torch.arange(len(merged_node_idx), device=device)
-                        merged_edge_local = global_to_local[merged_edge_global]
-
-                        # Update subgraph pool and tracking
-                        merged_gdata = GData(
-                            x=h[merged_node_idx],
-                            edge_index=merged_edge_local,
-                            center_node=center_node,
-                            node_idx=merged_node_idx,
-                            mask=merged_mask,
-                        )
-
-                        # Remove merged subgraphs from tracking
-                        to_merge_ids = {id(g) for g in to_merge}
-                        subgraph_pool = [g for g in subgraph_pool if id(g) not in to_merge_ids]
-                        for g in to_merge:
-                            g_nodes = g.node_idx.tolist()
-                            for node in g_nodes:
-                                node_to_subgraphs[node] = [x for x in node_to_subgraphs[node] if id(x) != id(g)]
-
-                        # Add merged subgraph to pool
-                        subgraph_pool.append(merged_gdata)
-                        merged_nodes = merged_node_idx.tolist()
-                        for node in merged_nodes:
-                            node_to_subgraphs[node].append(merged_gdata)
-                        covered_nodes[merged_mask] = True
+                        # Add merged subgraph
+                        subgraph_masks = torch.cat([subgraph_masks, merged_mask.unsqueeze(0)], dim=0)
+                        subgraph_centers = torch.cat([subgraph_centers, torch.tensor([center_node], device=device)])
                     else:
-                        # Add new subgraph to pool
-                        subgraph_pool.append(new_gdata)
-                        subset_nodes = subset.tolist()
-                        for node in subset_nodes:
-                            node_to_subgraphs[node].append(new_gdata)
-                        covered_nodes[subset] = True
+                        # Add new subgraph
+                        subgraph_masks = torch.cat([subgraph_masks, new_mask.unsqueeze(0)], dim=0)
+                        subgraph_centers = torch.cat([subgraph_centers, torch.tensor([center_node], device=device)])
 
-                    if torch.all(covered_nodes):
-                        break
-                if torch.all(covered_nodes):
+                    # Update coverage tracking
+                    covered_nodes |= new_mask
+
+                if covered_nodes.all():
                     break
-            if torch.all(covered_nodes):
+            if covered_nodes.all():
                 break
 
-        return sorted(subgraph_pool, key=lambda x: -x.num_nodes)
+        # Convert tensor masks back to GData objects
+        subgraphs = []
+        for mask, center in zip(subgraph_masks, subgraph_centers):
+            node_idx = torch.where(mask)[0]
+            sub_edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+            sub_edge = edge_index[:, sub_edge_mask]
+            local_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
+            local_mapping[node_idx] = torch.arange(node_idx.size(0), device=device)
+            sub_edge_local = local_mapping[sub_edge]
+
+            subgraphs.append(GData(x=h[node_idx], edge_index=sub_edge_local, center_node=center, node_idx=node_idx, mask=mask))
+
+        return sorted(subgraphs, key=lambda x: -x.num_nodes)
 
     @staticmethod
     def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
