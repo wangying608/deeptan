@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from torch_geometric.data import Data as GData
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph, to_undirected
@@ -83,9 +82,7 @@ class NodeEmbedding(nn.Module):
 
         # Verify node indices in edge_index
         # num_nodes = x.size(0)
-        # assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), (
-        #     "Invalid edge indices detected"
-        # )
+        # assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), f"Invalid edge indices detected: {edge_index.min()}, {edge_index.max()} vs {num_nodes}"
 
         # Initial embeddings
         ids = torch.tensor(
@@ -208,31 +205,48 @@ class AMSGP(torch.nn.Module):
             mask = batch == graph_id
             node_indices = torch.where(mask)[0]
 
+            # Skip empty graphs
+            if node_indices.numel() == 0:
+                print("Warning: Empty graph detected")
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+                continue
+
             # Extract edges for the current graph
             edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
             sub_edge_index = edge_index[:, edge_mask]
+
             # Adjust edge indices to local indices
             local_node_ids = torch.arange(mask.sum(), device=x.device)
             global_to_local = torch.zeros_like(mask, dtype=torch.long, device=x.device)
             global_to_local[node_indices] = local_node_ids
+
+            # Apply global-to-local mapping
             sub_edge_index = global_to_local[sub_edge_index]
 
+            # Filter out invalid indices
+            valid_mask = (sub_edge_index[0] >= 0) & (sub_edge_index[1] >= 0) & (sub_edge_index[0] < mask.sum()) & (sub_edge_index[1] < mask.sum())
+            sub_edge_index = sub_edge_index[:, valid_mask]
+
+            # Validate subgraph edge indices
+            if sub_edge_index.numel() == 0:
+                print("Warning: Empty subgraph detected")
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+                continue
+
             # Compute dynamic centrality
+            h_mask = h[mask]
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(
-                h[mask],
+                h_mask,
                 edge_attr[edge_mask] if edge_attr is not None else None,
                 sub_edge_index,
             )
 
             # Generate multiscale subgraphs
-            subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, mask.sum(), centrality, h[mask], x.device)
+            subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, centrality, h_mask)
 
             # Create graph embeddings
             if subgraphs:
                 g_emb = self._create_graph_embeddings(subgraphs)
-                # g_emb = checkpoint(
-                #     self._create_graph_embeddings, subgraphs, use_reentrant=False
-                # )
                 graph_embs.append(g_emb)
             else:
                 # Process empty subgraph case
@@ -276,7 +290,7 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
-    def _generate_multiscale_subgraphs(self, edge_index, num_nodes, centrality, h, device):
+    def _generate_multiscale_subgraphs(self, edge_index, centrality, h):
         """Generate hierarchical subgraphs using centrality histogram bins.
         基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
 
@@ -290,15 +304,14 @@ class AMSGP(torch.nn.Module):
 
         Args:
             edge_index: The edge index tensor representing the graph edges.
-            num_nodes: The total number of nodes in the graph.
             centrality: The centrality scores of the nodes.
             h: The node embeddings.
-            device: The device (CPU or GPU) on which the tensors are allocated.
 
         Returns:
             A list of subgraphs sorted by the number of nodes in descending order.
         """
-
+        device = h.device
+        num_nodes = h.size(0)
         _, edges = self.hist_fd(centrality)
         num_bins = len(edges) - 1
         covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
@@ -315,7 +328,7 @@ class AMSGP(torch.nn.Module):
                 continue
 
             # Batch process nodes in chunks
-            for nodes in current_nodes.split(self.chunk_size):
+            for nodes in current_nodes.split(min(self.chunk_size, current_nodes.numel(), const.default.subg_chunk_size)):
                 subsets, subg_edge_indices = self._batch_k_hop_subgraph(nodes, self.n_hop, edge_index, num_nodes)
 
                 for subset, subg_edge_idx, center_node in zip(subsets, subg_edge_indices, nodes.tolist()):
@@ -332,18 +345,16 @@ class AMSGP(torch.nn.Module):
                         min_sizes = torch.minimum(subgraph_masks.sum(dim=1), new_mask.sum())
                         overlaps = intersections / (min_sizes + 1e-8)
                         merge_candidates = overlaps > self.thre_sg_overlap
+
+                        del intersections, min_sizes, overlaps
                     else:
                         merge_candidates = torch.zeros(0, dtype=torch.bool, device=device)
 
                     # Merge overlapping subgraphs
                     if merge_candidates.any():
                         merged_mask = subgraph_masks[merge_candidates].any(dim=0) | new_mask
-                        subgraph_masks = subgraph_masks[~merge_candidates]
-                        subgraph_centers = subgraph_centers[~merge_candidates]
-
-                        # Add merged subgraph
-                        subgraph_masks = torch.cat([subgraph_masks, merged_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers, torch.tensor([center_node], device=device)])
+                        subgraph_masks = torch.cat([subgraph_masks[~merge_candidates], merged_mask.unsqueeze(0)], dim=0)
+                        subgraph_centers = torch.cat([subgraph_centers[~merge_candidates], torch.tensor([center_node], device=device)])
                     else:
                         # Add new subgraph
                         subgraph_masks = torch.cat([subgraph_masks, new_mask.unsqueeze(0)], dim=0)
@@ -352,32 +363,76 @@ class AMSGP(torch.nn.Module):
                     # Update coverage tracking
                     covered_nodes |= new_mask
 
+                    del new_mask
+
+                    if covered_nodes.all():
+                        break
                 if covered_nodes.all():
                     break
             if covered_nodes.all():
                 break
 
+        # print(f"Percent of nodes covered: {covered_nodes.float().mean():.2%} ({covered_nodes.sum()}/{num_nodes})")
+
         # Convert tensor masks back to GData objects
         subgraphs = []
         for mask, center in zip(subgraph_masks, subgraph_centers):
             node_idx = torch.where(mask)[0]
-            sub_edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
-            sub_edge = edge_index[:, sub_edge_mask]
-            local_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
-            local_mapping[node_idx] = torch.arange(node_idx.size(0), device=device)
-            sub_edge_local = local_mapping[sub_edge]
+            num_sub_nodes = mask.sum().item()
 
+            # Validate edge indices
+            local_mapping = torch.zeros(num_nodes, dtype=torch.long, device=device)
+            local_mapping[node_idx] = torch.arange(num_sub_nodes, device=device)
+
+            # Get edges within this subgraph
+            sub_edge_mask = mask[edge_index[0]] & mask[edge_index[1]]
+            sub_edge_global = edge_index[:, sub_edge_mask]
+
+            # Map global edge indices to local indices
+            sub_edge_local = local_mapping[sub_edge_global]
+
+            # assert (sub_edge_local >= 0).all() and (sub_edge_local < num_sub_nodes).all(), f"Subgraph edge indices out of bounds: {sub_edge_local.min()}, {sub_edge_local.max()}"
+            # if sub_edge_local.numel() > 0:
+            #     max_edge_index = sub_edge_local.max().item()
+            #     assert max_edge_index < num_sub_nodes, f"Edge index {max_edge_index} exceeds subgraph node count {num_sub_nodes}"
+
+            # Additionally, ensure node indices are correctly mapped in local_mapping:
+            # local_mapping[node_idx] = torch.arange(num_sub_nodes, device=device)
+            # assert (local_mapping[node_idx] < num_sub_nodes).all(), "Local indices out of bounds"
+
+            # Also, verify the sub_edge_global indices are within the current graph's node range:
+            # current_graph_node_count = h.size(0)
+            # assert (sub_edge_global < current_graph_node_count).all(), f"Edge indices {sub_edge_global.max()} exceed current graph node count {current_graph_node_count}"
+
+            # Create subgraph data object
             subgraphs.append(GData(x=h[node_idx], edge_index=sub_edge_local, center_node=center, node_idx=node_idx, mask=mask))
 
-        return sorted(subgraphs, key=lambda x: -x.num_nodes)
+        # Free up memory
+        del subgraph_masks, subgraph_centers, covered_nodes
+
+        subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
+
+        # print(f"\nNumber of subgraphs created: {len(subgraphs)}")
+        # print(f"Quantiles of subgraph sizes:\n    {torch.quantile(torch.tensor([s.num_nodes for s in subgraphs], dtype=torch.float32), torch.tensor([0.0, 0.25, 0.5, 0.75, 1.0])).int()}")
+
+        return subgraphs
 
     @staticmethod
     def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
         """Custom implementation of batch k-hop subgraph extraction"""
+        # Verify num_nodes
+        # max_node_index = edge_index.max().item()
+        # if max_node_index >= num_nodes:
+        #     raise ValueError(f"\n!!! num_nodes ({num_nodes}) is smaller than the maximum node index in edge_index ({max_node_index})")
+        # # Validate node indices
+        # if torch.any(nodes >= num_nodes):
+        #     raise ValueError(f"\n!!! Invalid node indices detected: {nodes[nodes >= num_nodes]}")
+
         subsets = []
         edge_indices = []
+
         for node in nodes:
-            subset, sub_edge_index, _, _ = k_hop_subgraph(node.item(), num_hops, edge_index, num_nodes)
+            subset, sub_edge_index, _, _ = k_hop_subgraph(node_idx=node.item(), num_hops=num_hops, edge_index=edge_index, num_nodes=num_nodes, relabel_nodes=True)
             subsets.append(subset)
             edge_indices.append(sub_edge_index)
         return subsets, edge_indices
@@ -408,9 +463,11 @@ class AMSGP(torch.nn.Module):
         return self.global_att_pool(global_emb)
 
     def _process_subgraph(self, subgraph):
-        assert (subgraph.edge_index.numel() == 0) or (subgraph.edge_index.max() < subgraph.x.size(0)), "Edge index exceeds node count"
+        # Validate edge indices
+        # assert (subgraph.edge_index.min() >= 0).item(), "Negative edge index detected"
+        # assert (subgraph.edge_index.max() < subgraph.x.size(0)).item(), f"Edge index exceeds node count: {subgraph.edge_index.max()} vs {subgraph.x.size(0)}"
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
-        return self.att_pool(h.unsqueeze(0))  # .squeeze(0)
+        return self.att_pool(h.unsqueeze(0))
 
 
 class WGATLayer(MessagePassing):

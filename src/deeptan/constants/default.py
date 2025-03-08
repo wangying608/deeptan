@@ -2,20 +2,24 @@ r"""
 Default values.
 """
 
-from os import getenv
-from numpy import ceil
 from multiprocessing import cpu_count
+from os import getenv
 
+from numpy import ceil
 
 bs = 32
 accumulate_grad_batches = 1
 lr = 0.0001
 es = 5
 chunk_size = 4096
+subg_chunk_size = 4
 dropout = 0.2
 negative_slope = 0.2
 label_pred_hidden_dims = [512, 256, 256]
+n_hop = 1
 threshold_centrality = 0.8
+threshold_subg_overlap = 0.9
+threshold_edge_exist = 0.05
 
 matmul_precision = "high"
 accelerator = "auto"

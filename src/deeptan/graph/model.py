@@ -102,9 +102,9 @@ class DeepTAN(ltn.LightningModule):
         node_emb_dim: int = 128,
         fusion_dims_node_emb: List[int] = [64, 32, 32],
         output_dim_g_emb: int = 128,
-        n_hop: int = 2,
-        threshold_edge_exist: float = 0.05,
-        threshold_subgraph_overlap: float = 0.99,
+        n_hop: int = const.default.n_hop,
+        threshold_edge_exist: float = const.default.threshold_edge_exist,
+        threshold_subgraph_overlap: float = const.default.threshold_subg_overlap,
         n_heads_node_emb: int = 2,
         n_heads_pooling: int = 2,
         dropout: float = const.default.dropout,
@@ -764,7 +764,7 @@ class DeepTANTune:
                     fusion_dims_node_emb_list_strings,
                 ),
                 "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 512]),
-                "n_hop": trial.suggest_int("n_hop", 1, 3),
+                "n_hop": trial.suggest_int("n_hop", 1, 2),
             }
 
             # Create model with suggested parameters
