@@ -73,16 +73,14 @@ class NodeEmbedding(nn.Module):
             ]
         )
 
+        self.norm = nn.LayerNorm(fusion_dims[-1])
+
         # Skip connections
         self.skips = nn.ModuleList([nn.Linear(dim, fusion_dims[-1]) for dim in fusion_dims]) if len(fusion_dims) > 1 else None
 
     def forward(self, node_names, x, edge_attr, edge_index):
         if isinstance(node_names[0], list):
             node_names = [n for sublist in node_names for n in sublist]
-
-        # Verify node indices in edge_index
-        # num_nodes = x.size(0)
-        # assert torch.all(edge_index >= 0) and torch.all(edge_index < num_nodes), f"Invalid edge indices detected: {edge_index.min()}, {edge_index.max()} vs {num_nodes}"
 
         # Initial embeddings
         ids = torch.tensor(
@@ -116,7 +114,7 @@ class NodeEmbedding(nn.Module):
             # Skip fusion
             emb = emb + torch.stack(skips).mean(dim=0)
 
-        # emb = F.layer_norm(emb, emb.shape)
+            emb = self.norm(emb)
 
         return emb, E_i, E_all
 
@@ -391,19 +389,6 @@ class AMSGP(torch.nn.Module):
             # Map global edge indices to local indices
             sub_edge_local = local_mapping[sub_edge_global]
 
-            # assert (sub_edge_local >= 0).all() and (sub_edge_local < num_sub_nodes).all(), f"Subgraph edge indices out of bounds: {sub_edge_local.min()}, {sub_edge_local.max()}"
-            # if sub_edge_local.numel() > 0:
-            #     max_edge_index = sub_edge_local.max().item()
-            #     assert max_edge_index < num_sub_nodes, f"Edge index {max_edge_index} exceeds subgraph node count {num_sub_nodes}"
-
-            # Additionally, ensure node indices are correctly mapped in local_mapping:
-            # local_mapping[node_idx] = torch.arange(num_sub_nodes, device=device)
-            # assert (local_mapping[node_idx] < num_sub_nodes).all(), "Local indices out of bounds"
-
-            # Also, verify the sub_edge_global indices are within the current graph's node range:
-            # current_graph_node_count = h.size(0)
-            # assert (sub_edge_global < current_graph_node_count).all(), f"Edge indices {sub_edge_global.max()} exceed current graph node count {current_graph_node_count}"
-
             # Create subgraph data object
             subgraphs.append(GData(x=h[node_idx], edge_index=sub_edge_local, center_node=center, node_idx=node_idx, mask=mask))
 
@@ -420,13 +405,6 @@ class AMSGP(torch.nn.Module):
     @staticmethod
     def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
         """Custom implementation of batch k-hop subgraph extraction"""
-        # Verify num_nodes
-        # max_node_index = edge_index.max().item()
-        # if max_node_index >= num_nodes:
-        #     raise ValueError(f"\n!!! num_nodes ({num_nodes}) is smaller than the maximum node index in edge_index ({max_node_index})")
-        # # Validate node indices
-        # if torch.any(nodes >= num_nodes):
-        #     raise ValueError(f"\n!!! Invalid node indices detected: {nodes[nodes >= num_nodes]}")
 
         subsets = []
         edge_indices = []
@@ -449,23 +427,28 @@ class AMSGP(torch.nn.Module):
         return counts, edges
 
     def _create_graph_embeddings(self, subgraphs):
-        # Process each subgraph
-        embs = torch.cat([self._process_subgraph(g) for g in subgraphs], dim=0)
+        chunk_size = self.chunk_size
+        all_embs = []
+        for i in range(0, len(subgraphs), chunk_size):
+            subgraph_chunk = subgraphs[i : i + chunk_size]
+            chunk_embs = [self._process_subgraph(g) for g in subgraph_chunk]
+            chunk_embs = torch.cat(chunk_embs, dim=0) if chunk_embs else torch.empty(0, self.output_dim_g_emb, device=self.x.device)
+            all_embs.append(chunk_embs)
+        embs = torch.cat(all_embs, dim=0) if all_embs else torch.zeros(0, self.output_dim_g_emb, device=self.x.device)
 
         # Build super graph
-        super_nodes = GData(
-            x=embs,
-            edge_index=to_undirected(torch.combinations(torch.arange(len(subgraphs), device=embs.device)).t()),
-        )
+        num_subgraphs = len(subgraphs)
+        if num_subgraphs == 0:
+            return torch.zeros(self.output_dim_g_emb, device=self.x.device)
 
-        # Global pooling
+        edge_index = to_undirected(torch.combinations(torch.arange(num_subgraphs, device=embs.device)).t())
+        super_nodes = GData(x=embs, edge_index=edge_index)
+
+        # Global pooling with chunked edge processing
         global_emb = self.global_xgat_pool(super_nodes.x, super_nodes.edge_index)
         return self.global_att_pool(global_emb)
 
     def _process_subgraph(self, subgraph):
-        # Validate edge indices
-        # assert (subgraph.edge_index.min() >= 0).item(), "Negative edge index detected"
-        # assert (subgraph.edge_index.max() < subgraph.x.size(0)).item(), f"Edge index exceeds node count: {subgraph.edge_index.max()} vs {subgraph.x.size(0)}"
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
         return self.att_pool(h.unsqueeze(0))
 
@@ -685,12 +668,11 @@ class GLabelPredictor(nn.Module):
     A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
     """
 
-    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float):
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float, n_heads: int):
         super().__init__()
 
         layers = [
             SelfAtt_(input_dim, dropout),
-            # nn.GELU(),
             nn.LayerNorm(input_dim),
         ]
         for dim in hidden_dims:

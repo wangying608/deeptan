@@ -17,13 +17,20 @@ DEEPTAN_HOME=$MY_HOME/prj/deeptan
 
 myscript=run_05_fit_tune.py
 
-seed=$1
-optdata=$2
-ntrial=$3
-njob=$4
-bsize=$5
-agd=$6
-ck=$7
+# seed=$1
+# optdata=$2
+# ntrial=$3
+# njob=$4
+# bsize=$5
+# agd=$6
+# ck=$7
+seed=42
+optdata=GSE235510_WT_strata
+ntrial=30
+njob=1
+bsize=4
+agd=8
+ck=1024
 
 dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
 dirlogs=$DEEPTAN_HOME/logs/$optdata/seed_$seed

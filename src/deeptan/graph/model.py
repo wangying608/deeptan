@@ -107,6 +107,8 @@ class DeepTAN(ltn.LightningModule):
         threshold_subgraph_overlap: float = const.default.threshold_subg_overlap,
         n_heads_node_emb: int = 2,
         n_heads_pooling: int = 2,
+        n_heads_ge_decoder: int = 2,
+        n_heads_label_pred: int = 2,
         dropout: float = const.default.dropout,
         lr: float = const.default.lr,
         chunk_size: int = const.default.chunk_size,
@@ -188,7 +190,7 @@ class DeepTAN(ltn.LightningModule):
             hidden_dim=node_emb_dim,
             dropout=dropout,
             chunk_size=self.chunk_size,
-            n_heads=2,
+            n_heads=n_heads_ge_decoder,
             n_res_blocks=3,
         )
 
@@ -198,6 +200,7 @@ class DeepTAN(ltn.LightningModule):
             self.output_dim,
             const.default.label_pred_hidden_dims,
             dropout,
+            n_heads=n_heads_label_pred,
         )
 
         # Metrics and initialization
@@ -313,14 +316,6 @@ class DeepTAN(ltn.LightningModule):
             T_mult=1,
             # eta_min=1e-7,
         )
-        # scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        #     optimizer,
-        #     mode="min",
-        #     factor=0.1,
-        #     patience=1,
-        #     threshold=1e-4,
-        # )
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -489,10 +484,6 @@ class DeepTAN(ltn.LightningModule):
         self.log("weights/recon", torch.exp(-self.log_var_recon))
         self.log("scale_factors/label", self.scale_factors[0])
         self.log("scale_factors/recon", self.scale_factors[1])
-
-        # Detect anomalies in variance
-        # if torch.exp(self.log_var_label) > 100:
-        #     self.logger.experiment.alert("Label variance anomaly!")
 
     def _log_metrics(self, losses: Dict, stage: str):
         for k, v in losses.items():
