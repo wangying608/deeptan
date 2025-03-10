@@ -10,8 +10,6 @@ module purge
 module load singularity-4.2.1
 
 MY_HOME=/storage/public/home/2022051346
-# log_err=$myhome/mylogs/error.%J
-# log_out=$myhome/mylogs/output.%J
 
 DEEPTAN_HOME=$MY_HOME/prj/deeptan
 
@@ -36,4 +34,4 @@ dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
 dirlogs=$DEEPTAN_HOME/logs/$optdata/seed_$seed
 mkdir -p $dirlogs
 
-singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --litdata $dirlitdata --bs $bsize --log_dir $dirlogs --ntrials $ntrial --njobs $njob --chunk_size $ck --acc_grad_batch $agd
+singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --ck $ck --agb $agd --atune

@@ -257,23 +257,25 @@ class AMSGP(torch.nn.Module):
         with torch.no_grad():
             row, col = edge_index
             num_edges = edge_index.size(1)
-            cos_sim = []
+            sim_ = []
 
-            # Calculate cosine similarity for each edge in batches to reduce peak memory usage.
+            # Calculate similarity for each edge in batches to reduce peak memory usage.
             for i in range(0, num_edges, self.chunk_size):
                 idx = slice(i, min(i + self.chunk_size, num_edges))
                 h_i = h[row[idx]]
                 h_j = h[col[idx]]
-                # Cosine similarity and immediately release intermediate tensors
-                batch_cos = F.cosine_similarity(h_i, h_j, dim=1).abs()
-                cos_sim.append(batch_cos)
 
-                # del h_i, h_j, batch_cos
+                sim_.append((h_i * h_j).sum(dim=1).abs())
 
-            cos_sim = torch.cat(cos_sim, dim=0)
+            sim_ = torch.cat(sim_, dim=0)
+
+            min_sim_ = sim_.min()
+            max_sim_ = sim_.max()
+            sim_ = (sim_ - min_sim_) / (max_sim_ - min_sim_) if max_sim_ - min_sim_ != 0 else sim_
+            sim_ = sim_.clamp(0, 1)
 
             # Combine with edge attributes
-            edge_weight = cos_sim * edge_attr.view(-1) if edge_attr is not None else cos_sim
+            edge_weight = sim_ * edge_attr.view(-1) if edge_attr is not None else sim_
 
             # Filter edges
             mask = edge_weight > self.thre_edge_exist
@@ -342,17 +344,17 @@ class AMSGP(torch.nn.Module):
                         intersections = (subgraph_masks & new_mask).sum(dim=1)
                         min_sizes = torch.minimum(subgraph_masks.sum(dim=1), new_mask.sum())
                         overlaps = intersections / (min_sizes + 1e-8)
-                        merge_candidates = overlaps > self.thre_sg_overlap
+                        overlapping_chunks = overlaps > self.thre_sg_overlap
 
                         del intersections, min_sizes, overlaps
                     else:
-                        merge_candidates = torch.zeros(0, dtype=torch.bool, device=device)
+                        overlapping_chunks = torch.zeros(0, dtype=torch.bool, device=device)
 
                     # Merge overlapping subgraphs
-                    if merge_candidates.any():
-                        merged_mask = subgraph_masks[merge_candidates].any(dim=0) | new_mask
-                        subgraph_masks = torch.cat([subgraph_masks[~merge_candidates], merged_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers[~merge_candidates], torch.tensor([center_node], device=device)])
+                    if overlapping_chunks.any():
+                        merged_mask = subgraph_masks[overlapping_chunks].any(dim=0) | new_mask
+                        subgraph_masks = torch.cat([subgraph_masks[~overlapping_chunks], merged_mask.unsqueeze(0)], dim=0)
+                        subgraph_centers = torch.cat([subgraph_centers[~overlapping_chunks], torch.tensor([center_node], device=device)])
                     else:
                         # Add new subgraph
                         subgraph_masks = torch.cat([subgraph_masks, new_mask.unsqueeze(0)], dim=0)
@@ -403,6 +405,7 @@ class AMSGP(torch.nn.Module):
         return subgraphs
 
     @staticmethod
+    @torch._dynamo.disable
     def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
         """Custom implementation of batch k-hop subgraph extraction"""
 
@@ -416,6 +419,7 @@ class AMSGP(torch.nn.Module):
         return subsets, edge_indices
 
     @staticmethod
+    @torch._dynamo.disable
     def hist_fd(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Freedman-Diaconis histogram calculation."""
         q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
@@ -482,69 +486,51 @@ class WGATLayer(MessagePassing):
         self.dropout = dropout
         self.chunk_size = chunk_size
 
+        # Split weight matrix into two parts to avoid concatenation
+        self.W_i = nn.Linear(input_dim, output_dim * num_heads)
+        self.W_j = nn.Linear(input_dim, output_dim * num_heads)
+
         self.trans = nn.Linear(input_dim, output_dim * num_heads)
-        # Adjusted for per-head attention computation
-        self.W = nn.Parameter(torch.empty(2 * input_dim, num_heads * output_dim))
         self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
         self.reset_parameters()
 
     def reset_parameters(self):
-        nn.init.xavier_normal_(self.W.data)
-        nn.init.kaiming_uniform_(self.attn.data, a=0.2, mode="fan_in")
+        nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
+        nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
+        nn.init.normal_(self.attn, mean=0, std=0.1)
 
     def forward(self, x, edge_index, edge_attr=None):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
     def message(self, x_i, x_j, edge_attr):
         num_edges = x_i.size(0)
-        # if num_edges < 7:
-        # raise ValueError("\nNumber of edges is too small.")
-        # raise Warning("\nNumber of edges is too small.")
-        # print("\nNumber of edges is too small.")
-        # return torch.zeros_like(x_i)
+        h_chunks = []
 
-        if num_edges > self.chunk_size:
-            h_chunks = []
-            e_chunks = []
+        # Process in chunks to reduce peak memory
+        for i in range(0, num_edges, self.chunk_size):
+            idx = slice(i, min(i + self.chunk_size, num_edges))
+            _chunk_size = idx.stop - idx.start
+            # Split computation to avoid concatenation
+            h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            h_j = self.W_j(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            h = h_i + h_j
 
-            for i in range(0, num_edges, self.chunk_size):
-                idx = slice(i, min(i + self.chunk_size, num_edges))
+            # Calculate attention coefficients
+            a = torch.einsum("ehd,hd->eh", h, self.attn)
 
-                x_i_chunk = x_i[idx]
-                x_j_chunk = x_j[idx]
-                edge_attr_chunk = edge_attr[idx] if edge_attr is not None else None
-
-                h = (torch.cat([x_i_chunk, x_j_chunk], -1) @ self.W).view(-1, self.num_heads, self.output_dim)
-                e = torch.einsum("ehd,hd->eh", h, self.attn)
-
-                if edge_attr_chunk is not None:
-                    e = e * edge_attr_chunk.view(-1, 1).expand(-1, self.num_heads)
-
-                h_chunks.append(h)
-                e_chunks.append(e)
-
-            e = torch.cat(e_chunks, dim=0)
-            h = torch.cat(h_chunks, dim=0)
-
-        else:
-            # Compute attention scores per head
-            h = (torch.cat([x_i, x_j], -1) @ self.W).view(-1, self.num_heads, self.output_dim)
-
-            # Calculate attention coefficients [E, num_heads]
-            # e = (h * self.attn.unsqueeze(0)).sum(dim=-1)  # Dot product per head
-            e = torch.einsum("ehd,hd->eh", h, self.attn)
-
-            # Integrate edge attributes
             if edge_attr is not None:
-                # Expand edge_attr to match num_heads [E, num_heads]
-                e = e * edge_attr.view(-1, 1).expand(-1, self.num_heads)
+                a = a * edge_attr[idx].view(-1, 1).expand(-1, self.num_heads)
 
-        a = F.gelu(e)
-        a = F.softmax(a, dim=0)
-        x_trans = self.trans(x_j).view(-1, self.num_heads, self.output_dim)
-        # Weight features by attention scores
-        return torch.einsum("ehd,eh->ed", x_trans, a)
-        #  = (x_trans * a.unsqueeze(-1)).sum(dim=1)  # [E, output_dim]
+            # Process attention scores
+            a = F.softmax(a, dim=0)
+
+            # Transform and weight features
+            x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            x_trans = torch.einsum("ehd,eh->ed", x_trans, a)
+            h_chunks.append(x_trans)
+
+        h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
+        return h
 
 
 class GE_Decoder(nn.Module):

@@ -11,6 +11,7 @@ import lightning as ltn
 import optuna
 import polars as pl
 import torch
+import torch._dynamo.config
 import torch.nn.functional as F
 from lightning import LightningDataModule, Trainer
 from lightning.pytorch.callbacks import (
@@ -48,6 +49,8 @@ from deeptan.utils.data import (
 from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_string
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
+torch._dynamo.config.suppress_errors = True
+torch._dynamo.config.capture_scalar_outputs = True
 
 
 class FocalLoss(torch.nn.Module):
@@ -97,11 +100,10 @@ class DeepTAN(ltn.LightningModule):
         is_regression: bool,
         class_weights: Optional[List[float]] = None,
         use_focal_loss: bool = True,
-        # focal_gamma: float = 2.0,
         focal_alpha: Optional[List[float]] = None,
         node_emb_dim: int = 128,
-        fusion_dims_node_emb: List[int] = [64, 32, 32],
-        output_dim_g_emb: int = 128,
+        fusion_dims_node_emb: List[int] = [128, 64],
+        output_dim_g_emb: int = 192,
         n_hop: int = const.default.n_hop,
         threshold_edge_exist: float = const.default.threshold_edge_exist,
         threshold_subgraph_overlap: float = const.default.threshold_subg_overlap,
@@ -312,9 +314,9 @@ class DeepTAN(ltn.LightningModule):
         optimizer = AdamW(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=1,
-            T_mult=1,
-            # eta_min=1e-7,
+            T_0=3,
+            T_mult=2,
+            eta_min=1e-7,
         )
         return {
             "optimizer": optimizer,
@@ -453,18 +455,21 @@ class DeepTAN(ltn.LightningModule):
                 self.scale_factors = torch.ones_like(loss_ratio)
             else:
                 # EMA update only during training
-                self.scale_factors = 0.9 * self.scale_factors + 0.1 * (1 / rel_ratio)
+                self.scale_factors = 0.95 * self.scale_factors + 0.05 * (1 / rel_ratio)
 
         # Calculate learnable weights with regularization
         label_weight = torch.exp(-self.log_var_label)
         recon_weight = torch.exp(-self.log_var_recon)
-        total_loss = 0.5 * label_weight * losses["label"] * self.scale_factors[0] + 0.5 * recon_weight * losses["recon"] * self.scale_factors[1] + 0.5 * (self.log_var_label + self.log_var_recon)
+
+        # Calculate total loss with scaling and regularization
+        total_loss = 0.33 * label_weight * losses["label"] * self.scale_factors[0] + 0.33 * recon_weight * losses["recon"] * self.scale_factors[1] + 0.33 * (self.log_var_label + self.log_var_recon)
+
         return total_loss
 
     def on_before_optimizer_step(self, optimizer):
         # Ensure the log_var does not go out of a reasonable range
-        self.log_var_label.data.clamp_(min=-3.0, max=3.0)
-        self.log_var_recon.data.clamp_(min=-3.0, max=3.0)
+        self.log_var_label.data.clamp_(min=-1.0, max=1.0)
+        self.log_var_recon.data.clamp_(min=-1.0, max=1.0)
 
         # Ensure that the weights do not drop below a certain threshold to maintain model stability.
         min_weight = 0.1
@@ -475,15 +480,16 @@ class DeepTAN(ltn.LightningModule):
         if recon_weight < min_weight:
             self.log_var_recon.data = -torch.log(torch.tensor(min_weight))
 
+        self.log("log_vars/label", self.log_var_label)
+        self.log("log_vars/recon", self.log_var_recon)
+        self.log("weights/label", label_weight)
+        self.log("weights/recon", recon_weight)
+        self.log("scale_factors/label", self.scale_factors[0])
+        self.log("scale_factors/recon", self.scale_factors[1])
+
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.log("loss_params/focal_gamma", self.focal_gamma)
         self.log("loss_params/focal_alpha_mean", self.focal_alpha.mean())
-
-        # Log the weights and scale factors for monitoring
-        self.log("weights/label", torch.exp(-self.log_var_label))
-        self.log("weights/recon", torch.exp(-self.log_var_recon))
-        self.log("scale_factors/label", self.scale_factors[0])
-        self.log("scale_factors/recon", self.scale_factors[1])
 
     def _log_metrics(self, losses: Dict, stage: str):
         for k, v in losses.items():
@@ -638,7 +644,7 @@ class DeepTANTune:
     """
 
     def __init__(self, args: Dict[str, Any]):
-        """Initialize tuning environment with parameters"""
+        """Initialize tuning environment with parameters."""
         # Store configuration parameters
         self.args = args
 
@@ -657,21 +663,15 @@ class DeepTANTune:
         self.class_weight = self._init_class_weights()
 
     def _init_data_module(self):
-        """Initialize data module based on input parameters"""
+        """Initialize data module based on input parameters."""
         if self.args.get("litdata"):
-            with open(
-                os.path.join(self.args["litdata"], const.fname.litdata_others2save_pkl),
-                "rb",
-            ) as f:
+            with open(os.path.join(self.args["litdata"], const.fname.litdata_others2save_pkl), "rb") as f:
                 others2save = pickle.load(f)
             self.dict_node_names = others2save["dict_node_names"]
             self.output_g_label_dim = others2save["output_g_label_dim"]
 
             path_label_onehot = os.path.join(self.args["litdata"], const.fname.label_class_onehot)
-            if os.path.exists(path_label_onehot):
-                self.path_label_onehot = path_label_onehot
-            else:
-                self.path_label_onehot = None
+            self.path_label_onehot = path_label_onehot if os.path.exists(path_label_onehot) else None
 
             self.datamodule = DeepTANDataModuleLit(
                 self.args["litdata"],
@@ -692,20 +692,14 @@ class DeepTANTune:
             self.dict_node_names = self.datamodule.dict_node_names
             self.output_g_label_dim = self.datamodule.label_dim
 
-            path_label_onehot = os.path.join(
-                os.path.dirname(self.args["val_parquet"]),
-                const.fname.label_class_onehot,
-            )
-            if os.path.exists(path_label_onehot):
-                self.path_label_onehot = path_label_onehot
-            else:
-                self.path_label_onehot = None
+            path_label_onehot = os.path.join(os.path.dirname(self.args["val_parquet"]), const.fname.label_class_onehot)
+            self.path_label_onehot = path_label_onehot if os.path.exists(path_label_onehot) else None
 
         else:
             raise ValueError("Invalid data configuration")
 
     def _init_class_weights(self):
-        """Initialize class weights if provided"""
+        """Initialize class weights if provided."""
         if self.path_label_onehot is not None:
             print("\nPre-defined label onehot file found. Computing class weights...\n")
             return celltypes_class_weights(pl.read_parquet(self.path_label_onehot))
@@ -713,11 +707,11 @@ class DeepTANTune:
         return None
 
     def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
+        """Create model instance with trial parameters."""
         fusion_dims_node_emb = trial_params.get("fusion_dims_node_emb", self.args["fusion_dims_node_emb"])
         if isinstance(fusion_dims_node_emb, str):
             fusion_dims_node_emb = eval(fusion_dims_node_emb)
 
-        """Create model instance with trial parameters"""
         return DeepTAN(
             dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
@@ -732,24 +726,66 @@ class DeepTANTune:
             threshold_subgraph_overlap=trial_params.get("threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]),
             n_heads_node_emb=trial_params.get("n_heads_node_emb", self.args["n_heads_node_emb"]),
             n_heads_pooling=trial_params.get("n_heads_pooling", self.args["n_heads_pooling"]),
+            n_heads_ge_decoder=trial_params.get("n_heads_ge_decoder", self.args["n_heads_ge_decoder"]),
+            n_heads_label_pred=trial_params.get("n_heads_label_pred", self.args["n_heads_label_pred"]),
             dropout=trial_params.get("dropout", self.args["dropout"]),
             lr=trial_params.get("lr", self.args["lr"]),
             chunk_size=self.args["chunk_size"],
         )
 
+    def _init_model(self):
+        """This function is used for create model directly without getting ``trial_params``."""
+        return DeepTAN(
+            dict_node_names=self.dict_node_names,
+            input_dim=self.args["input_node_emb_dim"],
+            output_g_label_dim=self.output_g_label_dim,
+            is_regression=self.args["is_regression"],
+            class_weights=self.class_weight,
+            node_emb_dim=self.args["node_emb_dim"],
+            fusion_dims_node_emb=self.args["fusion_dims_node_emb"],
+            output_dim_g_emb=self.args["output_dim_g_emb"],
+            n_hop=self.args["n_hop"],
+            threshold_edge_exist=self.args["threshold_edge_exist"],
+            threshold_subgraph_overlap=self.args["threshold_subgraph_overlap"],
+            n_heads_node_emb=self.args["n_heads_node_emb"],
+            n_heads_pooling=self.args["n_heads_pooling"],
+            n_heads_ge_decoder=self.args["n_heads_ge_decoder"],
+            n_heads_label_pred=self.args["n_heads_label_pred"],
+            dropout=self.args["dropout"],
+            lr=self.args["lr"],
+            chunk_size=self.args["chunk_size"],
+        )
+
+    def _train_on_args(self):
+        """This function is used for training the model with the given arguments."""
+        _model = self._init_model()
+        train_model(
+            model=_model,
+            datamodule=self.datamodule,
+            es_patience=self.args["es"],
+            max_epochs=self.args["max_ep"],
+            min_epochs=self.args["min_ep"],
+            log_dir=os.path.join(self.log_dir, self.log_name),
+            accumulate_grad_batches=self.args["acc_grad_batch"],
+            accelerator=self.args["accelerator"],
+            # fast_dev_run=True,
+        )
+
     def objective(self, trial: optuna.Trial) -> float:
-        """Optuna objective function for hyperparameter optimization"""
+        """Optuna objective function for hyperparameter optimization."""
         try:
-            fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32], [64, 32, 16]]
+            fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32]]
             fusion_dims_node_emb_list_strings = [str(lst) for lst in fusion_dims_node_emb_lists_to_try]
 
             # Suggest hyperparameters
             params = {
                 "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
                 "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
-                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [64, 128, 192, 256]),
-                "n_heads_node_emb": trial.suggest_categorical("n_heads_node_emb", [2, 4, 8]),
-                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4, 8]),
+                "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 192, 256]),
+                "n_heads_node_emb": trial.suggest_categorical("n_heads_node_emb", [2, 4]),
+                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4]),
+                "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4]),
+                "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4]),
                 "fusion_dims_node_emb": trial.suggest_categorical(
                     "fusion_dims_node_emb",
                     fusion_dims_node_emb_list_strings,
@@ -759,17 +795,11 @@ class DeepTANTune:
             }
 
             # Create model with suggested parameters
-            model = self.create_model(params)
-
-            # model.ge_decoder.compile()
-            # model.g_label_predictor.compile()
-            # model.amsgp.node_embedding_layers.compile()
-            # model.amsgp.compile()
-            # model.compile()
+            _model = self.create_model(params)
 
             # Execute training run
             val_loss = train_model(
-                model=model,
+                model=_model,
                 datamodule=self.datamodule,
                 es_patience=self.args["es"],
                 max_epochs=self.args["max_ep"],

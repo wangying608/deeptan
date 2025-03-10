@@ -16,5 +16,5 @@ dirlitdata=$storedir/optimized_data/$optdata/seed_$seed
 dirlogs=$storedir/logs/$optdata/seed_$seed
 mkdir -p $dirlogs
 
-$mypython $myscript --litdata $dirlitdata --bs $bsize --log_dir $dirlogs --ntrials $ntrial --njobs $njob --chunk_size $ck --acc_grad_batch $agd
-# singularity exec --nv -B $storedir:$storedir $SIF python $myscript --litdata $dirlitdata --bs $bsize --log_dir $dirlogs --ntrials $ntrial --njobs $njob --chunk_size $ck --acc_grad_batch $agd
+$mypython $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --ck $ck --agb $agd --atune
+# singularity exec --nv -B $storedir:$storedir $SIF python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --ck $ck --agb $agd --atune

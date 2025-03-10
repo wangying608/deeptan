@@ -7,18 +7,27 @@ from os import getenv
 
 from numpy import ceil
 
-bs = 32
-accumulate_grad_batches = 1
-lr = 0.0001
-es = 5
-chunk_size = 4096
+bs = 2
+accumulate_grad_batches = 16
+lr = 0.000226
+es = 2
+min_epoch = 2
+max_epoch = 10
+chunk_size = 256
 subg_chunk_size = 4
-dropout = 0.2
+dropout = 0.0
 negative_slope = 0.2
+node_emb_dim = 128
+g_emb_dim = 256
 label_pred_hidden_dims = [512, 256, 256]
+fusion_dims_node_emb = [128, 64]
+n_heads_pooling = 2
+n_heads_node_emb = 2
+n_heads_ge_decoder = 2
+n_heads_label_pred = 2
 n_hop = 1
-threshold_centrality = 0.8
-threshold_subg_overlap = 0.9
+# threshold_centrality = 0.8
+threshold_subg_overlap = 0.95
 threshold_edge_exist = 0.05
 
 matmul_precision = "high"
