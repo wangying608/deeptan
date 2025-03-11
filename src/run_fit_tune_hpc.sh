@@ -21,17 +21,17 @@ myscript=run_05_fit_tune.py
 # njob=$4
 # bsize=$5
 # agd=$6
-# ck=$7
 seed=42
 optdata=GSE235510_WT_strata
 ntrial=30
 njob=1
-bsize=4
+bsize=8
 agd=8
-ck=1024
 
 dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
 dirlogs=$DEEPTAN_HOME/logs/$optdata/seed_$seed
 mkdir -p $dirlogs
 
-singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --ck $ck --agb $agd --atune
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd

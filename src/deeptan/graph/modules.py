@@ -67,7 +67,6 @@ class NodeEmbedding(nn.Module):
                     dim_out,
                     n_heads,
                     dropout,
-                    chunk_size,
                 )
                 for i, (dim_in, dim_out) in enumerate(zip([embedding_dim] + fusion_dims[:-1], fusion_dims))
             ]
@@ -179,17 +178,16 @@ class AMSGP(torch.nn.Module):
 
     def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
-        self.xgat_pool = WGATLayer(input_dim, output_dim, heads, self.dropout, self.chunk_size)
+        self.xgat_pool = WGATLayer(input_dim, output_dim, heads, self.dropout)
         self.att_pool = SelfAtt_(output_dim, self.dropout, True)
 
         # Global graph pooling
-        self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout, self.chunk_size)
+        self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout)
         self.global_att_pool = SelfAtt_(output_dim, self.dropout, True)
 
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
         return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
 
-    @torch._dynamo.disable
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
         h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
@@ -198,7 +196,9 @@ class AMSGP(torch.nn.Module):
         unique_batches = torch.unique(batch)
         graph_embs = []
 
+        # print("\nStart graph embedding...")
         for graph_id in unique_batches:
+            # print("Graph ID:", graph_id)
             # Extract node mask for the current graph
             mask = batch == graph_id
             node_indices = torch.where(mask)[0]
@@ -232,6 +232,7 @@ class AMSGP(torch.nn.Module):
                 continue
 
             # Compute dynamic centrality
+            # print("\nComputing dynamic centrality...")
             h_mask = h[mask]
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(
                 h_mask,
@@ -240,9 +241,11 @@ class AMSGP(torch.nn.Module):
             )
 
             # Generate multiscale subgraphs
+            # print("\nGenerating multiscale subgraphs...")
             subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, centrality, h_mask)
 
             # Create graph embeddings
+            # print("\nCreating graph embeddings...")
             if subgraphs:
                 g_emb = self._create_graph_embeddings(subgraphs)
                 graph_embs.append(g_emb)
@@ -290,7 +293,6 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
-    @torch._dynamo.disable
     def _generate_multiscale_subgraphs(self, edge_index, centrality, h):
         """Generate hierarchical subgraphs using centrality histogram bins.
         基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
@@ -402,9 +404,8 @@ class AMSGP(torch.nn.Module):
         return subgraphs
 
     @staticmethod
-    @torch._dynamo.disable
     def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
-        """Custom implementation of batch k-hop subgraph extraction"""
+        """Custom implementation of batch k-hop subgraph extraction."""
 
         subsets = []
         edge_indices = []
@@ -415,17 +416,46 @@ class AMSGP(torch.nn.Module):
             edge_indices.append(sub_edge_index)
         return subsets, edge_indices
 
+    # @staticmethod
+    # def hist_fd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    #     """Freedman-Diaconis histogram calculation."""
+    #     q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
+    #     iqr = q75 - q25
+    #     bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
+    #     num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
+    #     counts = torch.histc(tensor, bins=num_bins)
+    #     edges = torch.linspace(tensor.min(), tensor.max(), num_bins + 1, device=tensor.device)
+    #     return counts, edges
+
     @staticmethod
-    @torch._dynamo.disable
     def hist_fd(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Freedman-Diaconis histogram calculation."""
+        """Freedman-Diaconis rule with memory optimization."""
+        n = tensor.numel()
+
+        # Calculate statistics on GPU first
+        min_val = tensor.min()
+        max_val = tensor.max()
         q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
         iqr = q75 - q25
-        bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
-        num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
-        counts = torch.histc(tensor, bins=num_bins)
-        edges = torch.linspace(tensor.min(), tensor.max(), num_bins + 1, device=tensor.device)
-        return counts, edges
+
+        # Move scalar values to CPU for bin calculation
+        min_cpu = min_val.cpu().item()
+        max_cpu = max_val.cpu().item()
+        iqr_cpu = iqr.cpu().item()
+        n_cpu = n  # numel() returns Python int
+
+        # Calculate bin parameters on CPU
+        bin_width = 2 * iqr_cpu / (n_cpu ** (1 / 3)) if iqr_cpu > 0 else (max_cpu - min_cpu)
+        num_bins = int((max_cpu - min_cpu) / bin_width) if bin_width > 0 else 1
+        num_bins = max(1, min(num_bins, 1000))  # Cap bins to 1000
+
+        # Create edges on CPU first
+        edges_cpu = torch.linspace(min_cpu, max_cpu, num_bins + 1)
+        edges = edges_cpu.to(device=tensor.device)
+
+        # Calculate histogram on GPU
+        hist = torch.histc(tensor, bins=num_bins, min=min_val, max=max_val)
+        return hist, edges
 
     def _create_graph_embeddings(self, subgraphs):
         chunk_size = self.chunk_size
@@ -454,6 +484,82 @@ class AMSGP(torch.nn.Module):
         return self.att_pool(h.unsqueeze(0))
 
 
+# class WGATLayer(MessagePassing):
+#     r"""
+#     (NMIC) Weighted Graph Attention Layer.
+#     """
+
+#     def __init__(
+#         self,
+#         input_dim: int,
+#         output_dim: int,
+#         num_heads: int,
+#         dropout: float = const.default.dropout,
+#         chunk_size: int = const.default.chunk_size,
+#     ):
+#         r"""
+#         Initialize the Weighted Graph Attention Layer.
+
+#         Args:
+#             input_dim: The dimension of the input embeddings.
+#             output_dim: The dimension of the output embeddings.
+#             num_heads: The number of attention heads.
+#             dropout: The dropout probability for the attention weights.
+#             chunk_size: The chunk size for processing large tensors.
+#         """
+#         super().__init__(aggr="add")
+#         self.output_dim = output_dim
+#         self.num_heads = num_heads
+#         self.dropout = dropout
+#         self.chunk_size = chunk_size
+
+#         # Split weight matrix into two parts to avoid concatenation
+#         self.W_i = nn.Linear(input_dim, output_dim * num_heads)
+#         self.W_j = nn.Linear(input_dim, output_dim * num_heads)
+
+#         self.trans = nn.Linear(input_dim, output_dim * num_heads)
+#         self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
+#         self.reset_parameters()
+
+#     def reset_parameters(self):
+#         nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
+#         nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
+#         nn.init.normal_(self.attn, mean=0, std=0.1)
+
+#     def forward(self, x, edge_index, edge_attr=None):
+#         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+
+#     def message(self, x_i, x_j, edge_attr):
+#         num_edges = x_i.size(0)
+#         h_chunks = []
+
+#         # Process in chunks to reduce peak memory
+#         for i in range(0, num_edges, self.chunk_size):
+#             idx = slice(i, min(i + self.chunk_size, num_edges))
+#             _chunk_size = idx.stop - idx.start
+#             # Split computation to avoid concatenation
+#             h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+#             h_j = self.W_j(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+#             h = h_i + h_j
+
+#             # Calculate attention coefficients
+#             a = torch.einsum("ehd,hd->eh", h, self.attn)
+
+#             if edge_attr is not None:
+#                 a = a * edge_attr[idx].view(-1, 1).expand(-1, self.num_heads)
+
+#             # Process attention scores
+#             a = F.softmax(a, dim=0)
+
+#             # Transform and weight features
+#             x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+#             x_trans = torch.einsum("ehd,eh->ed", x_trans, a)
+#             h_chunks.append(x_trans)
+
+#         h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
+#         return h
+
+
 class WGATLayer(MessagePassing):
     r"""
     (NMIC) Weighted Graph Attention Layer.
@@ -465,7 +571,6 @@ class WGATLayer(MessagePassing):
         output_dim: int,
         num_heads: int,
         dropout: float = const.default.dropout,
-        chunk_size: int = const.default.chunk_size,
     ):
         r"""
         Initialize the Weighted Graph Attention Layer.
@@ -475,13 +580,11 @@ class WGATLayer(MessagePassing):
             output_dim: The dimension of the output embeddings.
             num_heads: The number of attention heads.
             dropout: The dropout probability for the attention weights.
-            chunk_size: The chunk size for processing large tensors.
         """
         super().__init__(aggr="add")
         self.output_dim = output_dim
         self.num_heads = num_heads
         self.dropout = dropout
-        self.chunk_size = chunk_size
 
         # Split weight matrix into two parts to avoid concatenation
         self.W_i = nn.Linear(input_dim, output_dim * num_heads)
@@ -500,34 +603,21 @@ class WGATLayer(MessagePassing):
         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
     def message(self, x_i, x_j, edge_attr):
-        num_edges = x_i.size(0)
-        h_chunks = []
+        h_i = self.W_i(x_i).view(x_i.size(0), self.num_heads, self.output_dim)
+        h_j = self.W_j(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
+        h = h_i + h_j
 
-        # Process in chunks to reduce peak memory
-        for i in range(0, num_edges, self.chunk_size):
-            idx = slice(i, min(i + self.chunk_size, num_edges))
-            _chunk_size = idx.stop - idx.start
-            # Split computation to avoid concatenation
-            h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-            h_j = self.W_j(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-            h = h_i + h_j
+        a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
 
-            # Calculate attention coefficients
-            a = torch.einsum("ehd,hd->eh", h, self.attn)
+        if edge_attr is not None:
+            a = a * edge_attr.view(-1, 1)  # .expand(-1, self.num_heads)
 
-            if edge_attr is not None:
-                a = a * edge_attr[idx].view(-1, 1).expand(-1, self.num_heads)
+        a = F.softmax(a, dim=0)
 
-            # Process attention scores
-            a = F.softmax(a, dim=0)
+        x_trans = self.trans(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
+        x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
 
-            # Transform and weight features
-            x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-            x_trans = torch.einsum("ehd,eh->ed", x_trans, a)
-            h_chunks.append(x_trans)
-
-        h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
-        return h
+        return x_trans
 
 
 class GE_Decoder(nn.Module):

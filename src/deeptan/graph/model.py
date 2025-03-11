@@ -221,6 +221,7 @@ class DeepTAN(ltn.LightningModule):
         # assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
 
         # Check if all node names are valid
+        # print("\nChecking node names...")
         for nodes in batch.node_names:
             assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
 
@@ -233,6 +234,7 @@ class DeepTAN(ltn.LightningModule):
         # print(f"Batch information: {node_batch}\n")
 
         # Feature extraction
+        # print("\nEmbedding features...")
         z, E_i, E_all = self.amsgp(
             node_names=batch.node_names,
             x=batch.x,
@@ -241,22 +243,19 @@ class DeepTAN(ltn.LightningModule):
             batch=node_batch,
         )
 
+        # print("\nReconstructing node embeddings...")
         recon_node_emb, recon_node_val_for_loss_all = self.ge_decoder(z, E_i, E_all)
 
-        # print(f"Reconstructed node embeddings: {recon_node_emb.shape}")
-        # print(f"Reconstructed node values for loss: {recon_node_val_for_loss_all.shape}")
-
         # Graph-level label prediction
+        # print("\nPredicting graph-level labels...")
         pred_labels = self.g_label_predictor(z)
 
         # Node-level reconstruction loss
-
-        batch_size = len(batch.node_names)
-
         # Generate a boolean mask for available nodes [batch_size, num_all_nodes]
+        batch_size = len(batch.node_names)
         avail_masks = torch.zeros((batch_size, self.num_all_nodes), dtype=torch.bool, device=self.device)
 
-        # en: For each batch, fill the mask for available nodes
+        # For each batch, fill the mask for available nodes
         for i, nodes in enumerate(batch.node_names):
             node_indices = [self.dict_node_names[n] for n in nodes]
             avail_masks[i, node_indices] = True
@@ -265,6 +264,7 @@ class DeepTAN(ltn.LightningModule):
         avail_recon = recon_node_val_for_loss_all[avail_masks]
         unavail_recon = recon_node_val_for_loss_all[~avail_masks]
 
+        # print("\nReturning results...")
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
@@ -273,10 +273,6 @@ class DeepTAN(ltn.LightningModule):
             "node_recon_for_loss_zeros": unavail_recon,
             "node_recon_for_loss_all": recon_node_val_for_loss_all,
         }
-
-        # print("\n\nGraph embedding shape:", z.shape)
-        # print("Reconstructed node embedding shape:", recon_node_emb.shape)
-        # print("Predicted label shape:", predicted_label.shape)
 
     def training_step(self, batch: GData, batch_idx: int):
         return self._shared_step(batch, "train")
@@ -586,7 +582,7 @@ def train_model(
         fast_dev_run (bool): Whether to run a fast development run.
     """
 
-    torch.autograd.set_detect_anomaly(True)
+    # torch.autograd.set_detect_anomaly(True)
 
     callback_es = EarlyStopping(
         monitor=const.dkey.title_val_loss,
@@ -623,8 +619,6 @@ def train_model(
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
     )
-
-    # model = torch.compile(model, options={"triton.cudagraphs": True}, fullgraph=True, dynamic=True)
 
     trainer.fit(model=model, datamodule=datamodule)
 
@@ -762,6 +756,7 @@ class DeepTANTune:
     def _train_on_args(self):
         """This function is used for training the model with the given arguments."""
         _model = self._init_model()
+
         train_model(
             model=_model,
             datamodule=self.datamodule,
