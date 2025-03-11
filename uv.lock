@@ -454,7 +454,7 @@ compile = [
 [package.metadata]
 requires-dist = [
     { name = "lightning", specifier = ">=2.5.0.post0" },
-    { name = "litdata", specifier = "==0.2.39" },
+    { name = "litdata", specifier = "==0.2.41" },
     { name = "mosaicml-streaming", specifier = ">=0.11.0" },
     { name = "optuna", specifier = ">=4.2.0" },
     { name = "optuna-dashboard", specifier = ">=0.17.0" },
@@ -851,7 +851,7 @@ wheels = [
 
 [[package]]
 name = "litdata"
-version = "0.2.39"
+version = "0.2.41"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "boto3", marker = "sys_platform == 'linux'" },
@@ -862,9 +862,9 @@ dependencies = [
     { name = "tifffile", marker = "sys_platform == 'linux'" },
     { name = "torch", marker = "sys_platform == 'linux'" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/d3/b1/4933a1b387e5132cc3519a626f5e221e3dc6a7e113b0e74bbefca259ce41/litdata-0.2.39.tar.gz", hash = "sha256:10d69d1b7f1f72d82f981e84e76ef74e69040c960f03376b17b7cf0fa80bc853", size = 147499 }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/79/e2/09ffde822a1e4d68942d0029f153139750bcfaee75b202d6d4c962eb9719/litdata-0.2.41.tar.gz", hash = "sha256:0b16e4c24621c133db1d57978e3cf72042a3bbbb8cdace91cea37ff86247f61e", size = 153892 }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/86/b7/a2a4342fe175631801122c48d5206dda70ef9981244a753f3ce450bf9826/litdata-0.2.39-py3-none-any.whl", hash = "sha256:5e4e0b1c36244f2356d79b89f1325b92bfd7d3d44b0ff36cfb830ea8a5b6b9b1", size = 141626 },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/7c/10/c44129fdff9fe2338e789d646f265205514472037fa011dc22da0bea4afe/litdata-0.2.41-py3-none-any.whl", hash = "sha256:e2b2e1f90bd330051e0df78dde0d12ae7119a0c92d1c1ba398a6b2ca80235208", size = 148360 },
 ]
 
 [[package]]

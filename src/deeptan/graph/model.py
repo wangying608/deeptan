@@ -51,6 +51,7 @@ from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 torch._dynamo.config.suppress_errors = True
 torch._dynamo.config.capture_scalar_outputs = True
+torch._dynamo.config.capture_dynamic_output_shape_ops = True
 
 
 class FocalLoss(torch.nn.Module):
@@ -214,10 +215,10 @@ class DeepTAN(ltn.LightningModule):
         self.log_var_recon = torch.nn.Parameter(torch.zeros(1))
 
     def forward(self, batch: GData) -> Dict[str, Any]:
-        assert batch.x is not None, "Input x is None"
-        assert batch.edge_index is not None, "Input edge_index is None"
-        assert batch.x.dim() == 2, f"The input dim is wrong: {batch.x.shape}"
-        assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
+        # assert batch.x is not None, "Input x is None"
+        # assert batch.edge_index is not None, "Input edge_index is None"
+        # assert batch.x.dim() == 2, f"The input dim is wrong: {batch.x.shape}"
+        # assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
 
         # Check if all node names are valid
         for nodes in batch.node_names:
@@ -374,7 +375,7 @@ class DeepTAN(ltn.LightningModule):
         self.metrics_task_label = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_label.clone(prefix=k + "/label_") for k in ["train", "val", "test"]})
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
-        assert batch.x is not None
+        # assert batch.x is not None
         losses = {}
 
         node_recon_for_loss = outputs["node_recon_for_loss"].squeeze(1)
@@ -622,6 +623,8 @@ def train_model(
         gradient_clip_val=1.0,
         gradient_clip_algorithm="norm",
     )
+
+    # model = torch.compile(model, options={"triton.cudagraphs": True}, fullgraph=True, dynamic=True)
 
     trainer.fit(model=model, datamodule=datamodule)
 

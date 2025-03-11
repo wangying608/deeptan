@@ -107,7 +107,6 @@ class NodeEmbedding(nn.Module):
         if self.skips:
             for i, layer in enumerate(self.layers):
                 emb = layer(emb, edge_index, edge_attr)
-                # emb = checkpoint(layer, emb, edge_index, edge_attr, use_reentrant=False)
                 if i < len(self.skips):
                     skips.append(self.skips[i](emb))
 
@@ -190,6 +189,7 @@ class AMSGP(torch.nn.Module):
     def _forward_embedding(self, node_names, x, edge_attr, edge_index):
         return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
 
+    @torch._dynamo.disable
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
         h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
@@ -290,6 +290,7 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
+    @torch._dynamo.disable
     def _generate_multiscale_subgraphs(self, edge_index, centrality, h):
         """Generate hierarchical subgraphs using centrality histogram bins.
         基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
@@ -367,10 +368,6 @@ class AMSGP(torch.nn.Module):
 
                     if covered_nodes.all():
                         break
-                if covered_nodes.all():
-                    break
-            if covered_nodes.all():
-                break
 
         # print(f"Percent of nodes covered: {covered_nodes.float().mean():.2%} ({covered_nodes.sum()}/{num_nodes})")
 
@@ -535,7 +532,7 @@ class WGATLayer(MessagePassing):
 
 class GE_Decoder(nn.Module):
     r"""
-    Enhanced Graph Embedding Decoder with cross-attention and residual blocks
+    Graph Embedding Decoder.
     """
 
     def __init__(
@@ -546,7 +543,7 @@ class GE_Decoder(nn.Module):
         hidden_dim: int,
         dropout: float = const.default.dropout,
         chunk_size: int = const.default.chunk_size,
-        n_heads: int = 4,
+        n_heads: int = const.default.n_heads_ge_decoder,
         n_res_blocks: int = 3,
     ):
         super().__init__()
@@ -603,47 +600,33 @@ class GE_Decoder(nn.Module):
         batch_size = z.size(0)
         num_all_nodes = E_all.size(0)
 
-        if num_all_nodes <= self.chunk_size:
-            # Create cross-attention input [batch_size, num_all_nodes, z_dim + h_dim]
-            # [B, N, z_dim]
-            z_expanded = z.unsqueeze(1).expand(-1, num_all_nodes, -1)
-            # [B, N, h_dim]
-            E_all_expanded = E_all.unsqueeze(0).expand(batch_size, -1, -1)
+        h_chunks = []
+
+        # Process all data in chunks
+        for i in range(0, num_all_nodes, self.chunk_size):
+            end_idx = min(i + self.chunk_size, num_all_nodes)
+            current_chunk = E_all[i:end_idx]
+
+            # Expand z and current chunk to batch dimension
+            z_chunk = z.unsqueeze(1).expand(-1, end_idx - i, -1)
+            E_chunk = current_chunk.unsqueeze(0).expand(batch_size, -1, -1)
 
             # Feature fusion
-            # [B, N, 2h_dim]
-            fused = self.fusion(torch.cat([z_expanded, E_all_expanded], dim=-1))
+            fused_chunk = self.fusion(torch.cat([z_chunk, E_chunk], dim=-1))
 
             # Cross-attention
-            # [B, N, h_dim]
-            attn_out, _ = self.cross_attn(query=fused, key=fused, value=fused)
+            attn_chunk, _ = self.cross_attn(query=fused_chunk, key=fused_chunk, value=fused_chunk)
 
-            # Residual learning
+            # Apply residual blocks
             for block in self.res_blocks:
-                attn_out = attn_out + block(attn_out)
+                attn_chunk = attn_chunk + block(attn_chunk)
 
-        else:
-            h_chunks = []
+            h_chunks.append(attn_chunk)
 
-            for i in range(0, num_all_nodes, self.chunk_size):
-                end_idx = min(i + self.chunk_size, num_all_nodes)
-                current_chunk = E_all[i:end_idx]
-
-                z_chunk = z.unsqueeze(1).expand(-1, end_idx - i, -1)
-                E_chunk = current_chunk.unsqueeze(0).expand(z.size(0), -1, -1)
-
-                fused_chunk = self.fusion(torch.cat([z_chunk, E_chunk], dim=-1))
-                attn_chunk, _ = self.cross_attn(fused_chunk, fused_chunk, fused_chunk)
-
-                for block in self.res_blocks:
-                    attn_chunk = attn_chunk + block(attn_chunk)
-
-                h_chunks.append(attn_chunk)
-
-            attn_out = torch.cat(h_chunks, dim=1)
+        # Combine all chunks
+        attn_out = torch.cat(h_chunks, dim=1)
 
         # Final reconstruction
-        # [B, N, output_dim]
         h_ = self.ffn_q(attn_out)
 
         return attn_out, h_
