@@ -8,7 +8,7 @@ from os import getenv
 from numpy import ceil
 
 bs = 1
-accumulate_grad_batches = 32
+accumulate_grad_batches = 16
 lr = 0.000226
 es = 2
 min_epoch = 2

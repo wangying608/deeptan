@@ -185,12 +185,9 @@ class AMSGP(torch.nn.Module):
         self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout)
         self.global_att_pool = SelfAtt_(output_dim, self.dropout, True)
 
-    def _forward_embedding(self, node_names, x, edge_attr, edge_index):
-        return self.node_embedding_layers(node_names, x, edge_attr, edge_index)
-
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
-        h, E_i, E_all = self._forward_embedding(node_names, x, edge_attr, edge_index)
+        h, E_i, E_all = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
 
         # Graph embedding
         unique_batches = torch.unique(batch)
@@ -395,6 +392,7 @@ class AMSGP(torch.nn.Module):
 
         # Free up memory
         del subgraph_masks, subgraph_centers, covered_nodes
+        torch.cuda.empty_cache()
 
         subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
 

@@ -312,6 +312,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             persistent_workers=True,
             shuffle=True,
             pin_memory=True,
+            pin_memory_device="cpu",
             collate_fn=collate_fn,
             drop_last=True,
         )
@@ -321,6 +322,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             num_workers=self.n_workers,
             persistent_workers=True,
             pin_memory=False,
+            pin_memory_device="cpu",
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(
@@ -329,6 +331,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             num_workers=self.n_workers,
             persistent_workers=True,
             pin_memory=False,
+            pin_memory_device="cpu",
             collate_fn=collate_fn,
         )
 

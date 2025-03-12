@@ -49,9 +49,9 @@ from deeptan.utils.data import (
 from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_string
 
 torch.set_float32_matmul_precision(const.default.matmul_precision)
-torch._dynamo.config.suppress_errors = True
-torch._dynamo.config.capture_scalar_outputs = True
-torch._dynamo.config.capture_dynamic_output_shape_ops = True
+# torch._dynamo.config.suppress_errors = True
+# torch._dynamo.config.capture_scalar_outputs = True
+# torch._dynamo.config.capture_dynamic_output_shape_ops = True
 
 
 class FocalLoss(torch.nn.Module):
@@ -95,7 +95,7 @@ class DeepTAN(ltn.LightningModule):
 
     def __init__(
         self,
-        dict_node_names: Dict[str, int],
+        z_dict_node_names: Dict[str, int],
         input_dim: int,
         output_g_label_dim: Optional[int],
         is_regression: bool,
@@ -138,11 +138,11 @@ class DeepTAN(ltn.LightningModule):
             chunk_size (int): The chunk size for processing large matrices.
         """
         super().__init__()
-        self.save_hyperparameters(ignore=["dict_node_names"])
-        # self.save_hyperparameters()
+        # self.save_hyperparameters(ignore=["dict_node_names"])
+        self.save_hyperparameters()
 
-        self.dict_node_names = dict_node_names
-        self.all_node_names = list(dict_node_names.keys())
+        self.dict_node_names = z_dict_node_names
+        self.all_node_names = list(z_dict_node_names.keys())
         self.num_all_nodes = len(self.all_node_names)
         self.register_buffer(
             "all_node_indices",
@@ -171,7 +171,7 @@ class DeepTAN(ltn.LightningModule):
 
         # Core components
         self.amsgp = AMSGP(
-            dict_node_names=dict_node_names,
+            dict_node_names=self.dict_node_names,
             input_dim=input_dim,
             node_emb_dim=node_emb_dim,
             fusion_dims_node_emb=fusion_dims_node_emb,
@@ -710,7 +710,7 @@ class DeepTANTune:
             fusion_dims_node_emb = eval(fusion_dims_node_emb)
 
         return DeepTAN(
-            dict_node_names=self.dict_node_names,
+            z_dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
             output_g_label_dim=self.output_g_label_dim,
             is_regression=self.args["is_regression"],
@@ -733,7 +733,7 @@ class DeepTANTune:
     def _init_model(self):
         """This function is used for create model directly without getting ``trial_params``."""
         return DeepTAN(
-            dict_node_names=self.dict_node_names,
+            z_dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
             output_g_label_dim=self.output_g_label_dim,
             is_regression=self.args["is_regression"],
@@ -752,6 +752,10 @@ class DeepTANTune:
             lr=self.args["lr"],
             chunk_size=self.args["chunk_size"],
         )
+
+    def _load_ckpt(self, ckpt_path: str, former_dict_node_names: Dict[str, int], target_class: Any = "amsgp"):
+        """Load a checkpoint from the given path and extract its graph embedding module."""
+        pass
 
     def _train_on_args(self):
         """This function is used for training the model with the given arguments."""
