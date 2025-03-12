@@ -14,6 +14,7 @@ def parse_args():
 
     parser.add_argument("--litdata", "--data", type=str, default="", required=False, help="Path to litdata directory")
     parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
+    parser.add_argument("--lr", type=float, default=const.default.lr, help="Learning rate")
     parser.add_argument("--log_dir", "--logdir", type=str, default=".tmp_logs_tune", help="Directory for logging")
     parser.add_argument("--input_node_emb_dim", "--indim", type=int, default=1, help="Input node embedding dimension")
     parser.add_argument("--is_regression", "--ir", action="store_true", help="Whether the task is regression")
@@ -37,6 +38,7 @@ if __name__ == "__main__":
         "log_dir": args.log_dir,
         "litdata": args.litdata,
         "bs": args.bs,
+        "lr": args.lr,
         "chunk_size": args.chunk_size,
         "is_regression": args.is_regression,
         "accelerator": args.accelerator,
@@ -54,7 +56,6 @@ if __name__ == "__main__":
         "n_heads_ge_decoder": const.default.n_heads_ge_decoder,
         "n_heads_label_pred": const.default.n_heads_label_pred,
         "dropout": const.default.dropout,
-        "lr": const.default.lr,
         "max_ep": const.default.max_epoch,
         "min_ep": const.default.min_epoch,
         "nworker": const.default.n_workers,

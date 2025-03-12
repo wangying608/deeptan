@@ -25,8 +25,8 @@ seed=42
 optdata=GSE235510_WT_strata
 ntrial=30
 njob=1
-bsize=8
-agd=8
+bsize=6
+agd=4
 
 dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
 dirlogs=$DEEPTAN_HOME/logs/$optdata/seed_$seed

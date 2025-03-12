@@ -7,9 +7,9 @@ from os import getenv
 
 from numpy import ceil
 
-bs = 1
-accumulate_grad_batches = 16
-lr = 0.000226
+bs = 32
+accumulate_grad_batches = 1
+lr = 0.0005
 es = 2
 min_epoch = 2
 max_epoch = 10
@@ -26,7 +26,7 @@ n_heads_node_emb = 2
 n_heads_ge_decoder = 2
 n_heads_label_pred = 2
 n_hop = 1
-# threshold_centrality = 0.8
+
 threshold_subg_overlap = 0.95
 threshold_edge_exist = 0.3
 

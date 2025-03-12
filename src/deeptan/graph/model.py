@@ -168,6 +168,7 @@ class DeepTAN(ltn.LightningModule):
         else:
             self.focal_alpha = torch.tensor(focal_alpha)
         # self.focal_gamma = focal_gamma
+        self.scale_factors = torch.ones(2, dtype=torch.float32).softmax(dim=0)
 
         # Core components
         self.amsgp = AMSGP(
@@ -208,11 +209,6 @@ class DeepTAN(ltn.LightningModule):
 
         # Metrics and initialization
         self._init_metrics()
-        self.ema_loss = None
-
-        # Learnable uncertainty parameters
-        self.log_var_label = torch.nn.Parameter(torch.zeros(1))
-        self.log_var_recon = torch.nn.Parameter(torch.zeros(1))
 
     def forward(self, batch: GData) -> Dict[str, Any]:
         # assert batch.x is not None, "Input x is None"
@@ -229,7 +225,7 @@ class DeepTAN(ltn.LightningModule):
         node_batch = getattr(
             batch,
             "batch",
-            torch.zeros(batch.x.size(0), dtype=torch.long, device=batch.x.device),
+            torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device),
         )
         # print(f"Batch information: {node_batch}\n")
 
@@ -311,9 +307,9 @@ class DeepTAN(ltn.LightningModule):
         optimizer = AdamW(self.parameters(), lr=self.lr)
         scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=3,
-            T_mult=2,
-            eta_min=1e-7,
+            T_0=5,
+            T_mult=1,
+            eta_min=1e-6,
         )
         return {
             "optimizer": optimizer,
@@ -442,45 +438,28 @@ class DeepTAN(ltn.LightningModule):
         return {**losses, "loss": total_loss}
 
     def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
+        # If in the initial epochs, focus only on reconstruction loss
+        if self.current_epoch < 2:
+            total_loss = losses["recon"]
+            return total_loss
+
         # Dynamic loss scaling
         loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
         rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
 
         # Initialize scale factors if not present
         if stage == "train":
-            if not hasattr(self, "scale_factors"):
-                self.scale_factors = torch.ones_like(loss_ratio)
-            else:
-                # EMA update only during training
-                self.scale_factors = 0.95 * self.scale_factors + 0.05 * (1 / rel_ratio)
-
-        # Calculate learnable weights with regularization
-        label_weight = torch.exp(-self.log_var_label)
-        recon_weight = torch.exp(-self.log_var_recon)
+            # EMA update only during training
+            self.scale_factors = 0.99 * self.scale_factors + 0.01 * (1 / rel_ratio)
+            # Apply softmax and bias
+            self.scale_factors = F.softmax(self.scale_factors * torch.tensor([0.2, 0.8], dtype=torch.float32, device=self.device))
 
         # Calculate total loss with scaling and regularization
-        total_loss = 0.33 * label_weight * losses["label"] * self.scale_factors[0] + 0.33 * recon_weight * losses["recon"] * self.scale_factors[1] + 0.33 * (self.log_var_label + self.log_var_recon)
+        total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
 
         return total_loss
 
     def on_before_optimizer_step(self, optimizer):
-        # Ensure the log_var does not go out of a reasonable range
-        self.log_var_label.data.clamp_(min=-1.0, max=1.0)
-        self.log_var_recon.data.clamp_(min=-1.0, max=1.0)
-
-        # Ensure that the weights do not drop below a certain threshold to maintain model stability.
-        min_weight = 0.1
-        label_weight = torch.exp(-self.log_var_label)
-        recon_weight = torch.exp(-self.log_var_recon)
-        if label_weight < min_weight:
-            self.log_var_label.data = -torch.log(torch.tensor(min_weight))
-        if recon_weight < min_weight:
-            self.log_var_recon.data = -torch.log(torch.tensor(min_weight))
-
-        self.log("log_vars/label", self.log_var_label)
-        self.log("log_vars/recon", self.log_var_recon)
-        self.log("weights/label", label_weight)
-        self.log("weights/recon", recon_weight)
         self.log("scale_factors/label", self.scale_factors[0])
         self.log("scale_factors/recon", self.scale_factors[1])
 

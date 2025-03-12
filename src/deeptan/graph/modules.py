@@ -178,7 +178,7 @@ class AMSGP(torch.nn.Module):
 
     def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
-        self.xgat_pool = WGATLayer(input_dim, output_dim, heads, self.dropout)
+        self.xgat_pool = WGATLayer_chunked(input_dim, output_dim, heads, self.dropout, self.chunk_size)
         self.att_pool = SelfAtt_(output_dim, self.dropout, True)
 
         # Global graph pooling
@@ -482,80 +482,80 @@ class AMSGP(torch.nn.Module):
         return self.att_pool(h.unsqueeze(0))
 
 
-# class WGATLayer(MessagePassing):
-#     r"""
-#     (NMIC) Weighted Graph Attention Layer.
-#     """
+class WGATLayer_chunked(MessagePassing):
+    r"""
+    (NMIC) Weighted Graph Attention Layer.
+    """
 
-#     def __init__(
-#         self,
-#         input_dim: int,
-#         output_dim: int,
-#         num_heads: int,
-#         dropout: float = const.default.dropout,
-#         chunk_size: int = const.default.chunk_size,
-#     ):
-#         r"""
-#         Initialize the Weighted Graph Attention Layer.
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        num_heads: int,
+        dropout: float = const.default.dropout,
+        chunk_size: int = const.default.chunk_size,
+    ):
+        r"""
+        Initialize the Weighted Graph Attention Layer.
 
-#         Args:
-#             input_dim: The dimension of the input embeddings.
-#             output_dim: The dimension of the output embeddings.
-#             num_heads: The number of attention heads.
-#             dropout: The dropout probability for the attention weights.
-#             chunk_size: The chunk size for processing large tensors.
-#         """
-#         super().__init__(aggr="add")
-#         self.output_dim = output_dim
-#         self.num_heads = num_heads
-#         self.dropout = dropout
-#         self.chunk_size = chunk_size
+        Args:
+            input_dim: The dimension of the input embeddings.
+            output_dim: The dimension of the output embeddings.
+            num_heads: The number of attention heads.
+            dropout: The dropout probability for the attention weights.
+            chunk_size: The chunk size for processing large tensors.
+        """
+        super().__init__(aggr="add")
+        self.output_dim = output_dim
+        self.num_heads = num_heads
+        self.dropout = dropout
+        self.chunk_size = chunk_size
 
-#         # Split weight matrix into two parts to avoid concatenation
-#         self.W_i = nn.Linear(input_dim, output_dim * num_heads)
-#         self.W_j = nn.Linear(input_dim, output_dim * num_heads)
+        # Split weight matrix into two parts to avoid concatenation
+        self.W_i = nn.Linear(input_dim, output_dim * num_heads)
+        self.W_j = nn.Linear(input_dim, output_dim * num_heads)
 
-#         self.trans = nn.Linear(input_dim, output_dim * num_heads)
-#         self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
-#         self.reset_parameters()
+        self.trans = nn.Linear(input_dim, output_dim * num_heads)
+        self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
+        self.reset_parameters()
 
-#     def reset_parameters(self):
-#         nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
-#         nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
-#         nn.init.normal_(self.attn, mean=0, std=0.1)
+    def reset_parameters(self):
+        nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
+        nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
+        nn.init.normal_(self.attn, mean=0, std=0.1)
 
-#     def forward(self, x, edge_index, edge_attr=None):
-#         return self.propagate(edge_index, x=x, edge_attr=edge_attr)
+    def forward(self, x, edge_index, edge_attr=None):
+        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
 
-#     def message(self, x_i, x_j, edge_attr):
-#         num_edges = x_i.size(0)
-#         h_chunks = []
+    def message(self, x_i, x_j, edge_attr):
+        num_edges = x_i.size(0)
+        h_chunks = []
 
-#         # Process in chunks to reduce peak memory
-#         for i in range(0, num_edges, self.chunk_size):
-#             idx = slice(i, min(i + self.chunk_size, num_edges))
-#             _chunk_size = idx.stop - idx.start
-#             # Split computation to avoid concatenation
-#             h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-#             h_j = self.W_j(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-#             h = h_i + h_j
+        # Process in chunks to reduce peak memory
+        for i in range(0, num_edges, self.chunk_size):
+            idx = slice(i, min(i + self.chunk_size, num_edges))
+            _chunk_size = idx.stop - idx.start
+            # Split computation to avoid concatenation
+            h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            h_j = self.W_j(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            h = h_i + h_j
 
-#             # Calculate attention coefficients
-#             a = torch.einsum("ehd,hd->eh", h, self.attn)
+            # Calculate attention coefficients
+            a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
 
-#             if edge_attr is not None:
-#                 a = a * edge_attr[idx].view(-1, 1).expand(-1, self.num_heads)
+            if edge_attr is not None:
+                a = a * edge_attr[idx].view(-1, 1)  # .expand(-1, self.num_heads)
 
-#             # Process attention scores
-#             a = F.softmax(a, dim=0)
+            # Process attention scores
+            a = F.softmax(a, dim=0)
 
-#             # Transform and weight features
-#             x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-#             x_trans = torch.einsum("ehd,eh->ed", x_trans, a)
-#             h_chunks.append(x_trans)
+            # Transform and weight features
+            x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
+            h_chunks.append(x_trans)
 
-#         h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
-#         return h
+        h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
+        return h
 
 
 class WGATLayer(MessagePassing):

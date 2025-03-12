@@ -4,11 +4,9 @@ import torch
 import torch.nn as nn
 
 from deeptan.graph.model import DeepTAN
-from deeptan.graph.modules import AMSGP
 from deeptan.utils.uni import get_map_location
 
-path_ckpt = "/home/wuch/prjs/git_nwafu/DeepTAN/DeepTAN_20250312034820_LfhKz/best-model-epoch=0000-val_loss=0.0000.ckpt"
-# path_dict_former = "/mnt/hdd1/wuch/optimized_data/GSE235510_WT_strata/seed_42/others2save.pkl"
+path_ckpt = ""
 path_dict_new = ""
 
 if __name__ == "__main__":
@@ -17,11 +15,6 @@ if __name__ == "__main__":
     #     others2save = pickle.load(f)
     #     dict_node_names_new = others2save["dict_node_names"]
     dict_node_names_new = {"aa1": 0, "aa2": 1, "aa3": 2}
-
-    # Load former dict node names
-    # with open(path_dict_former, "rb") as f:
-    #     others2save = pickle.load(f)
-    #     dict_node_names_former = others2save["dict_node_names"]
 
     # Load model
     _model_pre = DeepTAN.load_from_checkpoint(path_ckpt, map_location=get_map_location())
