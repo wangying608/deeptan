@@ -138,7 +138,6 @@ class DeepTAN(ltn.LightningModule):
             chunk_size (int): The chunk size for processing large matrices.
         """
         super().__init__()
-        # self.save_hyperparameters(ignore=["dict_node_names"])
         self.save_hyperparameters()
 
         self.dict_node_names = z_dict_node_names
@@ -168,7 +167,6 @@ class DeepTAN(ltn.LightningModule):
         else:
             self.focal_alpha = torch.tensor(focal_alpha)
         # self.focal_gamma = focal_gamma
-        self.scale_factors = torch.ones(2, dtype=torch.float32).softmax(dim=0)
 
         # Core components
         self.amsgp = AMSGP(
@@ -228,6 +226,8 @@ class DeepTAN(ltn.LightningModule):
             torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device),
         )
         # print(f"Batch information: {node_batch}\n")
+
+        self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
 
         # Feature extraction
         # print("\nEmbedding features...")
