@@ -5,6 +5,8 @@ Trait-associated multi-omics network inference via multi-task NMIC-guided adapti
 
 import os
 import pickle
+import random
+import time
 from typing import Any, Dict, List, Optional
 
 import lightning as ltn
@@ -40,6 +42,7 @@ from torchmetrics.regression import (
 )
 
 import deeptan.constants as const
+from deeptan.constants.art import ascii_art
 from deeptan.graph.modules import AMSGP, GE_Decoder, GLabelPredictor
 from deeptan.utils.data import (
     DeepTANDataModule,
@@ -48,6 +51,7 @@ from deeptan.utils.data import (
 )
 from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_string
 
+print(ascii_art)
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 # torch._dynamo.config.suppress_errors = True
 # torch._dynamo.config.capture_scalar_outputs = True
@@ -167,6 +171,8 @@ class DeepTAN(ltn.LightningModule):
         else:
             self.focal_alpha = torch.tensor(focal_alpha)
         # self.focal_gamma = focal_gamma
+        self.current_epoch_work = 0
+        self.current_epoch_tmp = 0
 
         # Core components
         self.amsgp = AMSGP(
@@ -299,7 +305,7 @@ class DeepTAN(ltn.LightningModule):
         self._log_metrics(losses, stage)
 
         # del outputs
-        # torch.cuda.empty_cache()
+        torch.cuda.empty_cache()
 
         return losses["loss"]
 
@@ -318,6 +324,7 @@ class DeepTAN(ltn.LightningModule):
                 "interval": "epoch",
                 "frequency": 1,
                 "monitor": const.dkey.title_val_loss,
+                # "monitor": "val/loss_unweighted",
             },
         }
 
@@ -338,6 +345,8 @@ class DeepTAN(ltn.LightningModule):
                 "MSE": MeanSquaredError(num_outputs=self.input_dim),
                 "MAE": MeanAbsoluteError(num_outputs=self.input_dim),
                 "PCC": PearsonCorrCoef(num_outputs=self.input_dim),
+                # "KLD": KLDivergence(),
+                # "JSD": self._js_divergence,
             }
         )
         if self.is_regression:
@@ -434,30 +443,70 @@ class DeepTAN(ltn.LightningModule):
             losses["label"] = pred_loss
 
         # Dynamic weight adjustment
-        total_loss = self._balance_losses(losses, stage)
-        return {**losses, "loss": total_loss}
+        total_loss, unweighted_loss = self._balance_losses(losses, stage)
+        losses["loss_unweighted"] = unweighted_loss
+        losses["loss"] = total_loss
+        return losses
 
-    def _balance_losses(self, losses: Dict, stage: str) -> torch.Tensor:
+    def _balance_losses(self, losses: Dict, stage: str):
         # If in the initial epochs, focus only on reconstruction loss
-        if self.current_epoch < 2:
+        if self.current_epoch < 1:
+            self.current_epoch_tmp = self.current_epoch
+            self.g_label_predictor.requires_grad_(False)
             total_loss = losses["recon"]
-            return total_loss
 
-        # Dynamic loss scaling
-        loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
-        rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+        if self.current_epoch_tmp < self.current_epoch:
+            self.current_epoch_tmp = self.current_epoch
+            self.current_epoch_work = self.current_epoch_work + 1
+            if self.current_epoch_work > 2:
+                self.current_epoch_work = 0
 
-        # Initialize scale factors if not present
+            if self.current_epoch_work == 0:
+                # Focus on reconstruction loss
+                self.g_label_predictor.requires_grad_(False)
+                self.ge_decoder.requires_grad_(True)
+                self.amsgp.requires_grad_(True)
+            elif self.current_epoch_work == 1:
+                # Focus on label prediction loss
+                self.g_label_predictor.requires_grad_(True)
+                self.ge_decoder.requires_grad_(False)
+                self.amsgp.requires_grad_(False)
+            else:
+                # Dynamic loss scaling
+                self.g_label_predictor.requires_grad_(True)
+                self.ge_decoder.requires_grad_(True)
+                self.amsgp.requires_grad_(True)
+
+            self.zero_grad(set_to_none=False)
+
         if stage == "train":
-            # EMA update only during training
-            self.scale_factors = 0.99 * self.scale_factors + 0.01 * (1 / rel_ratio)
-            # Apply softmax and bias
-            self.scale_factors = F.softmax(self.scale_factors * torch.tensor([0.2, 0.8], dtype=torch.float32, device=self.device))
+            if self.current_epoch_work == 0:
+                # Focus on reconstruction loss
+                total_loss = losses["recon"]
 
-        # Calculate total loss with scaling and regularization
-        total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+            elif self.current_epoch_work == 1:
+                # Focus on label prediction loss
+                total_loss = losses["label"]
 
-        return total_loss
+            else:
+                # Dynamic loss scaling
+
+                loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
+                rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+
+                _scale_factors = 0.95 * self.scale_factors + 0.05 * (1 / rel_ratio)
+                # Apply softmax and bias
+                _scale_factors = F.softmax(_scale_factors, dim=0)
+                self.scale_factors = 0.1 * _scale_factors + 0.9 * self.scale_factors
+
+                # Calculate total loss with scaling
+                total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+
+        else:
+            total_loss = losses["label"] + losses["recon"]
+
+        unweighted_loss = losses["recon"] + losses["label"]
+        return total_loss, unweighted_loss
 
     def on_before_optimizer_step(self, optimizer):
         self.log("scale_factors/label", self.scale_factors[0])
@@ -564,7 +613,8 @@ def train_model(
     # torch.autograd.set_detect_anomaly(True)
 
     callback_es = EarlyStopping(
-        monitor=const.dkey.title_val_loss,
+        # monitor=const.dkey.title_val_loss,
+        monitor="val/loss_unweighted",
         patience=es_patience,
         mode="min",
         verbose=True,
@@ -572,7 +622,8 @@ def train_model(
     callback_ckpt = ModelCheckpoint(
         dirpath=log_dir,
         filename=const.default.ckpt_fname_format,
-        monitor=const.dkey.title_val_loss,
+        # monitor=const.dkey.title_val_loss,
+        monitor="val/loss_unweighted",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
@@ -754,6 +805,12 @@ class DeepTANTune:
 
     def objective(self, trial: optuna.Trial) -> float:
         """Optuna objective function for hyperparameter optimization."""
+
+        time_delay = const.default.time_delay * random.uniform(0.3, 1.1)
+        print(f"\nWaiting for {time_delay} seconds...\n")
+        time.sleep(time_delay)
+        print(f"Starting trial number: {trial.number}\n")
+
         try:
             fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32]]
             fusion_dims_node_emb_list_strings = [str(lst) for lst in fusion_dims_node_emb_lists_to_try]

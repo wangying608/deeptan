@@ -62,11 +62,12 @@ class NodeEmbedding(nn.Module):
         # WGAT layers with skip connections
         self.layers = nn.ModuleList(
             [
-                WGATLayer(
+                WGATLayer_chunked(
                     dim_in if i else embedding_dim,
                     dim_out,
                     n_heads,
                     dropout,
+                    chunk_size,
                 )
                 for i, (dim_in, dim_out) in enumerate(zip([embedding_dim] + fusion_dims[:-1], fusion_dims))
             ]
@@ -392,7 +393,7 @@ class AMSGP(torch.nn.Module):
 
         # Free up memory
         del subgraph_masks, subgraph_centers, covered_nodes
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
 

@@ -6,8 +6,6 @@ import os
 from typing import List
 
 import anndata
-
-# import mudata
 import numpy as np
 import polars as pl
 import scanpy as sc
@@ -92,6 +90,8 @@ class NMICGraphDataset(GDataset):
             self.node_names,
         ) = self.read_nmic_results(npz_path)
 
+        self.mat = np.log1p(self.mat)
+
         if labels is None:
             self.labels = None
             self.label_dim = None
@@ -103,7 +103,7 @@ class NMICGraphDataset(GDataset):
         return len(self.obs_names)
 
     def get(self, idx):
-        values: np.ndarray = self.mat[idx]
+        values = self.mat[idx]
         avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
         avail_feat_indices = self.mat_feat_indices[avail_col_indices]
 
@@ -186,6 +186,7 @@ class NMICGraphDatasetRely(GDataset):
         self.obs_names = df[df.columns[0]].to_list()
         # Extract relevant data
         self.selected_mat = df.select(depGDataset.node_names).to_numpy()
+        self.selected_mat = np.log1p(self.selected_mat)
 
     def len(self):
         return self.selected_mat.shape[0]

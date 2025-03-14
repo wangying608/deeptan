@@ -9,13 +9,13 @@ from numpy import ceil
 
 bs = 32
 accumulate_grad_batches = 1
-lr = 0.0005
-es = 2
-min_epoch = 2
-max_epoch = 10
-chunk_size = 1024
+lr = 0.0002
+es = 3
+min_epoch = 3
+max_epoch = 50
+chunk_size = 512
 subg_chunk_size = 4
-dropout = 0.0
+dropout = 0.1
 negative_slope = 0.2
 node_emb_dim = 128
 g_emb_dim = 256

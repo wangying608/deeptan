@@ -1,5 +1,7 @@
 use clap::{Arg, ArgAction, Command};
 use mi2graph::{mic_mat_with_data_filter, read_parquet_to_array2d};
+use std::fs;
+use std::path::Path;
 
 fn main() {
     let matches = cli().get_matches();
@@ -40,6 +42,15 @@ fn main() {
     let (array_2d, obs_names, var_names) =
         read_parquet_to_array2d(path_in).expect("Failed to read file");
 
+    if let Some(parent) = Path::new(path_out).parent() {
+        if !parent.exists() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Failed to create directory for output: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     mic_mat_with_data_filter(
         path_out,
         &array_2d,
@@ -63,7 +74,7 @@ fn cli() -> Command {
     Command::new("mi2graph")
         .version("0.2.0")
         .author("Chenhua Wu, chanhuawu@outlook.com")
-        .about("Generate MIC relations between features with dynamic feature filtering for the graph initialization.")
+        .about("Generate MIC relations between features with dynamic feature filtering for graph initialization.")
         .args([
             Arg::new("in")
                 .short('i')
