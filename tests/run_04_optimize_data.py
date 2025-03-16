@@ -19,6 +19,8 @@ def parse_args():
     parser.add_argument("--val_parquet", type=str, required=True, help="Path to validation data in .parquet format")
     parser.add_argument("--tst_parquet", type=str, required=True, help="Path to test data in .parquet format")
     parser.add_argument("--output_dir", type=str, default=".tmp_data_optimized", help="Directory for logging")
+    parser.add_argument("--thre_mi", type=float, default=0.1, help="Threshold for edge attribute")
+    parser.add_argument("--n_workers", type=int, default=const.default.n_threads, help="Number of workers for data loading")
 
     return parser.parse_args()
 
@@ -36,7 +38,7 @@ if __name__ == "__main__":
         const.dkey.abbr_val: args.val_parquet,
         const.dkey.abbr_test: args.tst_parquet,
     }
-    datamodule = DeepTANDataModule(files_fit, labels, batch_size=args.bs)
+    datamodule = DeepTANDataModule(files_fit, labels, batch_size=args.bs, edge_attr_threshold=args.thre_mi)
     datamodule.setup()
 
     # Copy original training data to output directory for saving node_names and g_label_dim
@@ -63,7 +65,7 @@ if __name__ == "__main__":
         output_dir=os.path.join(args.output_dir, const.dkey.abbr_train),
         chunk_bytes=const.default.lit_chunk_bytes,
         compression=const.default.lit_compression,
-        num_workers=const.default.n_threads,
+        num_workers=min(args.n_workers, const.default.n_threads),
     )
     litdata.optimize(
         fn=datamodule.val.get,
@@ -71,7 +73,7 @@ if __name__ == "__main__":
         output_dir=os.path.join(args.output_dir, const.dkey.abbr_val),
         chunk_bytes=const.default.lit_chunk_bytes,
         compression=const.default.lit_compression,
-        num_workers=const.default.n_threads,
+        num_workers=min(args.n_workers, const.default.n_threads),
     )
     litdata.optimize(
         fn=datamodule.test.get,
@@ -79,5 +81,5 @@ if __name__ == "__main__":
         output_dir=os.path.join(args.output_dir, const.dkey.abbr_test),
         chunk_bytes=const.default.lit_chunk_bytes,
         compression=const.default.lit_compression,
-        num_workers=const.default.n_threads,
+        num_workers=min(args.n_workers, const.default.n_threads),
     )

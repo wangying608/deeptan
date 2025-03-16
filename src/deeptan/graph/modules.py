@@ -115,7 +115,7 @@ class NodeEmbedding(nn.Module):
 
             emb = self.norm(emb)
 
-        return emb, E_i, E_all
+        return emb, E_all, ids
 
 
 class AMSGP(torch.nn.Module):
@@ -188,7 +188,7 @@ class AMSGP(torch.nn.Module):
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
-        h, E_i, E_all = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
+        h, E_all, ids = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
 
         # Graph embedding
         unique_batches = torch.unique(batch)
@@ -252,7 +252,7 @@ class AMSGP(torch.nn.Module):
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
 
         # Stack all graph embeddings
-        return torch.stack(graph_embs), E_i, E_all
+        return torch.stack(graph_embs), E_all, ids
 
     def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
         with torch.no_grad():
@@ -675,11 +675,10 @@ class GE_Decoder(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
-    def forward(self, z: torch.Tensor, E_i: torch.Tensor, E_all: torch.Tensor):
+    def forward(self, z: torch.Tensor, E_all: torch.Tensor):
         """
         Args:
             z: Graph embeddings [batch_size, z_dim]
-            E_i: Initial node embeddings [batch_size, num_nodes, h_dim]
             E_all: All node embeddings [num_all_nodes, h_dim]
 
         Returns:

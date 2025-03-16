@@ -124,11 +124,12 @@ class DeepTAN(ltn.LightningModule):
         Initialize the DeepTAN model.
 
         Args:
-            dict_node_names (Dict[str, int]): A dictionary mapping node names to their respective indices.
+            z_dict_node_names (Dict[str, int]): A dictionary mapping node names to their respective indices.
             input_dim (int): The dimension of the input features.
             output_g_label_dim (Optional[int]): The dimension of the output graph label. If None, it defaults to 2.
             is_regression (bool): Whether the task is a regression task.
             class_weights (Optional[List[float]]): A list of label class weights for the loss function.
+            focal_alpha (Optional[List[float]]): A list of alpha values for the focal loss.
             node_emb_dim (int): The dimension of the node embeddings.
             fusion_dims_node_emb (List[int]): A list of dimensions for the fusion layers of node embeddings.
             output_dim_g_emb (int): The dimension of the output graph embeddings.
@@ -137,6 +138,8 @@ class DeepTAN(ltn.LightningModule):
             threshold_subgraph_overlap (float): The threshold for subgraph overlap. Similar subgraphs are merged if their overlap exceeds this threshold.
             n_heads_node_emb (int): The number of attention heads for the node embedding layers.
             n_heads_pooling (int): The number of attention heads for the pooling layers.
+            n_heads_ge_decoder (int): The number of attention heads for the graph embedding decoder.
+            n_heads_label_pred (int): The number of attention heads for the label predictor.
             dropout (float): The dropout rate.
             lr (float): The learning rate.
             chunk_size (int): The chunk size for processing large matrices.
@@ -147,11 +150,7 @@ class DeepTAN(ltn.LightningModule):
         self.dict_node_names = z_dict_node_names
         self.all_node_names = list(z_dict_node_names.keys())
         self.num_all_nodes = len(self.all_node_names)
-        self.register_buffer(
-            "all_node_indices",
-            torch.arange(self.num_all_nodes, dtype=torch.long),
-            persistent=False,
-        )
+        self.register_buffer("all_node_indices", torch.arange(self.num_all_nodes, dtype=torch.long), persistent=False)
 
         self.chunk_size = chunk_size
         self.input_dim = input_dim
@@ -170,7 +169,7 @@ class DeepTAN(ltn.LightningModule):
                 self.focal_alpha = torch.tensor([1.0] * self.output_dim)
         else:
             self.focal_alpha = torch.tensor(focal_alpha)
-        # self.focal_gamma = focal_gamma
+        self.focal_gamma = 0.5
         self.current_epoch_work = 0
         self.current_epoch_tmp = 0
 
@@ -221,23 +220,17 @@ class DeepTAN(ltn.LightningModule):
         # assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
 
         # Check if all node names are valid
-        # print("\nChecking node names...")
         for nodes in batch.node_names:
             assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
 
         # Extract batch information if available, otherwise initialize with zeros
-        node_batch = getattr(
-            batch,
-            "batch",
-            torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device),
-        )
-        # print(f"Batch information: {node_batch}\n")
+        node_batch = getattr(batch, "batch", torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device))
 
+        # Initialize scale factors
         self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
 
-        # Feature extraction
-        # print("\nEmbedding features...")
-        z, E_i, E_all = self.amsgp(
+        # Embedding features
+        z, E_all, ids = self.amsgp(
             node_names=batch.node_names,
             x=batch.x,
             edge_attr=batch.edge_attr,
@@ -245,35 +238,38 @@ class DeepTAN(ltn.LightningModule):
             batch=node_batch,
         )
 
-        # print("\nReconstructing node embeddings...")
-        recon_node_emb, recon_node_val_for_loss_all = self.ge_decoder(z, E_i, E_all)
+        # Reconstruct node embeddings
+        recon_node_emb, recon_node_val_for_loss_all = self.ge_decoder(z, E_all)
 
         # Graph-level label prediction
-        # print("\nPredicting graph-level labels...")
         pred_labels = self.g_label_predictor(z)
 
         # Node-level reconstruction loss
-        # Generate a boolean mask for available nodes [batch_size, num_all_nodes]
-        batch_size = len(batch.node_names)
-        avail_masks = torch.zeros((batch_size, self.num_all_nodes), dtype=torch.bool, device=self.device)
+        predicted_value_for_loss_nonzero = torch.zeros_like(ids, dtype=recon_node_val_for_loss_all.dtype, device=self.device)
+        predicted_value_for_loss_zero = torch.zeros(recon_node_val_for_loss_all.shape[0] * recon_node_val_for_loss_all.shape[1] - len(ids.flatten()), dtype=recon_node_val_for_loss_all.dtype, device=self.device)
 
         # For each batch, fill the mask for available nodes
+        sta_nonezero = 0
+        sta_zero = 0
         for i, nodes in enumerate(batch.node_names):
-            node_indices = [self.dict_node_names[n] for n in nodes]
-            avail_masks[i, node_indices] = True
+            n_nonezero = len(nodes)
+            n_zero = recon_node_val_for_loss_all.shape[1] - n_nonezero
+            node_indices = ids[sta_nonezero : (sta_nonezero + n_nonezero)]
+            mask_ = torch.zeros(recon_node_val_for_loss_all.shape[1], dtype=torch.bool, device=self.device)
+            mask_[node_indices] = True
 
-        # Extract data directly through the mask index
-        avail_recon = recon_node_val_for_loss_all[avail_masks]
-        unavail_recon = recon_node_val_for_loss_all[~avail_masks]
+            predicted_value_for_loss_nonzero[sta_nonezero : (sta_nonezero + n_nonezero)] = recon_node_val_for_loss_all[i, node_indices].flatten()
+            predicted_value_for_loss_zero[sta_zero : (sta_zero + n_zero)] = recon_node_val_for_loss_all[i, ~mask_].squeeze()
+            sta_nonezero += n_nonezero
+            sta_zero += n_zero
 
-        # print("\nReturning results...")
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
-            "label_pred": pred_labels,
-            "node_recon_for_loss": avail_recon,
-            "node_recon_for_loss_zeros": unavail_recon,
             "node_recon_for_loss_all": recon_node_val_for_loss_all,
+            "label_pred": pred_labels,
+            "node_recon_for_loss": predicted_value_for_loss_nonzero,
+            "node_recon_for_loss_zeros": predicted_value_for_loss_zero,
         }
 
     def training_step(self, batch: GData, batch_idx: int):
@@ -324,7 +320,6 @@ class DeepTAN(ltn.LightningModule):
                 "interval": "epoch",
                 "frequency": 1,
                 "monitor": const.dkey.title_val_loss,
-                # "monitor": "val/loss_unweighted",
             },
         }
 
@@ -379,24 +374,23 @@ class DeepTAN(ltn.LightningModule):
         # assert batch.x is not None
         losses = {}
 
-        node_recon_for_loss = outputs["node_recon_for_loss"].squeeze(1)
         node_true_val_for_loss = batch.x.squeeze(1)
 
-        self.metrics_common[f"{stage}_metrics"].update(node_recon_for_loss, node_true_val_for_loss)
+        self.metrics_common[f"{stage}_metrics"].update(outputs["node_recon_for_loss"], node_true_val_for_loss)
 
         # Node reconstruction loss
-        recon_loss = F.mse_loss(node_recon_for_loss, node_true_val_for_loss)
+        recon_loss = F.mse_loss(outputs["node_recon_for_loss"], node_true_val_for_loss)
 
         # kl_loss = F.kl_div(
-        #     F.log_softmax(node_recon_for_loss, dim=1),
+        #     F.log_softmax(outputs["node_recon_for_loss"], dim=1),
         #     F.softmax(node_true_val_for_loss, dim=1),
         #     log_target=True,
         #     reduction="mean",
         # )
 
         recon_loss_zeros = F.mse_loss(
-            outputs["node_recon_for_loss_zeros"].squeeze(1),
-            torch.zeros_like(outputs["node_recon_for_loss_zeros"].squeeze(1)),
+            outputs["node_recon_for_loss_zeros"],
+            torch.zeros_like(outputs["node_recon_for_loss_zeros"]),
         )
 
         # losses["recon_KLD"] = kl_loss
@@ -450,10 +444,9 @@ class DeepTAN(ltn.LightningModule):
 
     def _balance_losses(self, losses: Dict, stage: str):
         # If in the initial epochs, focus only on reconstruction loss
-        if self.current_epoch < 1:
+        if stage == "train" and self.current_epoch < 1:
             self.current_epoch_tmp = self.current_epoch
-            self.g_label_predictor.requires_grad_(False)
-            total_loss = losses["recon"]
+            total_loss = 0.7 * losses["recon"] + 0.3 * losses["label"]
 
         if self.current_epoch_tmp < self.current_epoch:
             self.current_epoch_tmp = self.current_epoch
@@ -461,23 +454,23 @@ class DeepTAN(ltn.LightningModule):
             if self.current_epoch_work > 2:
                 self.current_epoch_work = 0
 
-            if self.current_epoch_work == 0:
-                # Focus on reconstruction loss
-                self.g_label_predictor.requires_grad_(False)
-                self.ge_decoder.requires_grad_(True)
-                self.amsgp.requires_grad_(True)
-            elif self.current_epoch_work == 1:
-                # Focus on label prediction loss
-                self.g_label_predictor.requires_grad_(True)
-                self.ge_decoder.requires_grad_(False)
-                self.amsgp.requires_grad_(False)
-            else:
-                # Dynamic loss scaling
-                self.g_label_predictor.requires_grad_(True)
-                self.ge_decoder.requires_grad_(True)
-                self.amsgp.requires_grad_(True)
+            # if self.current_epoch_work == 0:
+            #     # Focus on reconstruction loss
+            #     self.g_label_predictor.requires_grad_(False)
+            #     self.ge_decoder.requires_grad_(True)
+            #     self.amsgp.requires_grad_(True)
+            # elif self.current_epoch_work == 1:
+            #     # Focus on label prediction loss
+            #     self.g_label_predictor.requires_grad_(True)
+            #     self.ge_decoder.requires_grad_(False)
+            #     self.amsgp.requires_grad_(False)
+            # else:
+            #     # Mix both losses
+            #     self.g_label_predictor.requires_grad_(True)
+            #     self.ge_decoder.requires_grad_(True)
+            #     self.amsgp.requires_grad_(True)
 
-            self.zero_grad(set_to_none=False)
+            # self.zero_grad(set_to_none=False)
 
         if stage == "train":
             if self.current_epoch_work == 0:
@@ -490,14 +483,14 @@ class DeepTAN(ltn.LightningModule):
 
             else:
                 # Dynamic loss scaling
-
+                # EMA?
                 loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
                 rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+                _scale_factors = 1.0 / rel_ratio
+                # _scale_factors = F.softmax(_scale_factors, dim=0)
 
-                _scale_factors = 0.95 * self.scale_factors + 0.05 * (1 / rel_ratio)
-                # Apply softmax and bias
-                _scale_factors = F.softmax(_scale_factors, dim=0)
-                self.scale_factors = 0.1 * _scale_factors + 0.9 * self.scale_factors
+                alpha = 0.1
+                self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
 
                 # Calculate total loss with scaling
                 total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
@@ -530,23 +523,13 @@ class DeepTAN(ltn.LightningModule):
         if not self.trainer.sanity_checking:
             metrics_common = self.metrics_common[f"{stage}_metrics"].compute()
             for name, val in metrics_common.items():
-                self.log(
-                    name,
-                    val,
-                    sync_dist=True,
-                    batch_size=self._get_batch_size(stage),
-                )
+                self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
             self.metrics_common[f"{stage}_metrics"].reset()
 
             if self.output_g_label_dim is not None:
                 metrics_task_label = self.metrics_task_label[f"{stage}_metrics"].compute()
                 for name, val in metrics_task_label.items():
-                    self.log(
-                        name,
-                        val,
-                        sync_dist=True,
-                        batch_size=self._get_batch_size(stage),
-                    )
+                    self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
                 self.metrics_task_label[f"{stage}_metrics"].reset()
 
     def _get_batch_size(self, stage: str) -> int:
@@ -646,7 +629,7 @@ def train_model(
         callbacks=[callback_es, callback_ckpt, lr_monitor],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
-        gradient_clip_val=1.0,
+        gradient_clip_val=3.0,
         gradient_clip_algorithm="norm",
     )
 
@@ -670,10 +653,11 @@ class DeepTANTune:
     DeepTAN hyperparameter tuning class with Optuna integration.
     """
 
-    def __init__(self, args: Dict[str, Any]):
+    def __init__(self, args: Dict[str, Any], existing_model_path: Optional[str] = None):
         """Initialize tuning environment with parameters."""
         # Store configuration parameters
         self.args = args
+        self.existing_model_path = existing_model_path
 
         self.log_dir = self.args["log_dir"]
         if self.log_dir.endswith("/"):
@@ -739,7 +723,13 @@ class DeepTANTune:
         if isinstance(fusion_dims_node_emb, str):
             fusion_dims_node_emb = eval(fusion_dims_node_emb)
 
-        return DeepTAN(
+        if self.existing_model_path is not None:
+            _amsgp, _ge_decoder = self._load_ckpt(self.existing_model_path, self.dict_node_names)
+            output_dim_g_emb = _amsgp.output_dim_g_emb
+        else:
+            output_dim_g_emb = trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"])
+
+        _model = DeepTAN(
             z_dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
             output_g_label_dim=self.output_g_label_dim,
@@ -747,7 +737,7 @@ class DeepTANTune:
             class_weights=self.class_weight,
             node_emb_dim=trial_params.get("node_emb_dim", self.args["node_emb_dim"]),
             fusion_dims_node_emb=fusion_dims_node_emb,
-            output_dim_g_emb=trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"]),
+            output_dim_g_emb=output_dim_g_emb,
             n_hop=trial_params.get("n_hop", self.args["n_hop"]),
             threshold_edge_exist=trial_params.get("threshold_edge_exist", self.args["threshold_edge_exist"]),
             threshold_subgraph_overlap=trial_params.get("threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]),
@@ -760,9 +750,22 @@ class DeepTANTune:
             chunk_size=self.args["chunk_size"],
         )
 
+        if self.existing_model_path is not None:
+            _model.amsgp = _amsgp
+            _model.ge_decoder = _ge_decoder
+
+        return _model
+
     def _init_model(self):
         """This function is used for create model directly without getting ``trial_params``."""
-        return DeepTAN(
+
+        if self.existing_model_path is not None:
+            _amsgp, _ge_decoder = self._load_ckpt(self.existing_model_path, self.dict_node_names)
+            output_dim_g_emb = _amsgp.output_dim_g_emb
+        else:
+            output_dim_g_emb = self.args["output_dim_g_emb"]
+
+        _model = DeepTAN(
             z_dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
             output_g_label_dim=self.output_g_label_dim,
@@ -770,7 +773,7 @@ class DeepTANTune:
             class_weights=self.class_weight,
             node_emb_dim=self.args["node_emb_dim"],
             fusion_dims_node_emb=self.args["fusion_dims_node_emb"],
-            output_dim_g_emb=self.args["output_dim_g_emb"],
+            output_dim_g_emb=output_dim_g_emb,
             n_hop=self.args["n_hop"],
             threshold_edge_exist=self.args["threshold_edge_exist"],
             threshold_subgraph_overlap=self.args["threshold_subgraph_overlap"],
@@ -783,9 +786,52 @@ class DeepTANTune:
             chunk_size=self.args["chunk_size"],
         )
 
-    def _load_ckpt(self, ckpt_path: str, former_dict_node_names: Dict[str, int], target_class: Any = "amsgp"):
-        """Load a checkpoint from the given path and extract its graph embedding module."""
-        pass
+        if self.existing_model_path is not None:
+            _model.amsgp = _amsgp
+            _model.ge_decoder = _ge_decoder
+
+        return _model
+
+    def _load_ckpt(self, existing_model_path: str, dict_node_names_new: Dict[str, int]):
+        r"""
+        Load a checkpoint from the given path and extract its graph embedding and decoding module.
+        """
+        _model_pre = DeepTAN.load_from_checkpoint(existing_model_path, map_location=get_map_location())
+
+        # Extract AMSGP modules
+        _model_amsgp = _model_pre.amsgp
+        _model_ge_decoder = _model_pre.ge_decoder
+        # print(_model_amsgp)
+
+        dict_node_names_former = _model_amsgp.node_embedding_layers.dict_node_names
+        # print("\n", dict_node_names_former)
+        if set(dict_node_names_new.keys()) != set(dict_node_names_former.keys()):
+            print("\nUpdating dict_node_names in NodeEmbedding")
+            new_nodes_to_append = set(dict_node_names_new.keys()) - set(dict_node_names_former.keys())
+            n_node_former = len(dict_node_names_former)
+            n_node_add = len(new_nodes_to_append)
+            new_node_num = n_node_former + n_node_add
+            dict_to_add = {node: n_node_former + i for i, node in enumerate(new_nodes_to_append)}
+            print(f"The feature embedding module is extended from {n_node_former} to {new_node_num} with {n_node_add} new features.\n")
+
+            # Update dict_node_names in NodeEmbedding
+            dict_node_names_former.update(dict_to_add)
+            _model_amsgp.node_embedding_layers.dict_node_names = dict_node_names_former
+
+            # Update self.dict_node_names
+            self.dict_node_names = dict_node_names_former
+
+            # Update node embedding weights by concatenating new weights
+            emb_dim = _model_amsgp.node_embedding_layers.embed.weight.size(1)
+            new_embed = torch.nn.Embedding(new_node_num, emb_dim, scale_grad_by_freq=True, sparse=True)
+            new_embed.weight.data[:n_node_former] = _model_amsgp.node_embedding_layers.embed.weight.data
+            torch.nn.init.xavier_uniform_(new_embed.weight.data[n_node_former:])
+            _model_amsgp.node_embedding_layers.embed = new_embed
+
+        else:
+            print("\ndict_node_names in NodeEmbedding is the same")
+
+        return _model_amsgp, _model_ge_decoder
 
     def _train_on_args(self):
         """This function is used for training the model with the given arguments."""
@@ -824,10 +870,7 @@ class DeepTANTune:
                 "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4]),
                 "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4]),
                 "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4]),
-                "fusion_dims_node_emb": trial.suggest_categorical(
-                    "fusion_dims_node_emb",
-                    fusion_dims_node_emb_list_strings,
-                ),
+                "fusion_dims_node_emb": trial.suggest_categorical("fusion_dims_node_emb", fusion_dims_node_emb_list_strings),
                 "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 512]),
                 "n_hop": trial.suggest_int("n_hop", 1, 2),
             }
@@ -845,7 +888,6 @@ class DeepTANTune:
                 log_dir=os.path.join(self.log_dir, self.log_name, f"trial_{trial.number}"),
                 accumulate_grad_batches=self.args["acc_grad_batch"],
                 accelerator=self.args["accelerator"],
-                # fast_dev_run=True,
             )
 
             if val_loss is None:

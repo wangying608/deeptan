@@ -12,7 +12,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="DeepTAN tuning pipeline.")
     parser.add_argument("--auto_tune", "--atune", action="store_true", help="Whether to perform hyperparameter tuning")
 
-    parser.add_argument("--litdata", "--data", type=str, default="", required=False, help="Path to litdata directory")
+    parser.add_argument("--em", type=str, default="", help="Existing model checkpoint path for loading")
+
+    parser.add_argument("--litdata", "--data", type=str, required=False, help="Path to litdata directory")
     parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
     parser.add_argument("--lr", type=float, default=const.default.lr, help="Learning rate")
     parser.add_argument("--log_dir", "--logdir", type=str, default=".tmp_logs_tune", help="Directory for logging")
@@ -61,9 +63,14 @@ if __name__ == "__main__":
         "nworker": const.default.n_workers,
     }
 
+    if len(args.em) < 3:
+        ckpt = None
+    else:
+        ckpt = args.em
+
     if args.auto_tune:
-        tuner = DeepTANTune(config)
+        tuner = DeepTANTune(config, ckpt)
         tuner.optimize(n_trials=args.ntrials, n_jobs=args.njobs)
     else:
-        trainer = DeepTANTune(config)
+        trainer = DeepTANTune(config, ckpt)
         trainer._train_on_args()

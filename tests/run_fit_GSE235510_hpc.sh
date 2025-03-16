@@ -12,6 +12,7 @@ module load singularity-4.2.1
 MY_HOME=/storage/public/home/2022051346
 
 DEEPTAN_HOME=$MY_HOME/prj/deeptan
+SIF=$DEEPTAN_HOME/deeptan.sif
 
 myscript=run_05_fit_tune.py
 
@@ -25,7 +26,7 @@ seed=42
 optdata=GSE235510_WT_strata
 ntrial=30
 njob=1
-bsize=6
+bsize=8
 agd=4
 
 dirlitdata=$DEEPTAN_HOME/optimized_data/$optdata/seed_$seed
@@ -34,4 +35,4 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-singularity exec --nv $DEEPTAN_HOME/deeptan.sif python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd
+singularity exec --nv -B $DEEPTAN_HOME:$DEEPTAN_HOME $SIF python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd

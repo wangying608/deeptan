@@ -10,25 +10,25 @@ from numpy import ceil
 bs = 32
 accumulate_grad_batches = 1
 lr = 0.0002
-es = 3
+es = 5
 min_epoch = 3
 max_epoch = 50
 chunk_size = 512
 subg_chunk_size = 4
-dropout = 0.1
+dropout = 0.3
 negative_slope = 0.2
 node_emb_dim = 128
 g_emb_dim = 256
 label_pred_hidden_dims = [512, 256, 256]
 fusion_dims_node_emb = [128, 64]
-n_heads_pooling = 4
-n_heads_node_emb = 2
-n_heads_ge_decoder = 2
-n_heads_label_pred = 2
+n_heads_pooling = 8
+n_heads_node_emb = 8
+n_heads_ge_decoder = 8
+n_heads_label_pred = 8
 n_hop = 1
 
 threshold_subg_overlap = 0.95
-threshold_edge_exist = 0.3
+threshold_edge_exist = 0.2
 
 matmul_precision = "high"
 accelerator = "auto"

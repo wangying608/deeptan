@@ -71,14 +71,14 @@ def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
 
 
 class NMICGraphDataset(GDataset):
-    def __init__(self, npz_path: str, labels: str | None):
+    def __init__(self, npz_path: str, labels: str | None, edge_attr_threshold: float = 0.1):
         """
         Initialize the NMIC graph dataset.
 
         Args:
             npz_path: Path to the .npz file containing NMIC results.
             labels: Path to the obs labels.
-            device: Device to store the graph data on.
+            edge_attr_threshold: Threshold for edge attributes.
         """
         super().__init__()
         (
@@ -97,7 +97,11 @@ class NMICGraphDataset(GDataset):
             self.label_dim = None
         else:
             self.labels = pl.read_parquet(labels)
+            if "obs_names" in self.labels.columns:
+                self.labels = self.labels.rename({"obs_names": "bc"})
             self.label_dim = self.labels.shape[1] - 1
+
+        self.edge_attr_threshold = edge_attr_threshold
 
     def len(self):
         return len(self.obs_names)
@@ -117,6 +121,12 @@ class NMICGraphDataset(GDataset):
         edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
 
         edge_indices = self.edge_index[:, edge_mask]
+        edge_attrs = self.edge_attr[edge_mask]
+
+        # Filter edges based on edge_attr threshold
+        edge_attr_mask = edge_attrs > self.edge_attr_threshold
+        edge_indices = edge_indices[:, edge_attr_mask]
+        edge_attrs = edge_attrs[edge_attr_mask]
 
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
@@ -128,7 +138,7 @@ class NMICGraphDataset(GDataset):
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
         edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
-        edge_attrs = torch.tensor(self.edge_attr[edge_mask], dtype=torch.float32).unsqueeze(1)
+        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float32).unsqueeze(1)
 
         node_names = [self.node_names[i] for i in avail_col_indices]
 
@@ -136,10 +146,7 @@ class NMICGraphDataset(GDataset):
         if self.labels is None:
             _y = None
         else:
-            _y = torch.tensor(
-                self.pick_label(self.obs_names[idx]),
-                # dtype=torch.float,
-            )
+            _y = torch.tensor(self.pick_label(self.obs_names[idx]))
         graph_data = GData(
             x=x,
             y=_y,
@@ -202,6 +209,12 @@ class NMICGraphDatasetRely(GDataset):
         edge_mask = np.isin(self.depGDataset.edge_index[0], avail_feat_indices) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
 
         edge_indices = self.depGDataset.edge_index[:, edge_mask]
+        edge_attrs = self.depGDataset.edge_attr[edge_mask]
+
+        # Filter edges based on edge_attr threshold
+        edge_attr_mask = edge_attrs > self.depGDataset.edge_attr_threshold
+        edge_indices = edge_indices[:, edge_attr_mask]
+        edge_attrs = edge_attrs[edge_attr_mask]
 
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
@@ -213,10 +226,7 @@ class NMICGraphDatasetRely(GDataset):
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
         edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
-        edge_attrs = torch.tensor(
-            self.depGDataset.edge_attr[edge_mask],
-            dtype=torch.float32,
-        ).unsqueeze(1)
+        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float32).unsqueeze(1)
 
         node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
 
@@ -245,6 +255,7 @@ class DeepTANDataModule(LightningDataModule):
         files: dict[str, str],
         labels: str | None,
         batch_size: int = 1,
+        edge_attr_threshold: float = 0.1,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:
@@ -254,9 +265,10 @@ class DeepTANDataModule(LightningDataModule):
         self.files = files
         self.labels = labels
         self.batch_size = batch_size
+        self.edge_attr_threshold = edge_attr_threshold
 
     def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.labels)
+        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold)
         self.val = NMICGraphDatasetRely(self.files["val"], self.train)
         self.test = NMICGraphDatasetRely(self.files["tst"], self.train)
         dict_node_names_values = [i for i in range(len(self.train.node_names))]
