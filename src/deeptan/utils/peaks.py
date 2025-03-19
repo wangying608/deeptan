@@ -6,7 +6,7 @@ from scipy.sparse import csr_matrix, hstack
 
 
 def read_peaks(adata: sc.AnnData) -> pl.DataFrame:
-    """Read the peaks data from the AnnData object"""
+    """Read the peaks data from the AnnData object."""
     peaks: list[str] = adata.var[adata.var["feature_types"] == "Peaks"].copy().index.to_list()
     peak_chr = []
     peak_sta = []
@@ -31,13 +31,20 @@ def read_peaks(adata: sc.AnnData) -> pl.DataFrame:
 
 
 class MergePeaks:
-    def __init__(self, adata_list: list[sc.AnnData], output_dir):
-        self.adata_list = adata_list
-        self.output_dir = output_dir
+    r"""
+    Merge overlapping peaks across multiple AnnData objects.
+    """
 
+    def __init__(self, adata_list: list[sc.AnnData]):
+        r"""
+        Initialize the MergePeaks class with a list of AnnData objects.
+
+        Args:
+            adata_list (List[AnnData]): List of AnnData objects containing peak data.
+        """
         # Collect all peaks and sort
         all_peaks = []
-        for adata in self.adata_list:
+        for adata in adata_list:
             peaks_df = read_peaks(adata)
             all_peaks.append(peaks_df)
 
@@ -93,7 +100,7 @@ class MergePeaks:
         return self.merged_peaks
 
     def check(self, merged_peaks: pl.DataFrame | None = None) -> bool:
-        """Check if overlapping peaks exist"""
+        """Check if overlapping peaks exist."""
         if merged_peaks is None:
             merged_peaks = self.merged_peaks
         merged_peaks = merged_peaks.sort(by=["chr", "start", "end"])
@@ -107,16 +114,35 @@ class MergePeaks:
         return True
 
 
+def align_peaks_to_ref(ref_peaks: pl.DataFrame, new_peaks: pl.DataFrame):
+    r"""
+    Align new peaks to the reference peaks.
+    """
+    # Prepare merged peaks with index column
+    ref_peaks_ = ref_peaks.with_row_count("merged_index").sort(by=["chr", "start", "end"])
+
+    # Join original peaks with merged peaks using interval overlap condition
+    overlap_condition = (pl.col("start") <= pl.col("end_merged")) & (pl.col("end") >= pl.col("start_merged"))
+
+    # Perform join and filter overlaps
+    mapping_df = new_peaks.join(
+        ref_peaks_.rename({"start": "start_merged", "end": "end_merged"}),
+        on="chr",
+        how="inner",
+    ).filter(overlap_condition)
+    return mapping_df, ref_peaks_
+
+
 def map_peaks_to_ref(new_h5ad: str, merged_peaks: pl.DataFrame):
     """
     Map new peaks to the merged peaks and make a new anndata.
 
     Args:
-        new_h5ad: Path to the new AnnData h5ad file
-        merged_peaks: DataFrame containing merged peaks from MergePeaks class
+        new_h5ad: Path to the new AnnData h5ad file.
+        merged_peaks: DataFrame containing merged peaks from MergePeaks class. This DataFrame should have columns ['chr', 'start', 'end'].
 
     Returns:
-        A new AnnData object with peaks mapped to the merged reference
+        A new AnnData object with peaks mapped to the merged reference.
     """
     # Load new AnnData object
     adata = sc.read_h5ad(new_h5ad)
@@ -138,18 +164,7 @@ def map_peaks_to_ref(new_h5ad: str, merged_peaks: pl.DataFrame):
     # Get original peaks and ensure sorted order
     original_peaks_df = read_peaks(peaks_adata)
 
-    # Prepare merged peaks with index column
-    merged_peaks = merged_peaks.with_row_count("merged_index").sort(by=["chr", "start", "end"])
-
-    # Join original peaks with merged peaks using interval overlap condition
-    overlap_condition = (pl.col("start") <= pl.col("end_merged")) & (pl.col("end") >= pl.col("start_merged"))
-
-    # Perform join and filter overlaps
-    mapping_df = original_peaks_df.join(
-        merged_peaks.rename({"start": "start_merged", "end": "end_merged"}),
-        on="chr",
-        how="inner",
-    ).filter(overlap_condition)
+    mapping_df, merged_peaks = align_peaks_to_ref(merged_peaks, original_peaks_df)
 
     # Check for unmapped peaks
     if mapping_df.shape[0] != original_peaks_df.shape[0]:

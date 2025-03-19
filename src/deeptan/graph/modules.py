@@ -231,16 +231,16 @@ class AMSGP(torch.nn.Module):
 
             # Compute dynamic centrality
             # print("\nComputing dynamic centrality...")
-            h_mask = h[mask]
+            h_masked = h[mask]
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(
-                h_mask,
+                h_masked,
                 edge_attr[edge_mask] if edge_attr is not None else None,
                 sub_edge_index,
             )
 
             # Generate multiscale subgraphs
             # print("\nGenerating multiscale subgraphs...")
-            subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, centrality, h_mask)
+            subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, centrality, h_masked)
 
             # Create graph embeddings
             # print("\nCreating graph embeddings...")

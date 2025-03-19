@@ -172,6 +172,7 @@ class DeepTAN(ltn.LightningModule):
         self.focal_gamma = 0.5
         self.current_epoch_work = 0
         self.current_epoch_tmp = 0
+        self.loss_smooth = 0.0  # For scaling label loss if label is not None
 
         # Core components
         self.amsgp = AMSGP(
@@ -440,13 +441,14 @@ class DeepTAN(ltn.LightningModule):
         total_loss, unweighted_loss = self._balance_losses(losses, stage)
         losses["loss_unweighted"] = unweighted_loss
         losses["loss"] = total_loss
+        losses["loss_smooth"] = self.loss_smooth
         return losses
 
     def _balance_losses(self, losses: Dict, stage: str):
         # If in the initial epochs, focus only on reconstruction loss
-        if stage == "train" and self.current_epoch < 1:
-            self.current_epoch_tmp = self.current_epoch
-            total_loss = 0.7 * losses["recon"] + 0.3 * losses["label"]
+        # if stage == "train" and self.current_epoch < 1:
+        #     self.current_epoch_tmp = self.current_epoch
+        #     total_loss = losses["recon"]
 
         if self.current_epoch_tmp < self.current_epoch:
             self.current_epoch_tmp = self.current_epoch
@@ -479,26 +481,30 @@ class DeepTAN(ltn.LightningModule):
 
             elif self.current_epoch_work == 1:
                 # Focus on label prediction loss
-                total_loss = losses["label"]
+                total_loss = losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
             else:
                 # Dynamic loss scaling
                 # EMA?
-                loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
-                rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
-                _scale_factors = 1.0 / rel_ratio
-                # _scale_factors = F.softmax(_scale_factors, dim=0)
+                # loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
+                # rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+                # _scale_factors = 1.0 / rel_ratio
+                # # _scale_factors = F.softmax(_scale_factors, dim=0)
 
-                alpha = 0.1
-                self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
+                # alpha = 0.1
+                # self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
 
-                # Calculate total loss with scaling
-                total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+                # # Calculate total loss with scaling
+                # total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+                total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
+
+            self.loss_smooth = 0.2 * total_loss.detach() + 0.8 * self.loss_smooth
 
         else:
-            total_loss = losses["label"] + losses["recon"]
+            total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
-        unweighted_loss = losses["recon"] + losses["label"]
+        unweighted_loss = 0.5 * losses["recon"] + 0.5 * losses["label"]
+
         return total_loss, unweighted_loss
 
     def on_before_optimizer_step(self, optimizer):
@@ -659,6 +665,7 @@ class DeepTANTune:
         self.args = args
         self.existing_model_path = existing_model_path
 
+        self.is_regression = self.args["is_regression"]
         self.log_dir = self.args["log_dir"]
         if self.log_dir.endswith("/"):
             self.log_dir = self.log_dir[:-1]
@@ -671,7 +678,10 @@ class DeepTANTune:
         self._init_data_module()
 
         # Initialize class weights
-        self.class_weight = self._init_class_weights()
+        if not self.is_regression:
+            self.class_weight = self._init_class_weights()
+        else:
+            self.class_weight = None
 
     def _init_data_module(self):
         """Initialize data module based on input parameters."""
@@ -733,7 +743,7 @@ class DeepTANTune:
             z_dict_node_names=self.dict_node_names,
             input_dim=self.args["input_node_emb_dim"],
             output_g_label_dim=self.output_g_label_dim,
-            is_regression=self.args["is_regression"],
+            is_regression=self.is_regression,
             class_weights=self.class_weight,
             node_emb_dim=trial_params.get("node_emb_dim", self.args["node_emb_dim"]),
             fusion_dims_node_emb=fusion_dims_node_emb,
