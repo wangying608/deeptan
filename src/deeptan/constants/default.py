@@ -27,13 +27,14 @@ n_heads_ge_decoder = 8
 n_heads_label_pred = 8
 n_hop = 1
 
-threshold_nmic = 0.2
+threshold_nmic = 0.3
 threshold_subg_overlap = 0.95
 threshold_edge_exist = 0.2
 
 matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
+precision = "16-mixed"
 
 n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.8)))
 
@@ -47,3 +48,23 @@ n_workers = 1
 
 lit_chunk_bytes = "256MB"
 lit_compression = "zstd"
+
+model_config = {
+    "class_weights": None,
+    "use_focal_loss": True,
+    "focal_alpha": None,
+    "node_emb_dim": node_emb_dim,
+    "fusion_dims_node_emb": fusion_dims_node_emb,
+    "output_dim_g_emb": g_emb_dim,
+    "n_hop": n_hop,
+    "threshold_edge_exist": threshold_edge_exist,
+    "threshold_subgraph_overlap": threshold_subg_overlap,
+    "n_heads_node_emb": n_heads_node_emb,
+    "n_heads_pooling": n_heads_pooling,
+    "n_heads_ge_decoder": n_heads_ge_decoder,
+    "n_heads_label_pred": n_heads_label_pred,
+    "dropout": dropout,
+    "lr": lr,
+    "chunk_size": chunk_size,
+    "n_workers": n_workers,
+}

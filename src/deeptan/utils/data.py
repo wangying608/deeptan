@@ -115,7 +115,7 @@ class NMICGraphDataset(GDataset):
         if len(avail_col_indices) < 10:
             print("\nNumber of available features is too small.")
 
-        x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
+        x = torch.tensor(values[avail_col_indices], dtype=torch.float16).unsqueeze(1)
 
         # Filter edges based on available nodes
         edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
@@ -138,7 +138,7 @@ class NMICGraphDataset(GDataset):
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
         edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
-        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float32).unsqueeze(1)
+        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float16).unsqueeze(1)
 
         node_names = [self.node_names[i] for i in avail_col_indices]
 
@@ -181,7 +181,7 @@ class NMICGraphDataset(GDataset):
         if self.labels is None:
             return None
         else:
-            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy().astype(np.float32)
+            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy().astype(np.float16)
             return _label
 
 
@@ -202,7 +202,7 @@ class NMICGraphDatasetRely(GDataset):
         values = self.selected_mat[idx]
         avail_col_indices = np.where(values > 0)[0]
 
-        x = torch.tensor(values[avail_col_indices], dtype=torch.float32).unsqueeze(1)
+        x = torch.tensor(values[avail_col_indices], dtype=torch.float16).unsqueeze(1)
 
         avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
         # Filter edges based on available nodes
@@ -226,7 +226,7 @@ class NMICGraphDatasetRely(GDataset):
             mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
         edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
 
-        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float32).unsqueeze(1)
+        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float16).unsqueeze(1)
 
         node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
 

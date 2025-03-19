@@ -103,22 +103,20 @@ class DeepTAN(ltn.LightningModule):
         input_dim: int,
         output_g_label_dim: Optional[int],
         is_regression: bool,
-        class_weights: Optional[List[float]] = None,
-        use_focal_loss: bool = True,
-        focal_alpha: Optional[List[float]] = None,
-        node_emb_dim: int = 128,
-        fusion_dims_node_emb: List[int] = [128, 64],
-        output_dim_g_emb: int = 192,
-        n_hop: int = const.default.n_hop,
-        threshold_edge_exist: float = const.default.threshold_edge_exist,
-        threshold_subgraph_overlap: float = const.default.threshold_subg_overlap,
-        n_heads_node_emb: int = 2,
-        n_heads_pooling: int = 2,
-        n_heads_ge_decoder: int = 2,
-        n_heads_label_pred: int = 2,
-        dropout: float = const.default.dropout,
-        lr: float = const.default.lr,
-        chunk_size: int = const.default.chunk_size,
+        class_weights: Optional[List[float]],
+        node_emb_dim: int,
+        fusion_dims_node_emb: List[int],
+        output_dim_g_emb: int,
+        n_hop: int,
+        threshold_edge_exist: float,
+        threshold_subgraph_overlap: float,
+        n_heads_node_emb: int,
+        n_heads_pooling: int,
+        n_heads_ge_decoder: int,
+        n_heads_label_pred: int,
+        dropout: float,
+        lr: float,
+        chunk_size: int,
     ):
         r"""
         Initialize the DeepTAN model.
@@ -161,7 +159,8 @@ class DeepTAN(ltn.LightningModule):
         self.output_dim = output_g_label_dim if output_g_label_dim is not None else 2
         self.class_weights = class_weights
 
-        self.use_focal_loss = use_focal_loss
+        self.use_focal_loss = True
+        focal_alpha = None
         if focal_alpha is None:
             if class_weights is not None:
                 self.focal_alpha = torch.tensor(class_weights)
@@ -628,7 +627,7 @@ def train_model(
         accumulate_grad_batches=accumulate_grad_batches,
         logger=logger_tr,
         log_every_n_steps=1,
-        precision="16-mixed",
+        precision=const.default.precision,
         accelerator=accelerator,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
@@ -697,7 +696,7 @@ class DeepTANTune:
             self.datamodule = DeepTANDataModuleLit(
                 self.args["litdata"],
                 batch_size=self.args["bs"],
-                n_workers=self.args["nworker"],
+                n_workers=self.args["n_workers"],
             )
             self.datamodule.setup()
 
@@ -736,8 +735,18 @@ class DeepTANTune:
         if self.existing_model_path is not None:
             _amsgp, _ge_decoder = self._load_ckpt(self.existing_model_path, self.dict_node_names)
             output_dim_g_emb = _amsgp.output_dim_g_emb
+            node_emb_dim = _amsgp.node_embedding_layers.embedding_dim
+            fusion_dims_node_emb = _amsgp.node_embedding_layers.fusion_dims
+            n_heads_node_emb = _amsgp.node_embedding_layers.n_heads
+            n_heads_pooling = _amsgp.xgat_pool.num_heads
+            n_hop = _amsgp.n_hop
         else:
             output_dim_g_emb = trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"])
+            node_emb_dim = trial_params.get("node_emb_dim", self.args["node_emb_dim"])
+            fusion_dims_node_emb = trial_params.get("fusion_dims_node_emb", self.args["fusion_dims_node_emb"])
+            n_heads_node_emb = trial_params.get("n_heads_node_emb", self.args["n_heads_node_emb"])
+            n_heads_pooling = trial_params.get("n_heads_pooling", self.args["n_heads_pooling"])
+            n_hop = trial_params.get("n_hop", self.args["n_hop"])
 
         _model = DeepTAN(
             z_dict_node_names=self.dict_node_names,
@@ -745,14 +754,14 @@ class DeepTANTune:
             output_g_label_dim=self.output_g_label_dim,
             is_regression=self.is_regression,
             class_weights=self.class_weight,
-            node_emb_dim=trial_params.get("node_emb_dim", self.args["node_emb_dim"]),
+            node_emb_dim=node_emb_dim,
             fusion_dims_node_emb=fusion_dims_node_emb,
             output_dim_g_emb=output_dim_g_emb,
-            n_hop=trial_params.get("n_hop", self.args["n_hop"]),
+            n_hop=n_hop,
             threshold_edge_exist=trial_params.get("threshold_edge_exist", self.args["threshold_edge_exist"]),
             threshold_subgraph_overlap=trial_params.get("threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]),
-            n_heads_node_emb=trial_params.get("n_heads_node_emb", self.args["n_heads_node_emb"]),
-            n_heads_pooling=trial_params.get("n_heads_pooling", self.args["n_heads_pooling"]),
+            n_heads_node_emb=n_heads_node_emb,
+            n_heads_pooling=n_heads_pooling,
             n_heads_ge_decoder=trial_params.get("n_heads_ge_decoder", self.args["n_heads_ge_decoder"]),
             n_heads_label_pred=trial_params.get("n_heads_label_pred", self.args["n_heads_label_pred"]),
             dropout=trial_params.get("dropout", self.args["dropout"]),
@@ -772,8 +781,18 @@ class DeepTANTune:
         if self.existing_model_path is not None:
             _amsgp, _ge_decoder = self._load_ckpt(self.existing_model_path, self.dict_node_names)
             output_dim_g_emb = _amsgp.output_dim_g_emb
+            node_emb_dim = _amsgp.node_embedding_layers.embedding_dim
+            fusion_dims_node_emb = _amsgp.node_embedding_layers.fusion_dims
+            n_heads_node_emb = _amsgp.node_embedding_layers.n_heads
+            n_heads_pooling = _amsgp.xgat_pool.num_heads
+            n_hop = _amsgp.n_hop
         else:
             output_dim_g_emb = self.args["output_dim_g_emb"]
+            node_emb_dim = self.args["node_emb_dim"]
+            fusion_dims_node_emb = self.args["fusion_dims_node_emb"]
+            n_heads_node_emb = self.args["n_heads_node_emb"]
+            n_heads_pooling = self.args["n_heads_pooling"]
+            n_hop = self.args["n_hop"]
 
         _model = DeepTAN(
             z_dict_node_names=self.dict_node_names,
@@ -781,14 +800,14 @@ class DeepTANTune:
             output_g_label_dim=self.output_g_label_dim,
             is_regression=self.args["is_regression"],
             class_weights=self.class_weight,
-            node_emb_dim=self.args["node_emb_dim"],
-            fusion_dims_node_emb=self.args["fusion_dims_node_emb"],
+            node_emb_dim=node_emb_dim,
+            fusion_dims_node_emb=fusion_dims_node_emb,
             output_dim_g_emb=output_dim_g_emb,
-            n_hop=self.args["n_hop"],
+            n_hop=n_hop,
             threshold_edge_exist=self.args["threshold_edge_exist"],
             threshold_subgraph_overlap=self.args["threshold_subgraph_overlap"],
-            n_heads_node_emb=self.args["n_heads_node_emb"],
-            n_heads_pooling=self.args["n_heads_pooling"],
+            n_heads_node_emb=n_heads_node_emb,
+            n_heads_pooling=n_heads_pooling,
             n_heads_ge_decoder=self.args["n_heads_ge_decoder"],
             n_heads_label_pred=self.args["n_heads_label_pred"],
             dropout=self.args["dropout"],
@@ -806,7 +825,8 @@ class DeepTANTune:
         r"""
         Load a checkpoint from the given path and extract its graph embedding and decoding module.
         """
-        _model_pre = DeepTAN.load_from_checkpoint(existing_model_path, map_location=get_map_location())
+        path_hparams = os.path.join(os.path.dirname(existing_model_path), "version_0", "hparams.yaml")
+        _model_pre = DeepTAN.load_from_checkpoint(existing_model_path, map_location=get_map_location(), hparams_file=path_hparams)
 
         # Extract AMSGP modules
         _model_amsgp = _model_pre.amsgp
@@ -881,7 +901,7 @@ class DeepTANTune:
                 "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4]),
                 "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4]),
                 "fusion_dims_node_emb": trial.suggest_categorical("fusion_dims_node_emb", fusion_dims_node_emb_list_strings),
-                "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 512]),
+                "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 384, 512]),
                 "n_hop": trial.suggest_int("n_hop", 1, 2),
             }
 

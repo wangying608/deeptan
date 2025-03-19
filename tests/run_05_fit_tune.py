@@ -33,35 +33,24 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
-    print(f"\nArguments: {args}\n")
-
-    # Example configuration (should match original argparse parameters)
-    config = {
-        "log_dir": args.log_dir,
-        "litdata": args.litdata,
-        "bs": args.bs,
-        "lr": args.lr,
-        "chunk_size": args.chunk_size,
-        "is_regression": args.is_regression,
-        "accelerator": args.accelerator,
-        "input_node_emb_dim": args.input_node_emb_dim,
-        "acc_grad_batch": args.acc_grad_batch,
-        "es": const.default.es,
-        "node_emb_dim": const.default.node_emb_dim,
-        "fusion_dims_node_emb": const.default.fusion_dims_node_emb,
-        "output_dim_g_emb": const.default.g_emb_dim,
-        "n_hop": const.default.n_hop,
-        "threshold_edge_exist": const.default.threshold_edge_exist,
-        "threshold_subgraph_overlap": const.default.threshold_subg_overlap,
-        "n_heads_node_emb": const.default.n_heads_node_emb,
-        "n_heads_pooling": const.default.n_heads_pooling,
-        "n_heads_ge_decoder": const.default.n_heads_ge_decoder,
-        "n_heads_label_pred": const.default.n_heads_label_pred,
-        "dropout": const.default.dropout,
-        "max_ep": const.default.max_epoch,
-        "min_ep": const.default.min_epoch,
-        "nworker": const.default.n_workers,
-    }
+    _config = const.default.model_config.copy()
+    _config.update(
+        {
+            "es": const.default.es,
+            "max_ep": const.default.max_epoch,
+            "min_ep": const.default.min_epoch,
+            "log_dir": args.log_dir,
+            "litdata": args.litdata,
+            "bs": args.bs,
+            "lr": args.lr,
+            "chunk_size": args.chunk_size,
+            "is_regression": args.is_regression,
+            "accelerator": args.accelerator,
+            "input_node_emb_dim": args.input_node_emb_dim,
+            "acc_grad_batch": args.acc_grad_batch,
+        }
+    )
+    print(f"\n🔧Configuration:\n{_config}\n")
 
     if len(args.em) < 3:
         ckpt = None
@@ -69,8 +58,8 @@ if __name__ == "__main__":
         ckpt = args.em
 
     if args.auto_tune:
-        tuner = DeepTANTune(config, ckpt)
+        tuner = DeepTANTune(_config, ckpt)
         tuner.optimize(n_trials=args.ntrials, n_jobs=args.njobs)
     else:
-        trainer = DeepTANTune(config, ckpt)
+        trainer = DeepTANTune(_config, ckpt)
         trainer._train_on_args()

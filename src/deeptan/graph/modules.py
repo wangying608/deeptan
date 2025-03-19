@@ -552,7 +552,8 @@ class WGATLayer_chunked(MessagePassing):
 
             # Transform and weight features
             x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
-            x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
+            # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
+            x_trans = torch.einsum("b l h, b l -> b h", x_trans, a)
             h_chunks.append(x_trans)
 
         h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
@@ -614,7 +615,8 @@ class WGATLayer(MessagePassing):
         a = F.softmax(a, dim=0)
 
         x_trans = self.trans(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
-        x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
+        # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
+        x_trans = torch.einsum("b l h, b l -> b h", x_trans, a)
 
         return x_trans
 
