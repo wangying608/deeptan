@@ -13,6 +13,7 @@ def parse_args():
     parser.add_argument("--auto_tune", "--atune", action="store_true", help="Whether to perform hyperparameter tuning")
 
     parser.add_argument("--em", type=str, default="", help="Existing model checkpoint path for loading")
+    parser.add_argument("--focus", type=str, default="None", help="Focus on a specific task, choose from 'None', 'recon', 'label'")
 
     parser.add_argument("--litdata", "--data", type=str, required=False, help="Path to litdata directory")
     parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
@@ -50,16 +51,24 @@ if __name__ == "__main__":
             "acc_grad_batch": args.acc_grad_batch,
         }
     )
-    print(f"\n🔧Configuration:\n{_config}\n")
+    print(f"\n🔧Configuration⚙️\n{_config}\n")
 
     if len(args.em) < 3:
         ckpt = None
     else:
         ckpt = args.em
 
-    if args.auto_tune:
-        tuner = DeepTANTune(_config, ckpt)
-        tuner.optimize(n_trials=args.ntrials, n_jobs=args.njobs)
+    if args.focus == "label":
+        focus = "label"
+    elif args.focus == "recon":
+        focus = "recon"
+    elif args.focus == "None":
+        focus = None
     else:
-        trainer = DeepTANTune(_config, ckpt)
+        raise ValueError("Invalid focus option. Choose from 'None', 'recon' or 'label'.")
+
+    trainer = DeepTANTune(_config, ckpt, focus)
+    if args.auto_tune:
+        trainer.optimize(n_trials=args.ntrials, n_jobs=args.njobs)
+    else:
         trainer._train_on_args()

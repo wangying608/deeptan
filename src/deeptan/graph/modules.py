@@ -183,7 +183,7 @@ class AMSGP(torch.nn.Module):
         self.att_pool = SelfAtt_(output_dim, self.dropout, True)
 
         # Global graph pooling
-        self.global_xgat_pool = WGATLayer(output_dim, output_dim, heads, self.dropout)
+        self.global_xgat_pool = WGATLayer_chunked(output_dim, output_dim, heads, self.dropout, self.chunk_size)
         self.global_att_pool = SelfAtt_(output_dim, self.dropout, True)
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
@@ -607,16 +607,17 @@ class WGATLayer(MessagePassing):
         h_j = self.W_j(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
         h = h_i + h_j
 
-        a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
+        # a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
+        h = (h * self.attn.unsqueeze(0)).sum(dim=-1)
 
         if edge_attr is not None:
-            a = a * edge_attr.view(-1, 1)  # .expand(-1, self.num_heads)
+            h = h * edge_attr.view(-1, 1)  # .expand(-1, self.num_heads)
 
-        a = F.softmax(a, dim=0)
+        h = F.softmax(h, dim=0)
 
         x_trans = self.trans(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
         # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
-        x_trans = torch.einsum("b l h, b l -> b h", x_trans, a)
+        x_trans = torch.einsum("b l h, b l -> b h", x_trans, h)
 
         return x_trans
 

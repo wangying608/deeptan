@@ -90,6 +90,12 @@ class NMICGraphDataset(GDataset):
             self.node_names,
         ) = self.read_nmic_results(npz_path)
 
+        # Check if obs_names and node_names are unique
+        if len(set(self.obs_names)) != len(self.obs_names):
+            raise ValueError("obs_names must be unique")
+        if len(set(self.node_names)) != len(self.node_names):
+            raise ValueError("node_names must be unique")
+
         self.mat = np.log1p(self.mat)
 
         if labels is None:
@@ -115,11 +121,8 @@ class NMICGraphDataset(GDataset):
         if len(avail_col_indices) < 10:
             print("\nNumber of available features is too small.")
 
-        x = torch.tensor(values[avail_col_indices], dtype=torch.float16).unsqueeze(1)
-
         # Filter edges based on available nodes
         edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
-
         edge_indices = self.edge_index[:, edge_mask]
         edge_attrs = self.edge_attr[edge_mask]
 
@@ -128,34 +131,49 @@ class NMICGraphDataset(GDataset):
         edge_indices = edge_indices[:, edge_attr_mask]
         edge_attrs = edge_attrs[edge_attr_mask]
 
+        # Filter nodes based on used edge indices
+        if edge_indices.size > 0:
+            used_feat_indices = np.unique(edge_indices.flatten())
+            final_node_mask = np.isin(avail_feat_indices, used_feat_indices)
+            final_col_indices = avail_col_indices[final_node_mask]
+            final_feat_indices = avail_feat_indices[final_node_mask]
+        else:
+            # Handle no edge case: retain the first 10 features or raise an exception
+            final_col_indices = avail_col_indices[:10]
+            final_feat_indices = avail_feat_indices[:10]
+            if len(final_col_indices) < 1:
+                raise ValueError("No valid features after filtering")
+
+        # Re-generate the feature matrix
+        x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)
+
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)}
-        # Apply the mapping to edge_indices
-        mapped_edge_indices = edge_indices.copy()
-        for i in range(edge_indices.shape[1]):
-            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
-            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
+        feat_mapping = {feat: idx for idx, feat in enumerate(final_feat_indices)}
+        if edge_indices.size > 0:
+            mapped_edges = np.vectorize(lambda x: feat_mapping.get(x, -1))(edge_indices)
+            valid_mask = (mapped_edges[0] != -1) & (mapped_edges[1] != -1)
+            edge_index = torch.tensor(mapped_edges[:, valid_mask], dtype=torch.long)
+            edge_attrs = torch.tensor(edge_attrs[valid_mask], dtype=torch.float16).unsqueeze(1)
+        else:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attrs = torch.tensor([], dtype=torch.float16).unsqueeze(1)
 
-        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float16).unsqueeze(1)
-
-        node_names = [self.node_names[i] for i in avail_col_indices]
+        # Reorder node names based on final column indices
+        node_names = [self.node_names[i] for i in final_col_indices]
 
         # Create the graph data object
-        if self.labels is None:
-            _y = None
-        else:
-            _y = torch.tensor(self.pick_label(self.obs_names[idx]))
-        graph_data = GData(
+        _y = None
+        if self.labels is not None:
+            _y = torch.tensor(self.pick_label(self.obs_names[idx]), dtype=torch.float16)
+
+        return GData(
             x=x,
             y=_y,
             edge_index=edge_index,
             edge_attr=edge_attrs,
             node_names=node_names,
         )
-
-        return graph_data
 
     def read_nmic_results(self, npz_path: str):
         r"""
@@ -200,14 +218,11 @@ class NMICGraphDatasetRely(GDataset):
 
     def get(self, idx):
         values = self.selected_mat[idx]
-        avail_col_indices = np.where(values > 0)[0]
-
-        x = torch.tensor(values[avail_col_indices], dtype=torch.float16).unsqueeze(1)
-
+        avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
         avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
+
         # Filter edges based on available nodes
         edge_mask = np.isin(self.depGDataset.edge_index[0], avail_feat_indices) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
-
         edge_indices = self.depGDataset.edge_index[:, edge_mask]
         edge_attrs = self.depGDataset.edge_attr[edge_mask]
 
@@ -216,37 +231,49 @@ class NMICGraphDatasetRely(GDataset):
         edge_indices = edge_indices[:, edge_attr_mask]
         edge_attrs = edge_attrs[edge_attr_mask]
 
+        # Filter nodes based on used edge indices
+        if edge_indices.size > 0:
+            used_feat_indices = np.unique(edge_indices.flatten())
+            final_node_mask = np.isin(avail_feat_indices, used_feat_indices)
+            final_col_indices = avail_col_indices[final_node_mask]
+            final_feat_indices = avail_feat_indices[final_node_mask]
+        else:
+            # Handle no edge case: retain the first 10 features or raise an exception
+            final_col_indices = avail_col_indices[:10]
+            final_feat_indices = avail_feat_indices[:10]
+            if len(final_col_indices) < 1:
+                raise ValueError("No valid features after filtering")
+
+        # Re-generate the feature matrix
+        x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)
+
         # Map edge indices to current feature indices
         # Create a mapping from original feature indices to current indices
-        feat_index_to_avail_index = {feat_idx: i for i, feat_idx in enumerate(avail_feat_indices)}
-        # Apply the mapping to edge_indices
-        mapped_edge_indices = edge_indices.copy()
-        for i in range(edge_indices.shape[1]):
-            mapped_edge_indices[0, i] = feat_index_to_avail_index[edge_indices[0, i]]
-            mapped_edge_indices[1, i] = feat_index_to_avail_index[edge_indices[1, i]]
-        edge_index = torch.tensor(mapped_edge_indices, dtype=torch.long)
+        feat_mapping = {feat: idx for idx, feat in enumerate(final_feat_indices)}
+        if edge_indices.size > 0:
+            mapped_edges = np.vectorize(lambda x: feat_mapping.get(x, -1))(edge_indices)
+            valid_mask = (mapped_edges[0] != -1) & (mapped_edges[1] != -1)
+            edge_index = torch.tensor(mapped_edges[:, valid_mask], dtype=torch.long)
+            edge_attrs = torch.tensor(edge_attrs[valid_mask], dtype=torch.float16).unsqueeze(1)
+        else:
+            edge_index = torch.empty((2, 0), dtype=torch.long)
+            edge_attrs = torch.tensor([], dtype=torch.float16).unsqueeze(1)
 
-        edge_attrs = torch.tensor(edge_attrs, dtype=torch.float16).unsqueeze(1)
-
-        node_names = [self.depGDataset.node_names[i] for i in avail_col_indices]
+        # Reorder node names based on final column indices
+        node_names = [self.depGDataset.node_names[i] for i in final_col_indices]
 
         # Create the graph data object
-        if self.depGDataset.labels is None:
-            _y = None
-        else:
-            _y = torch.tensor(
-                self.depGDataset.pick_label(self.obs_names[idx]),
-                # dtype=torch.float,
-            )
-        graph_data = GData(
+        _y = None
+        if self.depGDataset.labels is not None:
+            _y = torch.tensor(self.depGDataset.pick_label(self.obs_names[idx]), dtype=torch.float16)
+
+        return GData(
             x=x,
             y=_y,
             edge_index=edge_index,
             edge_attr=edge_attrs,
             node_names=node_names,
         )
-
-        return graph_data
 
 
 class DeepTANDataModule(LightningDataModule):

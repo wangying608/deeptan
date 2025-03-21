@@ -22,3 +22,6 @@ profile*.svg
 perf*.svg
 lightning_logs/
 optimized_data/
+*.npy
+*.npz
+*.csv

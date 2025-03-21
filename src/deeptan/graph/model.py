@@ -24,7 +24,6 @@ from lightning.pytorch.callbacks import (
 from lightning.pytorch.loggers import TensorBoardLogger
 
 # from lightning.pytorch.profilers import AdvancedProfiler
-from litdata import StreamingDataLoader, StreamingDataset
 from torch.optim.adamw import AdamW
 from torch_geometric.data import Data as GData
 from torchmetrics import MetricCollection
@@ -49,7 +48,7 @@ from deeptan.utils.data import (
     DeepTANDataModuleLit,
     celltypes_class_weights,
 )
-from deeptan.utils.uni import collate_fn, get_map_location, random_string, time_string
+from deeptan.utils.uni import get_map_location, random_string, time_string
 
 print(ascii_art)
 torch.set_float32_matmul_precision(const.default.matmul_precision)
@@ -117,6 +116,7 @@ class DeepTAN(ltn.LightningModule):
         dropout: float,
         lr: float,
         chunk_size: int,
+        focus_task: Optional[str] = None,
     ):
         r"""
         Initialize the DeepTAN model.
@@ -141,6 +141,7 @@ class DeepTAN(ltn.LightningModule):
             dropout (float): The dropout rate.
             lr (float): The learning rate.
             chunk_size (int): The chunk size for processing large matrices.
+            focus_task (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`).
         """
         super().__init__()
         self.save_hyperparameters()
@@ -149,6 +150,7 @@ class DeepTAN(ltn.LightningModule):
         self.all_node_names = list(z_dict_node_names.keys())
         self.num_all_nodes = len(self.all_node_names)
         self.register_buffer("all_node_indices", torch.arange(self.num_all_nodes, dtype=torch.long), persistent=False)
+        self.focus_task = focus_task
 
         self.chunk_size = chunk_size
         self.input_dim = input_dim
@@ -212,6 +214,11 @@ class DeepTAN(ltn.LightningModule):
 
         # Metrics and initialization
         self._init_metrics()
+
+        # if self.focus_task == "label":
+        #     self.g_label_predictor.requires_grad_(True)
+        #     self.ge_decoder.requires_grad_(False)
+        #     self.amsgp.requires_grad_(False)
 
     def forward(self, batch: GData) -> Dict[str, Any]:
         # assert batch.x is not None, "Input x is None"
@@ -473,42 +480,50 @@ class DeepTAN(ltn.LightningModule):
 
             # self.zero_grad(set_to_none=False)
 
-        if stage == "train":
-            if self.current_epoch_work == 0:
-                # Focus on reconstruction loss
-                total_loss = losses["recon"]
+        if self.focus_task is None:
+            if stage == "train":
+                if self.current_epoch_work == 0:
+                    # Focus on reconstruction loss
+                    total_loss = losses["recon"]
 
-            elif self.current_epoch_work == 1:
-                # Focus on label prediction loss
-                total_loss = losses["label"] / (losses["label"] / self.loss_smooth).detach()
+                elif self.current_epoch_work == 1:
+                    # Focus on label prediction loss
+                    total_loss = losses["label"] / (losses["label"] / self.loss_smooth).detach()
+
+                else:
+                    # Dynamic loss scaling
+                    # EMA?
+                    # loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
+                    # rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
+                    # _scale_factors = 1.0 / rel_ratio
+                    # # _scale_factors = F.softmax(_scale_factors, dim=0)
+
+                    # alpha = 0.1
+                    # self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
+
+                    # # Calculate total loss with scaling
+                    # total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+                    total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
+
+                self.loss_smooth = 0.2 * total_loss.detach() + 0.8 * self.loss_smooth
 
             else:
-                # Dynamic loss scaling
-                # EMA?
-                # loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
-                # rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
-                # _scale_factors = 1.0 / rel_ratio
-                # # _scale_factors = F.softmax(_scale_factors, dim=0)
-
-                # alpha = 0.1
-                # self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
-
-                # # Calculate total loss with scaling
-                # total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
                 total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
-            self.loss_smooth = 0.2 * total_loss.detach() + 0.8 * self.loss_smooth
-
+        elif self.focus_task == "label":
+            total_loss = losses["label"]
+        elif self.focus_task == "recon":
+            total_loss = losses["recon"]
         else:
-            total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
+            raise ValueError("Invalid focus_task specified.")
 
         unweighted_loss = 0.5 * losses["recon"] + 0.5 * losses["label"]
 
         return total_loss, unweighted_loss
 
-    def on_before_optimizer_step(self, optimizer):
-        self.log("scale_factors/label", self.scale_factors[0])
-        self.log("scale_factors/recon", self.scale_factors[1])
+    # def on_before_optimizer_step(self, optimizer):
+    #     self.log("scale_factors/label", self.scale_factors[0])
+    #     self.log("scale_factors/recon", self.scale_factors[1])
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.log("loss_params/focal_gamma", self.focal_gamma)
@@ -658,11 +673,19 @@ class DeepTANTune:
     DeepTAN hyperparameter tuning class with Optuna integration.
     """
 
-    def __init__(self, args: Dict[str, Any], existing_model_path: Optional[str] = None):
-        """Initialize tuning environment with parameters."""
+    def __init__(self, args: Dict[str, Any], existing_model_path: Optional[str] = None, focus: Optional[str] = None):
+        r"""
+        Initialize tuning environment with parameters.
+
+        Args:
+            args (Dict[str, Any]): Dictionary containing hyperparameters and other configurations.
+            existing_model_path (Optional[str]): Path to an existing model to resume training from.
+            focus (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`).
+        """
         # Store configuration parameters
         self.args = args
         self.existing_model_path = existing_model_path
+        self.focus = focus
 
         self.is_regression = self.args["is_regression"]
         self.log_dir = self.args["log_dir"]
@@ -767,6 +790,7 @@ class DeepTANTune:
             dropout=trial_params.get("dropout", self.args["dropout"]),
             lr=trial_params.get("lr", self.args["lr"]),
             chunk_size=self.args["chunk_size"],
+            focus_task=self.focus,
         )
 
         if self.existing_model_path is not None:
@@ -813,6 +837,7 @@ class DeepTANTune:
             dropout=self.args["dropout"],
             lr=self.args["lr"],
             chunk_size=self.args["chunk_size"],
+            focus_task=self.focus,
         )
 
         if self.existing_model_path is not None:
@@ -950,77 +975,3 @@ class DeepTANTune:
         print("  Params:")
         for key, value in trial.params.items():
             print(f"    {key}: {value}")
-
-
-def predict(
-    model_ckpt_path: str,
-    litdata_dir: str,
-    output_pickle_path: str,
-    map_location: Optional[str] = None,
-    batch_size: int = 1,
-):
-    # Load a DeepTAN model
-    model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
-    # Freeze the model
-    model.eval()
-    model.freeze()
-
-    # Load the LitData dataset
-    dataloader = StreamingDataLoader(StreamingDataset(litdata_dir), batch_size=batch_size, collate_fn=collate_fn)
-
-    # Predict
-    trainer = Trainer(logger=False)
-    results = trainer.predict(model=model, dataloaders=dataloader)
-
-    assert results is not None
-    # Save the results to a pickle file
-    with open(output_pickle_path, "wb") as f:
-        pickle.dump(results, f)
-
-
-def process_results(pickle_path: str, output_pkl: str):
-    # Load the results
-    with open(pickle_path, "rb") as f:
-        results = pickle.load(f)
-    g_embedding = []
-    node_recon = []
-    node_recon_for_loss = []
-    node_recon_all = []
-    labels = []
-
-    for i_batch in range(len(results)):
-        g_embedding.append(results[i_batch]["embedding"])
-        node_recon.append(results[i_batch]["node_recon"])
-        node_recon_for_loss.append(results[i_batch]["node_recon_for_loss"])
-        node_recon_all.append(results[i_batch]["node_recon_for_loss_all"])
-        labels.append(results[i_batch]["label_pred"])
-
-    g_embedding = torch.cat(g_embedding, dim=0)
-    node_recon = torch.cat(node_recon, dim=0)
-    node_recon_all = torch.cat(node_recon_all, dim=0)
-    labels = torch.cat(labels, dim=0)
-
-    # Convert to numpy arrays for further processing
-    g_embedding_np = g_embedding.detach().cpu().numpy()
-    node_recon_np = node_recon.detach().cpu().numpy()
-    node_recon_all_np = node_recon_all.detach().cpu().numpy()
-    labels_np = labels.detach().cpu().numpy()
-
-    # Save the results as a dictionary in a pickle file
-    results_dict = {
-        "g_embedding": g_embedding_np,
-        "node_recon": node_recon_np,
-        "node_recon_all": node_recon_all_np,
-        "labels": labels_np,
-    }
-
-    print(results_dict.keys())
-    # For each key in the results dictionary, print data shape
-    for key in results_dict.keys():
-        print(f"Key: {key}, Shape: {results_dict[key].shape}")
-
-    if not output_pkl.endswith(".pkl"):
-        output_pkl += ".pkl"
-    print(f"Saving results to {output_pkl}")
-    with open(output_pkl, "wb") as f:
-        pickle.dump(results_dict, f)

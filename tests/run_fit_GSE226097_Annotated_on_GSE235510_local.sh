@@ -17,7 +17,7 @@ seed=42
 optdata=GSE226097_Annotated_split_strata
 ntrial=20
 njob=1
-bsize=64
+bsize=32
 agd=1
 lr=0.0001
 
