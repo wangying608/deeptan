@@ -20,7 +20,12 @@ def predict(
     batch_size: int = 1,
 ):
     # Load a DeepTAN model
-    model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
+    path_hparams = os.path.join(os.path.dirname(model_ckpt_path), "version_0", "hparams.yaml")
+    if os.path.exists(path_hparams):
+        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location), hparams_file=path_hparams)
+    else:
+        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
+
     # Freeze the model
     model.eval()
     model.freeze()
@@ -95,15 +100,17 @@ def process_results(pickle_path: str, output_pkl: str):
 
 
 def compute_feature_correlations(
+    output_npz: str,
     pickle_path: Optional[str] = None,
     node_recon: Optional[np.ndarray] = None,
     labels: Optional[np.ndarray] = None,
-    device: str = "cuda",
-) -> np.ndarray:
+    device: Optional[str] = None,
+):
     """
     Compute feature correlation matrix.
 
     Args:
+        output_npy: Path to output npy file containing correlation matrix
         pickle_path: Path to pickle file containing processed results
         node_recon: 3D array of shape (n_samples, n_features, dim)
         labels: 1D array of shape (n_samples,)
@@ -112,6 +119,7 @@ def compute_feature_correlations(
     Returns:
         Correlation matrix of shape (n_features, n_features)
     """
+    device = get_map_location(device)
     # --- Input Validation ---
     if pickle_path is not None:
         with open(pickle_path, "rb") as f:
@@ -156,21 +164,17 @@ def compute_feature_correlations(
     with torch.no_grad():
         corr_matrix = torch.where(denominator != 0, sum_xy / denominator, torch.zeros_like(denominator))
 
+    # Compute weighted correlation matrix
+    mean_x_matrix = sum_x / n_samples
+    mean_x_matrix = torch.abs(mean_x_matrix)
+    # [0,1]
+    mean_x_matrix = mean_x_matrix / mean_x_matrix.max()
+    corr_weighted = corr_matrix * mean_x_matrix
+    output_weighted = corr_weighted.cpu().numpy()
+    print(f"\n🔥Correlation matrix shape: {output_weighted.shape}")
+
     # Move results back to CPU and convert to numpy
     output = corr_matrix.cpu().numpy()
-    print(f"\n🔥Correlation matrix shape: {output.shape}")
-    np.save("correlation_matrix.npy", output)
 
-    return output
-
-
-# Example usage
-# if __name__ == "__main__":
-#     # Test with small synthetic data
-#     node_recon = np.random.randn(100, 50, 16)  # 100 samples, 50 features, 16-dim
-#     labels = np.random.randn(100)
-
-#     # Should return (50, 50) matrix with values in [-1, 1]
-#     corr_matrix = compute_feature_correlations(None, node_recon, labels)
-#     print(f"\nCorrelation matrix shape: {corr_matrix.shape}")
-#     print(f"Correlation range: ({corr_matrix.min():.2f}, {corr_matrix.max():.2f})")
+    # Save output_weighted and output to a npz
+    np.savez(output_npz, corr_matrix=output, corr_weighted=output_weighted)

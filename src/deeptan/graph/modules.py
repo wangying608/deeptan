@@ -530,6 +530,9 @@ class WGATLayer_chunked(MessagePassing):
 
     def message(self, x_i, x_j, edge_attr):
         num_edges = x_i.size(0)
+        if num_edges == 0:
+            print("Empty edge index, returning zeros.")
+            return torch.zeros_like(x_i)
         h_chunks = []
 
         # Process in chunks to reduce peak memory
@@ -556,7 +559,7 @@ class WGATLayer_chunked(MessagePassing):
             x_trans = torch.einsum("b l h, b l -> b h", x_trans, a)
             h_chunks.append(x_trans)
 
-        h = torch.cat(h_chunks, dim=0)  # if h_chunks else torch.tensor([], device=x_i.device)
+        h = torch.cat(h_chunks, dim=0)
         return h
 
 

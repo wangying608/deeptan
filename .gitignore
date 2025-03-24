@@ -25,3 +25,4 @@ optimized_data/
 *.npy
 *.npz
 *.csv
+*.zip

@@ -39,7 +39,7 @@ fn cv_array2d(
         let tmp_array = Array1::from(sorted_f_i);
         let complete_feat_sd = &tmp_array.std(1.0);
         let complete_feat_mean = &tmp_array.mean().unwrap().abs();
-        if *complete_feat_mean < 0.0001 {
+        if *complete_feat_mean < 0.01 {
             tmp_cv_vals[n_windows] = 0.0;
         } else {
             tmp_cv_vals[n_windows] = complete_feat_sd / complete_feat_mean;

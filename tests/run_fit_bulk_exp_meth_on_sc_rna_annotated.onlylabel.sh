@@ -3,10 +3,11 @@
 mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
 # SIF=/home/wuch/prjs/git_nwafu/DeepTAN/deeptan.sif
 # mypython=/home/wuch/miniforge3/envs/sc/bin/python
+storedir=/mnt/hdd2/homext/wuch/xn2p
 myscript=run_05_fit_tune.py
 
-storedir=/mnt/hdd2/homext/wuch/xn2p
-optdata=bulk_exp_meth_nmic_g_mincv2.0_minmi0.6_0.72_log1p_ft16
+# optdata=bulk_exp_meth_nmic_g_mincv2.0_minmi0.6_0.72_log1p_ft16
+optdata=bulk_exp_meth
 folder=seed_42
 ntrial=20
 njob=1

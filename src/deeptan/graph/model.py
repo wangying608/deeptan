@@ -919,14 +919,14 @@ class DeepTANTune:
             # Suggest hyperparameters
             params = {
                 "lr": trial.suggest_float("lr", 1e-5, 1e-3, log=True),
-                "dropout": trial.suggest_float("dropout", 0.0, 0.6, step=0.2),
+                "dropout": trial.suggest_float("dropout", 0.0, 0.4, step=0.2),
                 "node_emb_dim": trial.suggest_categorical("node_emb_dim", [128, 192, 256]),
-                "n_heads_node_emb": trial.suggest_categorical("n_heads_node_emb", [2, 4]),
-                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4]),
-                "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4]),
-                "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4]),
+                "n_heads_node_emb": trial.suggest_categorical("n_heads_node_emb", [2, 4, 8]),
+                "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4, 8]),
+                "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4, 8]),
+                "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4, 8]),
                 "fusion_dims_node_emb": trial.suggest_categorical("fusion_dims_node_emb", fusion_dims_node_emb_list_strings),
-                "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [128, 192, 256, 384, 512]),
+                "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [192, 256, 384]),
                 "n_hop": trial.suggest_int("n_hop", 1, 2),
             }
 
