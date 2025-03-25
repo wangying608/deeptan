@@ -768,7 +768,7 @@ class DeepTANTune:
         else:
             output_dim_g_emb = trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"])
             node_emb_dim = trial_params.get("node_emb_dim", self.args["node_emb_dim"])
-            fusion_dims_node_emb = trial_params.get("fusion_dims_node_emb", self.args["fusion_dims_node_emb"])
+            fusion_dims_node_emb = fusion_dims_node_emb
             n_heads_node_emb = trial_params.get("n_heads_node_emb", self.args["n_heads_node_emb"])
             n_heads_pooling = trial_params.get("n_heads_pooling", self.args["n_heads_pooling"])
             n_hop = trial_params.get("n_hop", self.args["n_hop"])
