@@ -10,8 +10,9 @@ optdata=sc_multiome
 folder=seed_42
 ntrial=20
 njob=1
-bsize=4
+bs=4
 agd=8
+ck=256
 
 dirlitdata=$storedir/data/optimized_data/$optdata/$folder
 dirlogs=$storedir/run/logs/$optdata/$folder
@@ -19,4 +20,4 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-$mypython $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd
+$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd

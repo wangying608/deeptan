@@ -461,6 +461,8 @@ class DeepTAN(ltn.LightningModule):
             self.current_epoch_work = self.current_epoch_work + 1
             if self.current_epoch_work > 2:
                 self.current_epoch_work = 0
+            if self.current_epoch < 3:
+                self.current_epoch_work = 0
 
             # if self.current_epoch_work == 0:
             #     # Focus on reconstruction loss
@@ -505,7 +507,7 @@ class DeepTAN(ltn.LightningModule):
                     # total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
                     total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
-                self.loss_smooth = 0.2 * total_loss.detach() + 0.8 * self.loss_smooth
+                self.loss_smooth = 0.1 * total_loss.detach() + 0.9 * self.loss_smooth
 
             else:
                 total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()

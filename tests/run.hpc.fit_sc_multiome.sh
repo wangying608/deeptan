@@ -16,8 +16,7 @@ SIF=$DEEPTAN_HOME/deeptan.sif
 
 myscript=run_05_fit_tune.py
 
-# seed=$1
-folder=$1
+# folder=$1
 # optdata=$2
 # ntrial=$3
 # njob=$4
@@ -25,7 +24,7 @@ folder=$1
 # agd=$6
 
 optdata=sc_multiome
-# folder=seed_42
+folder=seed_42
 ntrial=30
 njob=1
 bsize=8
