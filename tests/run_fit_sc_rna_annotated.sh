@@ -1,4 +1,3 @@
-# sh run_fit_local.sh 42 GSE226097_Annotated_split_strata 20 1 32 1
 #!/bin/bash
 
 mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
@@ -11,9 +10,9 @@ optdata=sc_rna_annotated
 folder=seed_42
 ntrial=20
 njob=1
-bsize=32
+bs=32
 agd=1
-lr=0.0001
+ck=256
 
 dirlitdata=$storedir/data/optimized_data/$optdata/$folder
 dirlogs=$storedir/run/logs/$optdata/$folder
@@ -21,5 +20,5 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-$mypython $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --lr $lr
-# singularity exec --nv -B $storedir:$storedir $SIF python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --atune
+$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --atune
+# singularity exec --nv -B $storedir:$storedir $SIF python $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --atune

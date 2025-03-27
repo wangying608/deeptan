@@ -299,10 +299,19 @@ class DeepTAN(ltn.LightningModule):
         if batch.y is not None:
             preds = outputs["label_pred"]
             targets = torch.as_tensor(batch.y, device=preds.device)
-            if not self.is_regression:
+
+            if self.is_regression:
+                self.metrics_task_regr[f"{stage}_metrics"].update(preds, targets)
+            else:
                 if targets.ndim > 1 and targets.shape[1] > 1:
-                    targets = torch.argmax(targets, dim=1)
-            self.metrics_task_label[f"{stage}_metrics"].update(preds, targets)
+                    targets_class = torch.argmax(targets, dim=1)
+                else:
+                    targets_class = targets.long()
+
+                self.metrics_task_class[f"{stage}_metrics"].update(preds, targets_class)
+
+                probs = F.softmax(preds, dim=1)
+                self.metrics_task_prob[f"{stage}_metrics"].update(probs, targets_class)
 
         # Logging metrics and losses
         self._log_metrics(losses, stage)
@@ -352,7 +361,7 @@ class DeepTAN(ltn.LightningModule):
             }
         )
         if self.is_regression:
-            metrics_task_label = MetricCollection(
+            metrics_task_regr = MetricCollection(
                 {
                     "MSE": MeanSquaredError(num_outputs=self.output_dim),
                     "MAE": MeanAbsoluteError(num_outputs=self.output_dim),
@@ -360,8 +369,11 @@ class DeepTAN(ltn.LightningModule):
                     "RMSE": MeanSquaredError(num_outputs=self.output_dim, squared=False),
                 }
             )
+
+            self.metrics_task_regr = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_regr.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
+
         else:
-            metrics_task_label = MetricCollection(
+            metrics_task_class = MetricCollection(
                 {
                     "F1_weighted": MulticlassF1Score(num_classes=self.output_dim, average="weighted"),
                     "F1_macro": MulticlassF1Score(num_classes=self.output_dim, average="macro"),
@@ -369,13 +381,19 @@ class DeepTAN(ltn.LightningModule):
                     "Accuracy": MulticlassAccuracy(num_classes=self.output_dim),
                     "Precision": MulticlassPrecision(num_classes=self.output_dim, average="weighted"),
                     "Recall": MulticlassRecall(num_classes=self.output_dim, average="weighted"),
-                    "AUROC": MulticlassAUROC(num_classes=self.output_dim, average="macro"),
+                }
+            )
+            metrics_task_prob = MetricCollection(
+                {
+                    "AUROC": MulticlassAUROC(num_classes=self.output_dim, average="macro", thresholds=None),
                 }
             )
 
+            self.metrics_task_class = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_class.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
+            self.metrics_task_prob = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_prob.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
+
         # Create metrics for all stages
         self.metrics_common = torch.nn.ModuleDict({f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_") for k in ["train", "val", "test"]})
-        self.metrics_task_label = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_label.clone(prefix=k + "/label_") for k in ["train", "val", "test"]})
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
         # assert batch.x is not None
@@ -549,10 +567,21 @@ class DeepTAN(ltn.LightningModule):
             self.metrics_common[f"{stage}_metrics"].reset()
 
             if self.output_g_label_dim is not None:
-                metrics_task_label = self.metrics_task_label[f"{stage}_metrics"].compute()
-                for name, val in metrics_task_label.items():
-                    self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
-                self.metrics_task_label[f"{stage}_metrics"].reset()
+                if self.is_regression:
+                    metrics_task_regr = self.metrics_task_regr[f"{stage}_metrics"].compute()
+                    for name, val in metrics_task_regr.items():
+                        self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
+                    self.metrics_task_regr[f"{stage}_metrics"].reset()
+                else:
+                    metrics_task_class = self.metrics_task_class[f"{stage}_metrics"].compute()
+                    for name, val in metrics_task_class.items():
+                        self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
+                    self.metrics_task_class[f"{stage}_metrics"].reset()
+
+                    metrics_task_prob = self.metrics_task_prob[f"{stage}_metrics"].compute()
+                    for name, val in metrics_task_prob.items():
+                        self.log(name, val, sync_dist=True, batch_size=self._get_batch_size(stage))
+                    self.metrics_task_prob[f"{stage}_metrics"].reset()
 
     def _get_batch_size(self, stage: str) -> int:
         if stage == "train":

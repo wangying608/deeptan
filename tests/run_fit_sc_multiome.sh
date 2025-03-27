@@ -20,4 +20,4 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd
+$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --atune

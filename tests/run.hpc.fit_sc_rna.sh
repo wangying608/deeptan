@@ -1,8 +1,8 @@
 #!/bin/bash
 #JSUB -J deeptan_sc_rna_annotated
 #JSUB -q gpu
-#JSUB -n 4
-#JSUB -gpgpu '1 mig=4'
+#JSUB -n 1
+#JSUB -gpgpu '1 mig=1'
 #JSUB -o log_out.%J
 #JSUB -e log_err.%J
 
