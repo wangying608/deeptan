@@ -378,14 +378,14 @@ class DeepTAN(ltn.LightningModule):
                     "F1_weighted": MulticlassF1Score(num_classes=self.output_dim, average="weighted"),
                     "F1_macro": MulticlassF1Score(num_classes=self.output_dim, average="macro"),
                     "F1_micro": MulticlassF1Score(num_classes=self.output_dim, average="micro"),
-                    "Accuracy": MulticlassAccuracy(num_classes=self.output_dim),
+                    "Accuracy": MulticlassAccuracy(num_classes=self.output_dim, average="weighted"),
                     "Precision": MulticlassPrecision(num_classes=self.output_dim, average="weighted"),
                     "Recall": MulticlassRecall(num_classes=self.output_dim, average="weighted"),
                 }
             )
             metrics_task_prob = MetricCollection(
                 {
-                    "AUROC": MulticlassAUROC(num_classes=self.output_dim, average="macro", thresholds=None),
+                    "AUROC": MulticlassAUROC(num_classes=self.output_dim, average="weighted", thresholds=None),
                 }
             )
 
@@ -470,9 +470,6 @@ class DeepTAN(ltn.LightningModule):
 
     def _balance_losses(self, losses: Dict, stage: str):
         # If in the initial epochs, focus only on reconstruction loss
-        # if stage == "train" and self.current_epoch < 1:
-        #     self.current_epoch_tmp = self.current_epoch
-        #     total_loss = losses["recon"]
 
         if self.current_epoch_tmp < self.current_epoch:
             self.current_epoch_tmp = self.current_epoch
@@ -511,18 +508,7 @@ class DeepTAN(ltn.LightningModule):
                     total_loss = losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
                 else:
-                    # Dynamic loss scaling
-                    # EMA?
-                    # loss_ratio = torch.stack([losses["label"].detach(), losses["recon"].detach()])
-                    # rel_ratio = loss_ratio / (loss_ratio.mean() + 1e-8)
-                    # _scale_factors = 1.0 / rel_ratio
-                    # # _scale_factors = F.softmax(_scale_factors, dim=0)
-
-                    # alpha = 0.1
-                    # self.scale_factors = alpha * _scale_factors + (1.0 - alpha) * self.scale_factors
-
-                    # # Calculate total loss with scaling
-                    # total_loss = losses["label"] * self.scale_factors[0] + losses["recon"] * self.scale_factors[1]
+                    # Calculate total loss with dynamic scaling
                     total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
 
                 self.loss_smooth = 0.1 * total_loss.detach() + 0.9 * self.loss_smooth
@@ -540,10 +526,6 @@ class DeepTAN(ltn.LightningModule):
         unweighted_loss = 0.5 * losses["recon"] + 0.5 * losses["label"]
 
         return total_loss, unweighted_loss
-
-    # def on_before_optimizer_step(self, optimizer):
-    #     self.log("scale_factors/label", self.scale_factors[0])
-    #     self.log("scale_factors/recon", self.scale_factors[1])
 
     def on_train_batch_end(self, outputs, batch, batch_idx):
         self.log("loss_params/focal_gamma", self.focal_gamma)
@@ -592,32 +574,6 @@ class DeepTAN(ltn.LightningModule):
             return self.trainer.test_dataloaders.batch_size if self.trainer.test_dataloaders is not None else 1
         return 1
 
-    def save_components(self, save_dir: str):
-        """
-        Save core components separately
-        """
-        os.makedirs(save_dir, exist_ok=True)
-        components = {
-            "amsgp": self.amsgp,
-            "ge_decoder": self.ge_decoder,
-            "g_label_predictor": self.g_label_predictor,
-        }
-        for name, module in components.items():
-            torch.save(
-                {"state_dict": module.state_dict()},
-                os.path.join(save_dir, f"{name}.pt"),
-            )
-
-    @classmethod
-    def load_component(cls, ckpt_path: str, target_class: Any):
-        """
-        Load a specific component
-        """
-        ckpt = torch.load(ckpt_path, map_location="cuda" if torch.cuda.is_available() else "cpu")
-        instance = target_class.__new__(target_class)
-        instance.load_state_dict(ckpt["state_dict"])
-        return instance
-
 
 def train_model(
     model: Any,
@@ -643,8 +599,6 @@ def train_model(
         accelerator (str): The accelerator to use.
         fast_dev_run (bool): Whether to run a fast development run.
     """
-
-    # torch.autograd.set_detect_anomaly(True)
 
     callback_es = EarlyStopping(
         # monitor=const.dkey.title_val_loss,
@@ -887,10 +841,8 @@ class DeepTANTune:
         # Extract AMSGP modules
         _model_amsgp = _model_pre.amsgp
         _model_ge_decoder = _model_pre.ge_decoder
-        # print(_model_amsgp)
 
         dict_node_names_former = _model_amsgp.node_embedding_layers.dict_node_names
-        # print("\n", dict_node_names_former)
         if set(dict_node_names_new.keys()) != set(dict_node_names_former.keys()):
             print("\nUpdating dict_node_names in NodeEmbedding")
             new_nodes_to_append = set(dict_node_names_new.keys()) - set(dict_node_names_former.keys())

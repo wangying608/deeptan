@@ -234,7 +234,7 @@ class AMSGP(torch.nn.Module):
             h_masked = h[mask]
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(
                 h_masked,
-                edge_attr[edge_mask] if edge_attr is not None else None,
+                # edge_attr[edge_mask] if edge_attr is not None else None,
                 sub_edge_index,
             )
 
@@ -254,7 +254,8 @@ class AMSGP(torch.nn.Module):
         # Stack all graph embeddings
         return torch.stack(graph_embs), E_all, ids
 
-    def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
+    # def _calculate_dynamic_centrality(self, h, edge_attr, edge_index):
+    def _calculate_dynamic_centrality(self, h, edge_index):
         with torch.no_grad():
             row, col = edge_index
             num_edges = edge_index.size(1)
@@ -273,16 +274,18 @@ class AMSGP(torch.nn.Module):
             min_sim_ = sim_.min()
             max_sim_ = sim_.max()
             sim_ = (sim_ - min_sim_) / (max_sim_ - min_sim_) if max_sim_ - min_sim_ != 0 else sim_
-            sim_ = sim_.clamp(0, 1)
+            # sim_ = sim_.clamp(0, 1)
 
             # Combine with edge attributes
-            edge_weight = sim_ * edge_attr.view(-1) if edge_attr is not None else sim_
+            # edge_weight = sim_ * edge_attr.view(-1) if edge_attr is not None else sim_
 
             # Filter edges
-            mask = edge_weight > self.thre_edge_exist
+            # mask = edge_weight > self.thre_edge_exist
+            mask = sim_ > self.thre_edge_exist
 
         filtered_edge = edge_index[:, mask]
-        filtered_weight = edge_weight[mask]
+        # filtered_weight = edge_weight[mask]
+        filtered_weight = sim_[mask]
 
         # Compute node centrality
         centrality = torch.zeros(h.size(0), device=h.device)
