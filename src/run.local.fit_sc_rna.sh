@@ -1,0 +1,1 @@
+../tests/run.local.fit_sc_rna.sh

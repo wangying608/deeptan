@@ -20,6 +20,7 @@ def parse_args():
     parser.add_argument("--tst_parquet", type=str, required=True, help="Path to test data in .parquet format")
     parser.add_argument("--output_dir", type=str, default=".tmp_data_optimized", help="Directory for logging")
     parser.add_argument("--thre_mi", type=float, default=const.default.threshold_nmic, help="Threshold for edge attribute")
+    parser.add_argument("--in_feat", type=str, default="", help="Path to a .csv with header, containing a list of features to specify. If None, all features are used")
     parser.add_argument("--n_workers", type=int, default=const.default.n_threads, help="Number of workers for data loading")
 
     return parser.parse_args()
@@ -33,12 +34,23 @@ if __name__ == "__main__":
     else:
         labels = args.labels
 
+    if len(args.in_feat) < 2:
+        specify_features = None
+    else:
+        specify_features = args.in_feat
+
     files_fit = {
         const.dkey.abbr_train: args.trn_npz,
         const.dkey.abbr_val: args.val_parquet,
         const.dkey.abbr_test: args.tst_parquet,
     }
-    datamodule = DeepTANDataModule(files_fit, labels, batch_size=args.bs, edge_attr_threshold=args.thre_mi)
+    datamodule = DeepTANDataModule(
+        files_fit,
+        labels,
+        batch_size=args.bs,
+        edge_attr_threshold=args.thre_mi,
+        specify_features=specify_features,
+    )
     datamodule.setup()
 
     # Copy original training data to output directory for saving node_names and g_label_dim

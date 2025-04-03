@@ -23,4 +23,6 @@ mkdir -p $dirlogs
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 $mypython $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --em $path_ckpt --lr $lr
+# singularity exec --nv -B $storedir:$storedir $SIF which python
+# singularity exec --nv -B $storedir:$storedir $SIF python -m pip list
 # singularity exec --nv -B $storedir:$storedir $SIF python $myscript --data $dirlitdata --bs $bsize --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --atune

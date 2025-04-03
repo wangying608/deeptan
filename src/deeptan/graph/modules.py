@@ -749,7 +749,6 @@ class GLabelPredictor(nn.Module):
             input_dim = dim
         layers.append(nn.LayerNorm(dim))
         layers.append(nn.Linear(input_dim, output_dim))
-        layers.append(nn.GELU())
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

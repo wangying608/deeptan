@@ -227,8 +227,8 @@ class DeepTAN(ltn.LightningModule):
         # assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
 
         # Check if all node names are valid
-        for nodes in batch.node_names:
-            assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
+        # for nodes in batch.node_names:
+        #     assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
 
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(batch, "batch", torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device))

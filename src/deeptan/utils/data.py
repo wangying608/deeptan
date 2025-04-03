@@ -3,7 +3,7 @@ Graph data module.
 """
 
 import os
-from typing import List
+from typing import List, Union
 
 import anndata
 import numpy as np
@@ -71,7 +71,14 @@ def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
 
 
 class NMICGraphDataset(GDataset):
-    def __init__(self, npz_path: str, labels: str | None, edge_attr_threshold: float = 0.1):
+    def __init__(
+        self,
+        npz_path: str,
+        labels: str | None,
+        edge_attr_threshold: float = 0.1,
+        specify_features: Union[None, List[str]] = None,
+        if_log1p: bool = True,
+    ):
         """
         Initialize the NMIC graph dataset.
 
@@ -79,6 +86,8 @@ class NMICGraphDataset(GDataset):
             npz_path: Path to the .npz file containing NMIC results.
             labels: Path to the obs labels.
             edge_attr_threshold: Threshold for edge attributes.
+            specify_features: List of features to specify. If None, all features are used.
+            if_log1p: Whether to apply log1p transformation to the data.
         """
         super().__init__()
         (
@@ -96,7 +105,8 @@ class NMICGraphDataset(GDataset):
         if len(set(self.node_names)) != len(self.node_names):
             raise ValueError("node_names must be unique")
 
-        self.mat = np.log1p(self.mat)
+        if if_log1p:
+            self.mat = np.log1p(self.mat)
 
         if labels is None:
             self.labels = None
@@ -108,6 +118,15 @@ class NMICGraphDataset(GDataset):
             self.label_dim = self.labels.shape[1] - 1
 
         self.edge_attr_threshold = edge_attr_threshold
+        self.specify_features = specify_features
+
+        if self.specify_features is not None:
+            # Interact with self.node_names using set
+            self.node_names_for_dict = list(set(self.node_names).intersection(set(self.specify_features)))
+            print(f"\nNumber of node names for dictionary after intersection: {len(self.node_names_for_dict)}")
+        else:
+            self.node_names_for_dict = self.node_names
+            print(f"\nNumber of node names for dictionary: {len(self.node_names_for_dict)}")
 
     def len(self):
         return len(self.obs_names)
@@ -117,6 +136,16 @@ class NMICGraphDataset(GDataset):
         avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
         avail_feat_indices = self.mat_feat_indices[avail_col_indices]
 
+        # Apply specify_features filter if provided
+        if self.specify_features is not None:
+            # Find indices of specified features
+            specified_feat_indices = [self.mat_feat_indices[i] for i, _name in enumerate(self.node_names) if _name in self.node_names_for_dict]
+            # Filter avail_feat_indices to only include specified features
+            mask = np.isin(avail_feat_indices, specified_feat_indices)
+            avail_col_indices = avail_col_indices[mask]
+            avail_feat_indices = avail_feat_indices[mask]
+        # print(f"\nAvailable features: {len(avail_feat_indices)}")
+
         # If no features are available?
         if len(avail_col_indices) < 10:
             print("\nNumber of available features is too small.")
@@ -125,11 +154,13 @@ class NMICGraphDataset(GDataset):
         edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
         edge_indices = self.edge_index[:, edge_mask]
         edge_attrs = self.edge_attr[edge_mask]
+        # print(f"\nNumber of edges after filtering: {len(edge_indices[0])}")
 
         # Filter edges based on edge_attr threshold
         edge_attr_mask = edge_attrs > self.edge_attr_threshold
         edge_indices = edge_indices[:, edge_attr_mask]
         edge_attrs = edge_attrs[edge_attr_mask]
+        # print(f"\nNumber of edges after filtering: {len(edge_indices[0])}")
 
         # Filter nodes based on used edge indices
         if edge_indices.size > 0:
@@ -143,6 +174,7 @@ class NMICGraphDataset(GDataset):
             final_feat_indices = avail_feat_indices[:10]
             if len(final_col_indices) < 1:
                 raise ValueError("No valid features after filtering")
+        # print(f"\nNumber of nodes after filtering: {len(final_col_indices)}")
 
         # Re-generate the feature matrix
         x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)
@@ -204,14 +236,20 @@ class NMICGraphDataset(GDataset):
 
 
 class NMICGraphDatasetRely(GDataset):
-    def __init__(self, parquet_path: str, depGDataset: NMICGraphDataset):
+    def __init__(
+        self,
+        parquet_path: str,
+        depGDataset: NMICGraphDataset,
+        if_log1p: bool = True,
+    ):
         super().__init__()
         self.depGDataset = depGDataset
         df = pl.read_parquet(parquet_path)
         self.obs_names = df[df.columns[0]].to_list()
         # Extract relevant data
         self.selected_mat = df.select(depGDataset.node_names).to_numpy()
-        self.selected_mat = np.log1p(self.selected_mat)
+        if if_log1p:
+            self.selected_mat = np.log1p(self.selected_mat)
 
     def len(self):
         return self.selected_mat.shape[0]
@@ -220,6 +258,15 @@ class NMICGraphDatasetRely(GDataset):
         values = self.selected_mat[idx]
         avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
         avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
+
+        # Apply specify_features filter if provided
+        if self.depGDataset.specify_features is not None:
+            # Find indices of specified features
+            specified_feat_indices = [self.depGDataset.mat_feat_indices[i] for i, _name in enumerate(self.depGDataset.node_names) if _name in self.depGDataset.node_names_for_dict]
+            # Filter avail_feat_indices to only include specified features
+            mask = np.isin(avail_feat_indices, specified_feat_indices)
+            avail_col_indices = avail_col_indices[mask]
+            avail_feat_indices = avail_feat_indices[mask]
 
         # Filter edges based on available nodes
         edge_mask = np.isin(self.depGDataset.edge_index[0], avail_feat_indices) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
@@ -283,6 +330,8 @@ class DeepTANDataModule(LightningDataModule):
         labels: str | None,
         batch_size: int = 1,
         edge_attr_threshold: float = 0.1,
+        specify_features: Union[None, str, List[str]] = None,
+        if_log1p: bool = True,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:
@@ -293,13 +342,21 @@ class DeepTANDataModule(LightningDataModule):
         self.labels = labels
         self.batch_size = batch_size
         self.edge_attr_threshold = edge_attr_threshold
+        self.if_log1p = if_log1p
+
+        if isinstance(specify_features, str):
+            if not specify_features.endswith(".csv"):
+                raise ValueError("specify_features must be a .csv file")
+            self.specify_features = pl.read_csv(specify_features, has_header=True, infer_schema=False).to_series().to_list()
+        else:
+            self.specify_features = specify_features
 
     def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold)
-        self.val = NMICGraphDatasetRely(self.files["val"], self.train)
-        self.test = NMICGraphDatasetRely(self.files["tst"], self.train)
-        dict_node_names_values = [i for i in range(len(self.train.node_names))]
-        self.dict_node_names = dict(zip(self.train.node_names, dict_node_names_values))
+        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold, self.specify_features, self.if_log1p)
+        self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.if_log1p)
+        self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.if_log1p)
+        dict_node_names_values = [i for i in range(len(self.train.node_names_for_dict))]
+        self.dict_node_names = dict(zip(self.train.node_names_for_dict, dict_node_names_values))
         self.label_dim = self.train.label_dim
 
     def train_dataloader(self):
