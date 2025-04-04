@@ -1,26 +1,16 @@
 #!/bin/bash
-#JSUB -J deeptan_sc_rna_annotated
-#JSUB -q gpu
-#JSUB -n 5
-#JSUB -gpgpu '1 mig=4'
-#JSUB -o log_out.%J
-#JSUB -e log_err.%J
 
-module purge
-module load singularity-4.2.1
-
-MY_HOME=/storage/public/home/2022051346
-DEEPTAN_HOME=$MY_HOME/prj/deeptan
+DEEPTAN_HOME=/mnt/hdd2/homext/wuch/xn2p
 SIF=$DEEPTAN_HOME/deeptan.sif
 myscript=run_05_fit_tune.py
 
 optdata=sc_rna_annotated
 folder=seed_42
 ntrial=20
-njob=4
-bs=32
+njob=1
+bs=16
 agd=2
-ck=512
+ck=256
 
 dirlitdata_t=$DEEPTAN_HOME/data/optimized_data/$optdata/$folder
 dirlitdata_v=/mnt/litdata

@@ -737,18 +737,20 @@ class GLabelPredictor(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float, n_heads: int):
         super().__init__()
 
-        layers = [
-            SelfAtt_(input_dim, dropout),
-            nn.LayerNorm(input_dim),
-        ]
-        for dim in hidden_dims:
+        # layers = [
+        #     SelfAtt_(input_dim, dropout),
+        #     nn.LayerNorm(input_dim),
+        # ]
+        _in_dim = input_dim
+        layers = []
+        for _dim in hidden_dims:
             layers += [
-                nn.Linear(input_dim, dim),
+                nn.Linear(_in_dim, _dim),
                 nn.GELU(),
             ]
-            input_dim = dim
-        layers.append(nn.LayerNorm(dim))
-        layers.append(nn.Linear(input_dim, output_dim))
+            _in_dim = _dim
+        layers.append(nn.LayerNorm(_in_dim))
+        layers.append(nn.Linear(_in_dim, output_dim))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

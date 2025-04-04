@@ -11,11 +11,11 @@ readme = "README.md"
 requires-python = ">=3.12, <3.13"
 dependencies = [
     "lightning>=2.5.0.post0",
-    "litdata==0.2.42",
+    "litdata==0.2.44",
     "mosaicml-streaming>=0.11.0",
     "optuna>=4.2.0",
     "optuna-dashboard>=0.17.0",
-    "polars>=1.22.0",
+    "polars>=1.26.0",
     "pyarrow>=19.0.0",
     "pyg-lib>=0.4.0",
     "scanpy>=1.10.4",

@@ -1,5 +1,5 @@
 #!/bin/bash
-#JSUB -J deeptan_sc_rna_annotated
+#JSUB -J deeptan_sc_multiome
 #JSUB -q gpu
 #JSUB -n 5
 #JSUB -gpgpu '1 mig=4'
@@ -14,7 +14,7 @@ DEEPTAN_HOME=$MY_HOME/prj/deeptan
 SIF=$DEEPTAN_HOME/deeptan.sif
 myscript=run_05_fit_tune.py
 
-optdata=sc_rna_annotated
+optdata=sc_multiome
 folder=seed_42
 ntrial=20
 njob=4

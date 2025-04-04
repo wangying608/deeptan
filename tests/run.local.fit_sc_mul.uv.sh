@@ -1,21 +1,19 @@
 #!/bin/bash
 
+DEEPTAN_HOME=/mnt/hdd2/homext/wuch/xn2p
 mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
-# SIF=/home/wuch/prjs/git_nwafu/DeepTAN/deeptan.sif
-# mypython=/home/wuch/miniforge3/envs/sc/bin/python
-storedir=/mnt/hdd2/homext/wuch/xn2p
 myscript=run_05_fit_tune.py
 
-optdata=sc_multiome
+optdata=sc_multiome_minmi0.35_top2000
 folder=seed_42
 ntrial=20
 njob=1
-bs=4
-agd=8
+bs=16
+agd=2
 ck=256
 
-dirlitdata=$storedir/data/optimized_data/$optdata/$folder
-dirlogs=$storedir/run/logs/$optdata/$folder
+dirlitdata=$DEEPTAN_HOME/data/optimized_data/$optdata/$folder
+dirlogs=$DEEPTAN_HOME/run/logs/$optdata/$folder
 mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
