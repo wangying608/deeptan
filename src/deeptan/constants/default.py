@@ -50,6 +50,7 @@ lit_chunk_bytes = "256MB"
 lit_compression = "zstd"
 
 model_config = {
+    "guide_gat": True,
     "class_weights": None,
     "use_focal_loss": True,
     "focal_alpha": None,

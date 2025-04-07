@@ -2,11 +2,11 @@
 
 DEEPTAN_HOME=/mnt/hdd2/homext/wuch/xn2p
 SIF=$DEEPTAN_HOME/deeptan.sif
-# mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
 myscript=run_05_fit_tune.py
 
-optdata=bulk_exp_meth
+optdata=sc_multiome_minmi0.35_top2000
 folder=seed_42
+task_name=multitask
 ntrial=20
 njob=1
 bs=16
@@ -18,7 +18,7 @@ dirlitdata_v=/mnt/litdata
 
 dirlogs_t=$DEEPTAN_HOME/run/logs
 dirlogs_v=/mnt/litlogs
-dirlogs=$dirlogs_v/$optdata/$folder
+dirlogs=$dirlogs_v/$optdata/$folder/$task_name
 
 singularity exec \
 --bind $dirlitdata_t:$dirlitdata_v,$dirlogs_t:$dirlogs_v \

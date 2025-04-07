@@ -13,7 +13,8 @@ def parse_args():
     parser.add_argument("--auto_tune", "--atune", action="store_true", help="Whether to perform hyperparameter tuning")
 
     parser.add_argument("--em", type=str, default="", help="Existing model checkpoint path for loading")
-    parser.add_argument("--focus", type=str, default="None", help="Focus on a specific task, choose from 'None', 'recon', 'label'")
+    parser.add_argument("--focus", type=str, default="None", help="Focus on a specific task, choose from 'None', 'recon', 'label', 'recon_and_freeze', 'label_and_freeze'")
+    parser.add_argument("--no_guide_gat", "--nog", action="store_true", help="Whether to disable edge weights of guidance graphs on graph attentions")
 
     parser.add_argument("--litdata", "--data", type=str, required=False, help="Path to litdata directory")
     parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
@@ -34,6 +35,11 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
 
+    if args.no_guide_gat:
+        guide_gat = False
+    else:
+        guide_gat = True
+
     _config = const.default.model_config.copy()
     _config.update(
         {
@@ -49,6 +55,7 @@ if __name__ == "__main__":
             "accelerator": args.accelerator,
             "input_node_emb_dim": args.input_node_emb_dim,
             "acc_grad_batch": args.acc_grad_batch,
+            "guide_gat": guide_gat,
         }
     )
     print(f"\n🔧Configuration⚙️\n{_config}\n")
@@ -58,14 +65,10 @@ if __name__ == "__main__":
     else:
         ckpt = args.em
 
-    if args.focus == "label":
-        focus = "label"
-    elif args.focus == "recon":
-        focus = "recon"
-    elif args.focus == "None":
+    if args.focus == "None":
         focus = None
     else:
-        raise ValueError("Invalid focus option. Choose from 'None', 'recon' or 'label'.")
+        focus = args.focus
 
     trainer = DeepTANTune(_config, ckpt, focus)
     if args.auto_tune:

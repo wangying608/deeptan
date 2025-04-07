@@ -117,6 +117,7 @@ class DeepTAN(ltn.LightningModule):
         lr: float,
         chunk_size: int,
         focus_task: Optional[str] = None,
+        guide_gat: bool = True,
     ):
         r"""
         Initialize the DeepTAN model.
@@ -142,6 +143,7 @@ class DeepTAN(ltn.LightningModule):
             lr (float): The learning rate.
             chunk_size (int): The chunk size for processing large matrices.
             focus_task (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`).
+            guide_gat: (Optional[bool]): Whether to apply edge weights of guidance graphs to graph attentions.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -151,6 +153,7 @@ class DeepTAN(ltn.LightningModule):
         self.num_all_nodes = len(self.all_node_names)
         self.register_buffer("all_node_indices", torch.arange(self.num_all_nodes, dtype=torch.long), persistent=False)
         self.focus_task = focus_task
+        self.guide_gat = guide_gat
 
         self.chunk_size = chunk_size
         self.input_dim = input_dim
@@ -215,11 +218,6 @@ class DeepTAN(ltn.LightningModule):
         # Metrics and initialization
         self._init_metrics()
 
-        # if self.focus_task == "label":
-        #     self.g_label_predictor.requires_grad_(True)
-        #     self.ge_decoder.requires_grad_(False)
-        #     self.amsgp.requires_grad_(False)
-
     def forward(self, batch: GData) -> Dict[str, Any]:
         # assert batch.x is not None, "Input x is None"
         # assert batch.edge_index is not None, "Input edge_index is None"
@@ -240,7 +238,7 @@ class DeepTAN(ltn.LightningModule):
         z, E_all, ids = self.amsgp(
             node_names=batch.node_names,
             x=batch.x,
-            edge_attr=batch.edge_attr,
+            edge_attr=batch.edge_attr if self.guide_gat else None,
             edge_index=batch.edge_index,
             batch=node_batch,
         )
@@ -665,12 +663,23 @@ class DeepTANTune:
         Args:
             args (Dict[str, Any]): Dictionary containing hyperparameters and other configurations.
             existing_model_path (Optional[str]): Path to an existing model to resume training from.
-            focus (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`).
+            focus (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`, `'recon_and_freeze'`, `'label_and_freeze'`).
         """
-        # Store configuration parameters
         self.args = args
         self.existing_model_path = existing_model_path
+
+        if focus not in [None, "recon", "label", "recon_and_freeze", "label_and_freeze"]:
+            raise ValueError("Invalid focus option. Choose from 'None', 'recon', 'label', 'recon_and_freeze', or 'label_and_freeze'.")
+
+        self.freeze_label = False
+        self.freeze_recon = False
         self.focus = focus
+        if focus == "label_and_freeze":
+            self.freeze_recon = True
+            self.focus = "label"
+        elif focus == "recon_and_freeze":
+            self.freeze_label = True
+            self.focus = "recon"
 
         self.is_regression = self.args["is_regression"]
         self.log_dir = self.args["log_dir"]
@@ -776,11 +785,21 @@ class DeepTANTune:
             lr=trial_params.get("lr", self.args["lr"]),
             chunk_size=self.args["chunk_size"],
             focus_task=self.focus,
+            guide_gat=self.args["guide_gat"],
         )
 
         if self.existing_model_path is not None:
             _model.amsgp = _amsgp
             _model.ge_decoder = _ge_decoder
+
+        if self.freeze_label:
+            _model.g_label_predictor.requires_grad_(False)
+            _model.ge_decoder.requires_grad_(True)
+            _model.amsgp.requires_grad_(True)
+        if self.freeze_recon:
+            _model.g_label_predictor.requires_grad_(True)
+            _model.ge_decoder.requires_grad_(False)
+            _model.amsgp.requires_grad_(False)
 
         return _model
 
@@ -823,11 +842,21 @@ class DeepTANTune:
             lr=self.args["lr"],
             chunk_size=self.args["chunk_size"],
             focus_task=self.focus,
+            guide_gat=self.args["guide_gat"],
         )
 
         if self.existing_model_path is not None:
             _model.amsgp = _amsgp
             _model.ge_decoder = _ge_decoder
+
+        if self.freeze_label:
+            _model.g_label_predictor.requires_grad_(False)
+            _model.ge_decoder.requires_grad_(True)
+            _model.amsgp.requires_grad_(True)
+        if self.freeze_recon:
+            _model.g_label_predictor.requires_grad_(True)
+            _model.ge_decoder.requires_grad_(False)
+            _model.amsgp.requires_grad_(False)
 
         return _model
 

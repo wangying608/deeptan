@@ -1,12 +1,12 @@
 #!/bin/bash
 
-mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
 DEEPTAN_HOME=/mnt/hdd2/homext/wuch/xn2p
+mypython=/home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python
 myscript=run_05_fit_tune.py
 
 optdata=sc_multiome_minmi0.35_top2000
 folder=seed_42
-task_name=focus_recon
+task_name=multitask_noguide
 ntrial=20
 njob=1
 bs=16
@@ -19,4 +19,4 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --focus recon # --atune
+$mypython $myscript --data $dirlitdata --bs $bs --ck $ck --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --nog

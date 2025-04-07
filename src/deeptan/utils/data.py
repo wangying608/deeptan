@@ -3,7 +3,7 @@ Graph data module.
 """
 
 import os
-from typing import List, Union
+from typing import List, Optional, Union
 
 import anndata
 import numpy as np
@@ -785,6 +785,7 @@ class JointStratifiedSplitter:
         ratio: List[float],
         seeds: List[int],
         balance_strategy: str = "none",
+        retain_ratio: float = 1.0,
     ):
         """
         Split parquet data with balanced sampling across both cell types and orig.ident attributes.
@@ -799,6 +800,7 @@ class JointStratifiedSplitter:
             ratio: List of ratios for each split.
             seeds: List of seeds for reproducibility.
             balance_strategy: Strategy for balancing the splits. Options are ["none", "oversample", "undersample", "combined"].
+            retain_ratio: Ratio of data to retain after balancing. 0 < retain_ratio ≤ 1.0, Defaults to 1.0.
         """
         self.cell_types = cell_types
         self.orig_idents = orig_idents
@@ -807,7 +809,8 @@ class JointStratifiedSplitter:
         self.ratio = ratio
         self.seeds = seeds
         self.balance_strategy = balance_strategy
-
+        self.retain_ratio = retain_ratio
+        assert 0 < self.retain_ratio <= 1.0, "retain_ratio must be between 0 and 1"
         assert len(self.cell_types) == len(self.orig_idents), "Feature lengths mismatch"
         self.df = pl.read_parquet(self.parquet_file)
         assert len(self.cell_types) == len(self.df), "Cell types length mismatch"
@@ -855,33 +858,36 @@ class JointStratifiedSplitter:
         np.random.shuffle(balanced_indices)
         return balanced_indices
 
-    def _oversample_strategy(self, balanced_indices: list):
+    def _oversample_strategy(self, balanced_indices: list, seed: Optional[int] = None):
         """Oversample minority strata to match majority size."""
         stratum_counts = np.bincount(self.stratum_labels)
         max_stratum_size = np.max(stratum_counts)
 
         for stratum_idx in range(len(self.unique_strata)):
-            stratum_indices = self._get_stratum_indices(stratum_idx)
+            stratum_seed = seed + stratum_idx if seed is not None else None
+            stratum_indices = self._get_stratum_indices(stratum_idx, stratum_seed)
             repeat_factor = int(np.ceil(max_stratum_size / len(stratum_indices)))
             balanced_indices.extend(np.tile(stratum_indices, repeat_factor)[:max_stratum_size])
 
-    def _undersample_strategy(self, balanced_indices: list):
+    def _undersample_strategy(self, balanced_indices: list, seed: Optional[int] = None):
         """Undersample majority strata to match minority size."""
         stratum_counts = np.bincount(self.stratum_labels)
         min_stratum_size = np.min(stratum_counts)
 
         for stratum_idx in range(len(self.unique_strata)):
-            stratum_indices = self._get_stratum_indices(stratum_idx)
+            stratum_seed = seed + stratum_idx if seed is not None else None
+            stratum_indices = self._get_stratum_indices(stratum_idx, stratum_seed)
             sampled = np.random.choice(stratum_indices, min_stratum_size, replace=False)
             balanced_indices.extend(sampled)
 
-    def _combined_strategy(self, balanced_indices: list):
+    def _combined_strategy(self, balanced_indices: list, seed: Optional[int] = None):
         """Hybrid: oversample small strata and undersample large ones."""
         stratum_counts = np.bincount(self.stratum_labels)
         target_stratum_size = int(np.mean(stratum_counts))
 
         for stratum_idx in range(len(self.unique_strata)):
-            stratum_indices = self._get_stratum_indices(stratum_idx)
+            stratum_seed = seed + stratum_idx if seed is not None else None
+            stratum_indices = self._get_stratum_indices(stratum_idx, stratum_seed)
 
             if len(stratum_indices) < target_stratum_size:
                 repeat_factor = int(np.ceil(target_stratum_size / len(stratum_indices)))
@@ -895,8 +901,9 @@ class JointStratifiedSplitter:
         split_indices = [[] for _ in range(len(self.ratio))]
 
         for stratum_idx in range(len(self.unique_strata)):
-            stratum_indices = self._get_stratum_indices(stratum_idx)
-            np.random.seed(seed + stratum_idx)
+            stratum_seed = seed + stratum_idx
+            stratum_indices = self._get_stratum_indices(stratum_idx, stratum_seed)
+            np.random.seed(stratum_seed)
             shuffled = np.random.permutation(stratum_indices)
 
             split_sizes = self._calc_stratum_split_sizes(len(shuffled))
@@ -904,10 +911,19 @@ class JointStratifiedSplitter:
 
         return [np.random.permutation(indices) for indices in split_indices]
 
-    def _get_stratum_indices(self, stratum_idx: int) -> np.ndarray:
+    def _get_stratum_indices(self, stratum_idx: int, seed: Optional[int] = None) -> np.ndarray:
         """Get indices for a specific stratum."""
         stratum_mask = self.stratum_labels == stratum_idx
-        return np.where(stratum_mask)[0]
+        indices = np.where(stratum_mask)[0]
+
+        if self.retain_ratio < 1.0:
+            retain_num = max(1, int(len(indices) * self.retain_ratio))
+            if seed is not None:
+                np.random.seed(seed)
+
+            indices = np.random.choice(indices, retain_num, replace=False)
+
+        return indices
 
     def _calc_stratum_split_sizes(self, total: int) -> List[int]:
         """Calculate split sizes based on the ratio."""

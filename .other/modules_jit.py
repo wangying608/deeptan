@@ -292,7 +292,7 @@ class AMSGP(torch.nn.Module):
 
         return filtered_edge, centrality
 
-    def _generate_multiscale_subgraphs(self, edge_index, centrality, h) -> List[GData]:
+    def _generate_multiscale_subgraphs(self, edge_index, centrality, h):
         """Generate hierarchical subgraphs using centrality histogram bins.
         基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
 
@@ -315,62 +315,8 @@ class AMSGP(torch.nn.Module):
         device = h.device
         num_nodes = h.size(0)
         _, edges = self.hist_fd(centrality)
-        num_bins = len(edges) - 1
-        covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
 
-        # Use tensor-based storage for subgraphs
-        subgraph_masks = torch.zeros((0, num_nodes), dtype=torch.bool, device=device)
-        subgraph_centers = torch.zeros(0, dtype=torch.long, device=device)
-
-        for bin_idx in reversed(range(num_bins)):
-            bin_mask = self._generate_bin_mask(centrality, edges, bin_idx)
-            current_nodes = torch.where(bin_mask)[0]
-
-            if current_nodes.numel() == 0:
-                continue
-
-            # Batch process nodes in chunks
-            for nodes in current_nodes.split(min(self.chunk_size, current_nodes.numel(), const.default.subg_chunk_size)):
-                subsets, subg_edge_indices = self._batch_k_hop_subgraph(nodes, self.n_hop, edge_index, num_nodes)
-
-                for subset, subg_edge_idx, center_node in zip(subsets, subg_edge_indices, nodes.tolist()):
-                    if subset.numel() < 2 or subg_edge_idx.shape[1] == 0:
-                        continue
-
-                    # Create new subgraph mask
-                    new_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
-                    new_mask[subset] = True
-
-                    # Vectorized overlap check
-                    if subgraph_masks.shape[0] > 0:
-                        intersections = (subgraph_masks & new_mask).sum(dim=1)
-                        min_sizes = torch.minimum(subgraph_masks.sum(dim=1), new_mask.sum())
-                        overlaps = intersections / (min_sizes + 1e-8)
-                        overlapping_chunks = overlaps > self.thre_sg_overlap
-
-                        del intersections, min_sizes, overlaps
-                    else:
-                        overlapping_chunks = torch.zeros(0, dtype=torch.bool, device=device)
-
-                    # Merge overlapping subgraphs
-                    if overlapping_chunks.any():
-                        merged_mask = subgraph_masks[overlapping_chunks].any(dim=0) | new_mask
-                        subgraph_masks = torch.cat([subgraph_masks[~overlapping_chunks], merged_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers[~overlapping_chunks], torch.tensor([center_node], device=device)])
-                    else:
-                        # Add new subgraph
-                        subgraph_masks = torch.cat([subgraph_masks, new_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers, torch.tensor([center_node], device=device)])
-
-                    # Update coverage tracking
-                    covered_nodes |= new_mask
-
-                    del new_mask
-
-                    if covered_nodes.all():
-                        break
-
-        # print(f"Percent of nodes covered: {covered_nodes.float().mean():.2%} ({covered_nodes.sum()}/{num_nodes})")
+        subgraph_masks, subgraph_centers = self._process_bins(centrality, edges, edge_index, num_nodes, device)
 
         # Convert tensor masks back to GData objects
         subgraphs = []
@@ -395,10 +341,71 @@ class AMSGP(torch.nn.Module):
 
         return subgraphs
 
+    # @torch.jit.script
+    def _process_bins(self, centrality: torch.Tensor, edges: torch.Tensor, edge_index: torch.Tensor, num_nodes: int, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
+        covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
+        subgraph_masks = torch.zeros((0, num_nodes), dtype=torch.bool, device=device)
+        subgraph_centers = torch.zeros(0, dtype=torch.long, device=device)
+        num_edges = edges.size(0)
+        for bin_idx in torch.arange(num_edges - 1, -1, -1, device=device):
+            lower = edges[bin_idx - 1]
+            upper = edges[bin_idx]
+            bin_mask = (centrality >= lower) & (centrality <= upper)
+            current_nodes = torch.nonzero(bin_mask).view(-1)
+
+            if current_nodes.numel() > 0:
+                batch_masks = self._create_batch_masks(current_nodes, edge_index, num_nodes, self.n_hop, self.chunk_size)
+
+                subgraph_masks, subgraph_centers, covered_nodes = self._merge_masks(batch_masks, current_nodes, subgraph_masks, subgraph_centers, covered_nodes, self.thre_sg_overlap)
+
+            if covered_nodes.all():
+                break
+
+        return subgraph_masks, subgraph_centers
+
+    # @staticmethod
+    # @torch.jit.script
+    def _create_batch_masks(self, nodes: torch.Tensor, edge_index: torch.Tensor, num_nodes: int, n_hop: int, chunk_size: int) -> torch.Tensor:
+        batch_masks = torch.zeros((0, num_nodes), dtype=torch.bool, device=nodes.device)
+
+        for i in range(0, nodes.size(0), chunk_size):
+            chunk = nodes[i : i + chunk_size]
+            subsets, _ = self._batch_k_hop_subgraph(chunk, n_hop, edge_index, num_nodes)
+
+            for subset in subsets:
+                mask = torch.zeros(num_nodes, dtype=torch.bool, device=nodes.device)
+                mask[subset] = True
+                batch_masks = torch.cat([batch_masks, mask.unsqueeze(0)], dim=0)
+
+        return batch_masks
+
     @staticmethod
     @torch.jit.script
-    def _generate_bin_mask(centrality: torch.Tensor, edges: torch.Tensor, bin_idx: int) -> torch.Tensor:
-        return (centrality >= edges[bin_idx]) & (centrality <= edges[bin_idx + 1])
+    def _merge_masks(batch_masks: torch.Tensor, current_nodes: torch.Tensor, existing_masks: torch.Tensor, existing_centers: torch.Tensor, covered_nodes: torch.Tensor, overlap_threshold: float) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        for i in range(batch_masks.size(0)):
+            new_mask = batch_masks[i]
+            center = current_nodes[i % current_nodes.size(0)]
+
+            if existing_masks.size(0) > 0:
+                intersections = (existing_masks & new_mask).sum(dim=1)
+                min_sizes = torch.minimum(existing_masks.sum(dim=1), new_mask.sum())
+                overlaps = intersections / (min_sizes + 1e-8)
+                overlapping = overlaps > overlap_threshold
+
+                if overlapping.any():
+                    merged = existing_masks[overlapping].any(dim=0) | new_mask
+                    existing_masks = torch.cat([existing_masks[~overlapping], merged.unsqueeze(0)], dim=0)
+                    existing_centers = torch.cat([existing_centers[~overlapping], center.unsqueeze(0)])
+                else:
+                    existing_masks = torch.cat([existing_masks, new_mask.unsqueeze(0)], dim=0)
+                    existing_centers = torch.cat([existing_centers, center.unsqueeze(0)])
+            else:
+                existing_masks = torch.cat([existing_masks, new_mask.unsqueeze(0)], dim=0)
+                existing_centers = torch.cat([existing_centers, center.unsqueeze(0)])
+
+            covered_nodes |= new_mask
+
+        return existing_masks, existing_centers, covered_nodes
 
     @staticmethod
     @torch.jit.script
@@ -408,13 +415,14 @@ class AMSGP(torch.nn.Module):
         sub_edge = edge_index[:, edge_mask]
 
         # Fast local index mapping
+        # node_idx = torch.where(mask)[0]
         local_map = torch.zeros(mask.size(0), dtype=torch.long, device=mask.device)
         local_map[node_idx] = torch.arange(mask.sum().item(), device=mask.device)
 
         return local_map[sub_edge]
 
     @staticmethod
-    def _batch_k_hop_subgraph(nodes: torch.Tensor, num_hops: int, edge_index: torch.Tensor, num_nodes: int) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    def _batch_k_hop_subgraph(nodes, num_hops, edge_index, num_nodes):
         """Custom implementation of batch k-hop subgraph extraction."""
 
         subsets = []
@@ -481,6 +489,9 @@ class AMSGP(torch.nn.Module):
         num_subgraphs = len(subgraphs)
         if num_subgraphs == 0:
             return torch.zeros(self.output_dim_g_emb, device=self.x.device)
+        
+        if embs.dim() == 1:
+            embs = embs.unsqueeze(0)
 
         edge_index = to_undirected(torch.combinations(torch.arange(num_subgraphs, device=embs.device)).t())
         super_nodes = GData(x=embs, edge_index=edge_index)
@@ -491,7 +502,11 @@ class AMSGP(torch.nn.Module):
 
     def _process_subgraph(self, subgraph):
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
-        return self.att_pool(h.unsqueeze(0))
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        if h.size(-1) != self.output_dim_g_emb:
+            h = F.pad(h, (0, self.output_dim_g_emb - h.size(-1)))
+        return self.att_pool(h)
 
 
 class WGATLayer_chunked(MessagePassing):
