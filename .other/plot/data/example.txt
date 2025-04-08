@@ -1,0 +1,7 @@
+Model,Task,data,seed_split,Training_size,seed_sample_train,Test_features,recon_MSE,recon_MAE,recon_JSD,recon_PCC,ARI,ASW,NMI,kBET,label_F1_weighted,label_F1_macro,label_F1_micro,label_AUROC,label_Accuracy,label_Recall,label_Precision
+DeepTAN,multitask_noguide,sc_multiome,42,NA,NA,2000,0.1350,0.2788,NA,0.8647,NA,NA,NA,NA,0.1628,0.1248,0.2135,0.7100,0.2135,0.2135,0.2053
+DeepTAN,multitask,sc_multiome,42,NA,NA,2000,0.1435,0.2841,NA,0.8607,NA,NA,NA,NA,0.2340,0.1468,0.2899,0.6986,0.2899,0.2899,0.2484
+DeepTAN,focus_recon,sc_multiome,42,NA,NA,2000,0.1282,0.2725,NA,0.8725,NA,NA,NA,NA,0.0,0.0,0.0,0.6334,0.0,0.0,0.0
+DeepTAN,multitask,sc_rna,43,NA,NA,2000,0.2152,0.3521,NA,0.6088,NA,NA,NA,NA,0.8664,0.7958,0.8760,0.9182,0.8760,0.8760,0.8828
+DeepTAN,focus_label,sc_multiome,42,NA,NA,2000,2.216,1.173,NA,0.6010,NA,NA,NA,NA,0.1255,0.0699,0.1181,0.6989,0.1181,0.1181,0.1598
+DeepTAN,focus_label,sc_multiome,43,NA,NA,2000,2.327,1.302,NA,0.5928,NA,NA,NA,NA,0.0282,0.0377,0.0538,0.7185,0.0534,0.0538,0.0216
