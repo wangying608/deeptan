@@ -6,7 +6,7 @@ myscript=run_05_fit_tune.py
 
 optdata=sc_rna_annotated_minmi0.0_top2000
 folder=seed_42
-task_name=focus_label
+task_name=focus_recon
 ntrial=20
 njob=1
 bs=16
@@ -19,4 +19,4 @@ mkdir -p $dirlogs
 
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-$mypython $myscript --data $dirlitdata --bs $bs --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --ck $ck --focus label
+$mypython $myscript --data $dirlitdata --bs $bs --logdir $dirlogs --nt $ntrial --nj $njob --agb $agd --ck $ck --focus recon

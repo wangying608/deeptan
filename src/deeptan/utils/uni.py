@@ -83,11 +83,11 @@ def collect_tensorboard_events(dir_log: str):
             _df = _info_df.hstack(_df)  # Concatenate the info DataFrame with the test records DataFrame
             records.append(_df)
         else:
-            print(f"No test records found in {tsb_dir}. Skipping...")
+            print(f"No records found in {tsb_dir}. Skipping...")
 
     # Convert to DataFrame by Polars
     if len(records) == 0:
-        raise ValueError("No test records found.")
+        raise ValueError("No records found.")
     df = pl.concat(records, how="diagonal", rechunk=True)
 
     return df
@@ -127,29 +127,13 @@ def tsbevent2df(tsbevent: Dict, keys: Optional[List[str]] = None):
     Convert tensorboard event to polars dataframe.
     """
     if keys is None:
-        keys = [
-            "test/recon_MSE",
-            "test/recon_RMSE",
-            "test/recon_MAE",
-            "test/recon_PCC",
-            "test/label_MSE",
-            "test/label_RMSE",
-            "test/label_MAE",
-            "test/label_PCC",
-            "test/label_F1_weighted",
-            "test/label_F1_macro",
-            "test/label_F1_micro",
-            "test/label_AUROC",
-            "test/label_Accuracy",
-            "test/label_Precision",
-            "test/label_Recall",
-        ]
+        keys = const.dkey.tsb_keys2pick
     _tsb_metrics = {_key: tsbevent[_key][0][1] for _key in keys if _key in tsbevent.keys()}
     dtype_dict = {col: pl.Float64 for col in _tsb_metrics.keys()}
     _tsb_metrics_df = pl.DataFrame(_tsb_metrics, schema=dtype_dict)
     # colnames_new = ["_".join(_n.split("_")[1:]) for _n in keys]
-    colnames_new = [_n.split("/")[1] for _n in _tsb_metrics.keys()]
-    _tsb_metrics_df.columns = colnames_new
+    # colnames_new = [_n.split("/")[1] for _n in _tsb_metrics.keys()]
+    # _tsb_metrics_df.columns = colnames_new
     return _tsb_metrics_df
 
 
