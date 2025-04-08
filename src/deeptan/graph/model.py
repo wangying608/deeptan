@@ -35,6 +35,7 @@ from torchmetrics.classification import (
     MulticlassRecall,
 )
 from torchmetrics.regression import (
+    JensenShannonDivergence,
     MeanAbsoluteError,
     MeanSquaredError,
     PearsonCorrCoef,
@@ -354,8 +355,8 @@ class DeepTAN(ltn.LightningModule):
                 "MSE": MeanSquaredError(num_outputs=self.input_dim),
                 "MAE": MeanAbsoluteError(num_outputs=self.input_dim),
                 "PCC": PearsonCorrCoef(num_outputs=self.input_dim),
-                # "KLD": KLDivergence(),
-                # "JSD": self._js_divergence,
+                "RMSE": MeanSquaredError(squared=False, num_outputs=self.input_dim),
+                # "JSD": JensenShannonDivergence(log_prob=False),
             }
         )
         if self.is_regression:
@@ -398,6 +399,8 @@ class DeepTAN(ltn.LightningModule):
         losses = {}
 
         node_true_val_for_loss = batch.x.squeeze(1)
+        # print("\nSize of batch.x:", batch.x.shape)
+        # print("\nShape of xhat and x:\n", outputs["node_recon_for_loss"].shape, node_true_val_for_loss.shape)
 
         self.metrics_common[f"{stage}_metrics"].update(outputs["node_recon_for_loss"], node_true_val_for_loss)
 

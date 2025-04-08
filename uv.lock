@@ -481,7 +481,7 @@ requires-dist = [
     { name = "torch-spline-conv", specifier = ">=1.2.2" },
     { name = "torch-spline-conv", marker = "extra == 'compile'" },
     { name = "torchaudio", specifier = "==2.5.1" },
-    { name = "torchmetrics", specifier = ">=1.6.1" },
+    { name = "torchmetrics", specifier = ">=1.7.1" },
     { name = "torchvision", specifier = "==0.20.1" },
     { name = "zstd", specifier = ">=1.5.6.2" },
 ]
@@ -2013,7 +2013,7 @@ wheels = [
 
 [[package]]
 name = "torchmetrics"
-version = "1.6.1"
+version = "1.7.1"
 source = { registry = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 dependencies = [
     { name = "lightning-utilities", marker = "sys_platform == 'linux'" },
@@ -2021,9 +2021,9 @@ dependencies = [
     { name = "packaging", marker = "sys_platform == 'linux'" },
     { name = "torch", marker = "sys_platform == 'linux'" },
 ]
-sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/14/c5/8d916585d4d6eb158105c21b28cd4b0ed296d74e499bf8f104368de16619/torchmetrics-1.6.1.tar.gz", hash = "sha256:a5dc236694b392180949fdd0a0fcf2b57135c8b600e557c725e077eb41e53e64", size = 540022 }
+sdist = { url = "https://pypi.tuna.tsinghua.edu.cn/packages/28/c4/2d921ccf7433ee6d8d6edeaca238674cbbc74528120631c662014795c645/torchmetrics-1.7.1.tar.gz", hash = "sha256:0ac1a0e90d2375866ceb5d3868720c6df7d7d0c5729b7ad36e92c897c6af70c2", size = 565045 }
 wheels = [
-    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/9d/e1/84066ff60a20dfa63f4d9d8ddc280d5ed323b7f06504dbb51c523b690116/torchmetrics-1.6.1-py3-none-any.whl", hash = "sha256:c3090aa2341129e994c0a659abb6d4140ae75169a6ebf45bffc16c5cb553b38e", size = 927305 },
+    { url = "https://pypi.tuna.tsinghua.edu.cn/packages/e0/ee/4d0a7213a6f412afb3483031009a3b970dd7bed3be24de95ab04fba1c05a/torchmetrics-1.7.1-py3-none-any.whl", hash = "sha256:9a4c45edbd0a1844cc1540c9e71bfbe0ee783a2ed997344d947fefecac90dbb9", size = 961489 },
 ]
 
 [[package]]

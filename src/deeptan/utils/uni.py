@@ -7,7 +7,7 @@ import random
 import string
 import time
 from multiprocessing import cpu_count
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import optuna
 import polars as pl
@@ -59,6 +59,40 @@ def random_string(length: int = 7) -> str:
     return result
 
 
+def collect_tensorboard_events(dir_log: str):
+    r"""Collect info from tensorboard events."""
+    paths_ckpt = search_ckpt(dir_log)
+
+    # Pick ids of outer and inner folds, val_loss and version from ckpt file paths
+    # records = [tsbevent2df(read_tensorboard_events(os.path.join(os.path.dirname(path_x), "version_0"), False)) for path_x in paths_ckpt]
+    records = []
+    for path_x in paths_ckpt:
+        tsb_dir = os.path.join(os.path.dirname(path_x), "version_0")
+        tsb_event = read_tensorboard_events(tsb_dir, False)
+        assert isinstance(tsb_event, Dict), "tsb_event must be a dictionary."
+        _df = tsbevent2df(tsb_event)
+        if _df.width > 0:
+            path_x_frag = path_x.split(os.sep)
+            _log_name = path_x_frag[-2]
+            _task = path_x_frag[-3]
+            _seed = path_x_frag[-4]
+            _data = path_x_frag[-5]
+
+            _info_df = pl.DataFrame({"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]})
+            # print(_info_df)
+            _df = _info_df.hstack(_df)  # Concatenate the info DataFrame with the test records DataFrame
+            records.append(_df)
+        else:
+            print(f"No test records found in {tsb_dir}. Skipping...")
+
+    # Convert to DataFrame by Polars
+    if len(records) == 0:
+        raise ValueError("No test records found.")
+    df = pl.concat(records, how="diagonal", rechunk=True)
+
+    return df
+
+
 def search_ckpt(dir_log: str):
     r"""Search checkpoints in the directory and its subdirectories."""
     paths_ckpt = [os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".ckpt")]
@@ -69,7 +103,7 @@ def search_ckpt(dir_log: str):
     return paths_ckpt
 
 
-def read_tensorboard_events(dir_events: str, get_test_loss: bool = True):
+def read_tensorboard_events(dir_events: str, get_test_loss: bool = True) -> Dict[str, Any] | float:
     r"""Read tensorboard events from the directory."""
     event_acc = EventAccumulator(dir_events)
     event_acc.Reload()
@@ -81,12 +115,42 @@ def read_tensorboard_events(dir_events: str, get_test_loss: bool = True):
         for _event in _events:
             scalar_data[tag].append((_event.step, _event.value))
 
-    test_loss: float = scalar_data[const.dkey.title_tst_loss][0][1]
-
     if get_test_loss:
+        test_loss: float = scalar_data[const.dkey.title_tst_loss][0][1]
         return test_loss
     else:
         return scalar_data
+
+
+def tsbevent2df(tsbevent: Dict, keys: Optional[List[str]] = None):
+    r"""
+    Convert tensorboard event to polars dataframe.
+    """
+    if keys is None:
+        keys = [
+            "test/recon_MSE",
+            "test/recon_RMSE",
+            "test/recon_MAE",
+            "test/recon_PCC",
+            "test/label_MSE",
+            "test/label_RMSE",
+            "test/label_MAE",
+            "test/label_PCC",
+            "test/label_F1_weighted",
+            "test/label_F1_macro",
+            "test/label_F1_micro",
+            "test/label_AUROC",
+            "test/label_Accuracy",
+            "test/label_Precision",
+            "test/label_Recall",
+        ]
+    _tsb_metrics = {_key: tsbevent[_key][0][1] for _key in keys if _key in tsbevent.keys()}
+    dtype_dict = {col: pl.Float64 for col in _tsb_metrics.keys()}
+    _tsb_metrics_df = pl.DataFrame(_tsb_metrics, schema=dtype_dict)
+    # colnames_new = ["_".join(_n.split("_")[1:]) for _n in keys]
+    colnames_new = [_n.split("/")[1] for _n in _tsb_metrics.keys()]
+    _tsb_metrics_df.columns = colnames_new
+    return _tsb_metrics_df
 
 
 def collect_optuna_db(dir_log: str):
