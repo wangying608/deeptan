@@ -245,34 +245,34 @@ class DeepTAN(ltn.LightningModule):
         )
 
         # Reconstruct node embeddings
-        recon_node_emb, recon_node_val_for_loss_all = self.ge_decoder(z, E_all)
+        recon_node_emb, pred_feat_values = self.ge_decoder(z, E_all)
 
         # Graph-level label prediction
         pred_labels = self.g_label_predictor(z)
 
         # Node-level reconstruction loss
-        predicted_value_for_loss_nonzero = torch.zeros_like(ids, dtype=recon_node_val_for_loss_all.dtype, device=self.device)
-        predicted_value_for_loss_zero = torch.zeros(recon_node_val_for_loss_all.shape[0] * recon_node_val_for_loss_all.shape[1] - len(ids.flatten()), dtype=recon_node_val_for_loss_all.dtype, device=self.device)
+        predicted_value_for_loss_nonzero = torch.zeros_like(ids, dtype=pred_feat_values.dtype, device=self.device)
+        predicted_value_for_loss_zero = torch.zeros(pred_feat_values.shape[0] * pred_feat_values.shape[1] - len(ids.flatten()), dtype=pred_feat_values.dtype, device=self.device)
 
         # For each batch, fill the mask for available nodes
         sta_nonezero = 0
         sta_zero = 0
         for i, nodes in enumerate(batch.node_names):
             n_nonezero = len(nodes)
-            n_zero = recon_node_val_for_loss_all.shape[1] - n_nonezero
+            n_zero = pred_feat_values.shape[1] - n_nonezero
             node_indices = ids[sta_nonezero : (sta_nonezero + n_nonezero)]
-            mask_ = torch.zeros(recon_node_val_for_loss_all.shape[1], dtype=torch.bool, device=self.device)
+            mask_ = torch.zeros(pred_feat_values.shape[1], dtype=torch.bool, device=self.device)
             mask_[node_indices] = True
 
-            predicted_value_for_loss_nonzero[sta_nonezero : (sta_nonezero + n_nonezero)] = recon_node_val_for_loss_all[i, node_indices].flatten()
-            predicted_value_for_loss_zero[sta_zero : (sta_zero + n_zero)] = recon_node_val_for_loss_all[i, ~mask_].squeeze()
+            predicted_value_for_loss_nonzero[sta_nonezero : (sta_nonezero + n_nonezero)] = pred_feat_values[i, node_indices].flatten()
+            predicted_value_for_loss_zero[sta_zero : (sta_zero + n_zero)] = pred_feat_values[i, ~mask_].squeeze()
             sta_nonezero += n_nonezero
             sta_zero += n_zero
 
         return {
             "embedding": z,
             "node_recon": recon_node_emb,
-            "node_recon_for_loss_all": recon_node_val_for_loss_all,
+            "node_recon_for_loss_all": pred_feat_values,
             "label_pred": pred_labels,
             "node_recon_for_loss": predicted_value_for_loss_nonzero,
             "node_recon_for_loss_zeros": predicted_value_for_loss_zero,

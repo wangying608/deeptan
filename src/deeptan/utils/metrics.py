@@ -1,6 +1,10 @@
+from typing import Any, Dict, Optional
+
 import numpy as np
+import polars as pl
 from scib.metrics import kBET
 from scib.metrics import silhouette as ASW
+from scipy.spatial.distance import jensenshannon
 from scipy.stats import entropy, pearsonr
 from sklearn.metrics import adjusted_mutual_info_score as AMI
 from sklearn.metrics import adjusted_rand_score as ARI
@@ -8,70 +12,114 @@ from sklearn.metrics import f1_score as F1
 from sklearn.metrics import homogeneity_score as HOM
 from sklearn.metrics import mean_squared_error as MSE
 from sklearn.metrics import normalized_mutual_info_score as NMI
-
-# from sklearn.metrics import silhouette_score
 from sklearn.metrics import roc_auc_score as AUROC
+from sklearn.metrics import silhouette_score
 
 
-def calculate_mse(x_true, x_pred):
-    mse = MSE(x_true, x_pred)
-    return mse
-
-
-def calculate_pcc(x_true, x_pred):
-    pcc = []
-    for i in range(x_true.shape[1]):
-        if np.all(x_true[:, i] == x_true[:, i][0]) or np.all(x_pred[:, i] == x_pred[:, i][0]):
-            # If all elements in the column are the same, the correlation is undefined. Set it to 0.0.
-            pcc.append(0.0)
-        else:
-            corr, _ = pearsonr(x_true[:, i], x_pred[:, i])
-            pcc.append(corr)
-    return np.mean(pcc)
-
-
-def normalize_to_distribution(data):
+class RegressionMetricsCalculator:
+    r"""
+    Optimized class to compute metrics between two 2D numpy arrays with minimized code duplication.
     """
-    将数据标准化为概率分布。
-    如果数据是常量（所有值相同），返回均匀分布。
-    """
-    data_min = np.min(data)
-    data_range = np.max(data) - data_min
 
-    if data_range == 0:
-        # 如果数据是常量，返回均匀分布
-        return np.ones_like(data) / len(data)
+    def __init__(self, true_array: np.ndarray, pred_array: np.ndarray):
+        self._true = true_array
+        self._pred = pred_array
+        self.n_samples, self.n_features = true_array.shape
+        self._validate_arrays()
 
-    # 归一化到非负范围
-    data_normalized = data - data_min
+        # Define metric calculation functions
+        self.metric_functions = {
+            "mse": self._calculate_mse,
+            "mae": self._calculate_mae,
+            "jsd": self._calculate_jsd,
+            "pcc": self._calculate_pcc,
+        }
 
-    # 确保数据和为 1
-    data_sum = np.sum(data_normalized)
-    if data_sum == 0:
-        # 如果归一化后总和仍为零，返回均匀分布
-        return np.ones_like(data) / len(data)
+    def _validate_arrays(self):
+        if self._true.shape != self._pred.shape:
+            raise ValueError("Input arrays must have the same shape")
+        if len(self._true.shape) != 2:
+            raise ValueError("Input arrays must be 2-dimensional")
 
-    return data_normalized / data_sum
+    def _normalize_for_jsd(self, arr: np.ndarray, axis: int) -> np.ndarray:
+        arr = arr + 1e-10
+        return arr / arr.sum(axis=axis, keepdims=True)
 
+    def _calculate_mse(self, axis: int) -> np.ndarray:
+        return ((self._true - self._pred) ** 2).mean(axis=axis)
 
-def calculate_jsd(x_true, x_pred):
-    """
-    计算 Jensen-Shannon 散度 (JSD)。
-    """
-    jsd = np.zeros(x_true.shape[1])
-    for i in range(x_true.shape[1]):
-        true_col = x_true[:, i]
-        pred_col = x_pred[:, i]
+    def _calculate_mae(self, axis: int) -> np.ndarray:
+        return np.abs(self._true - self._pred).mean(axis=axis)
 
-        # 标准化为概率分布
-        true_dist = normalize_to_distribution(true_col)
-        pred_dist = normalize_to_distribution(pred_col)
+    def _calculate_jsd(self, axis: int) -> np.ndarray:
+        # true_norm = self._normalize_for_jsd(self._true, axis)
+        # pred_norm = self._normalize_for_jsd(self._pred, axis)
 
-        # 计算平均分布
-        m_dist = 0.5 * (true_dist + pred_dist)
+        # def jsd(p, q):
+        #     m = 0.5 * (p + q)
+        #     return 0.5 * (entropy(p, m) + entropy(q, m))
 
-        # 计算 JSD
-        jsd[i] = 0.5 * (entropy(true_dist, m_dist) + entropy(pred_dist, m_dist))
+        # # Transpose if calculating along features to maintain consistency
+        # if axis == 0:
+        #     return np.array([jsd(p, q) for p, q in zip(true_norm.T, pred_norm.T)])
+        # return np.array([jsd(p, q) for p, q in zip(true_norm, pred_norm)])
 
-    # 返回 JSD 的均值
-    return np.mean(jsd)
+        # Use scipy's optimized implementation
+        # if axis == 0:
+        #     return np.array([jensenshannon(p, q) ** 2 for p, q in zip(true_norm.T, pred_norm.T)])
+        # return np.array([jensenshannon(p, q) ** 2 for p, q in zip(true_norm, pred_norm)])
+
+        return np.array(jensenshannon(self._true, self._pred, axis=axis) ** 2)
+
+    def _calculate_pcc(self, axis: int) -> np.ndarray:
+        if axis == 1:  # Sample-wise (rows)
+            return np.array([pearsonr(t_row, p_row)[0] for t_row, p_row in zip(self._true, self._pred)])
+        else:  # Feature-wise (columns)
+            return np.array([pearsonr(self._true[:, i], self._pred[:, i])[0] for i in range(self.n_features)])
+
+    def _calculate_metrics(self, axis: int) -> Dict[str, Any]:
+        r"""
+        Unified metric calculation for either samples or features.
+
+        Args:
+            axis (int): 0 for features, 1 for samples
+
+        Returns:
+            Dict[str, Any]: Dictionary of metric results
+        """
+        metrics = {}
+        for name, func in self.metric_functions.items():
+            values = func(axis)
+            metrics[name] = {"values": values, "mean": np.mean(values)}
+        return metrics
+
+    def calculate_sample_metrics(self) -> Dict[str, Any]:
+        """Calculate metrics row-wise (per sample)."""
+        return self._calculate_metrics(axis=1)
+
+    def calculate_feature_metrics(self) -> Dict[str, Any]:
+        """Calculate metrics column-wise (per feature)."""
+        return self._calculate_metrics(axis=0)
+
+    def calculate_all_metrics(self, output_path: Optional[str] = None) -> Dict[str, Any]:
+        r"""
+        Calculate all metrics and return as nested dictionary.
+
+        Args:
+            output_path (str, optional): Path to save parquet file
+
+        Returns:
+            dict: Nested dictionary with all results
+            pl.DataFrame: Summary DataFrame
+        """
+        results = {"sample_metrics": self.calculate_sample_metrics(), "feature_metrics": self.calculate_feature_metrics(), "shape": {"n_samples": self.n_samples, "n_features": self.n_features}}
+
+        # Create summary DataFrame
+        summary_data = []
+        for metric in self.metric_functions.keys():
+            summary_data.append({"metric": metric, "sample_mean": results["sample_metrics"][metric]["mean"], "feature_mean": results["feature_metrics"][metric]["mean"]})
+        df = pl.DataFrame(summary_data)
+
+        results.update({"averaged": df})
+
+        return results

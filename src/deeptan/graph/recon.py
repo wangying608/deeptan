@@ -1,13 +1,15 @@
 import os
 import pickle
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
+import polars as pl
 import torch
 from lightning import Trainer
 from litdata import StreamingDataLoader, StreamingDataset
 from tqdm import tqdm
 
+import deeptan.constants as const
 from deeptan.graph.model import DeepTAN
 from deeptan.utils.uni import collate_fn, get_map_location
 
@@ -15,10 +17,11 @@ from deeptan.utils.uni import collate_fn, get_map_location
 def predict(
     model_ckpt_path: str,
     litdata_dir: str,
-    output_pickle_path: str,
+    output_pkl_path: str,
     map_location: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 8,
 ):
+    os.makedirs(os.path.dirname(output_pkl_path), exist_ok=True)
     # Load a DeepTAN model
     path_hparams = os.path.join(os.path.dirname(model_ckpt_path), "version_0", "hparams.yaml")
     if os.path.exists(path_hparams):
@@ -37,16 +40,29 @@ def predict(
     trainer = Trainer(logger=False)
     results = trainer.predict(model=model, dataloaders=dataloader)
 
-    assert results is not None
-    # Save the results to a pickle file
-    with open(output_pickle_path, "wb") as f:
-        pickle.dump(results, f)
+    assert results is not None, "No results returned from prediction"
+
+    # Read feature names and label names
+    with open(os.path.join(os.path.dirname(litdata_dir), const.fname.litdata_others2save_pkl), "rb") as f:
+        feature_dict_and_label_dim: dict = pickle.load(f)
+    label_names = pl.read_parquet(os.path.join(os.path.dirname(litdata_dir), const.fname.label_class_onehot)).columns
+    feature_dict_and_label_dim.update({"label_names": label_names})
+
+    process_results(results, output_pkl_path, feature_dict_and_label_dim)
+    return None
 
 
-def process_results(pickle_path: str, output_pkl: str):
-    # Load the results
-    with open(pickle_path, "rb") as f:
-        results = pickle.load(f)
+def process_results(pickle_file: str | Any, output_pkl: str, others2save: Optional[dict] = None):
+    r"""
+    Process the results of DeepTAN from the pickle file and save them to a numpy pickle file.
+    """
+    if isinstance(pickle_file, str):
+        # Load the results
+        with open(pickle_file, "rb") as f:
+            results = pickle.load(f)
+    else:
+        results = pickle_file
+
     g_embedding = []
     node_recon = []
     node_recon_for_loss = []
@@ -79,7 +95,6 @@ def process_results(pickle_path: str, output_pkl: str):
         "labels": labels_np,
     }
 
-    print(results_dict.keys())
     # For each key in the results dictionary, print data shape
     for key in results_dict.keys():
         print(f"Key: {key}, Shape: {results_dict[key].shape}")
@@ -89,6 +104,10 @@ def process_results(pickle_path: str, output_pkl: str):
     # Key: node_recon, Shape: (150, 13461, 128)
     # Key: node_recon_all, Shape: (150, 13461, 1)
     # Key: labels, Shape: (150, 1)
+
+    if others2save is not None:
+        results_dict.update(others2save)
+    print(results_dict.keys())
 
     if not output_pkl.endswith(".pkl"):
         output_pkl += ".pkl"

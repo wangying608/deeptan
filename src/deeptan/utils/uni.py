@@ -73,10 +73,16 @@ def collect_tensorboard_events(dir_log: str):
         _df = tsbevent2df(tsb_event)
         if _df.width > 0:
             path_x_frag = path_x.split(os.sep)
-            _log_name = path_x_frag[-2]
-            _task = path_x_frag[-3]
-            _seed = path_x_frag[-4]
-            _data = path_x_frag[-5]
+            if path_x_frag[-2].startswith("trial_"):
+                posmv = 1
+                # _log_name = f"{path_x_frag[-3]}_{path_x_frag[-2]}"
+            else:
+                posmv = 0
+                # _log_name = path_x_frag[-2]
+            _log_name = path_x_frag[-2 - posmv]
+            _task = path_x_frag[-3 - posmv]
+            _seed = path_x_frag[-4 - posmv]
+            _data = path_x_frag[-5 - posmv]
 
             _info_df = pl.DataFrame({"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]})
             # print(_info_df)
