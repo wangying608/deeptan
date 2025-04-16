@@ -34,6 +34,14 @@ def get_avail_cpu_count(target_n: int) -> int:
     return n_cpu
 
 
+def print_nested_keys(d):
+    for key in d:
+        print(key)
+        value = d[key]
+        if isinstance(value, dict):
+            print_nested_keys(value)
+
+
 def get_map_location(map_loc: Optional[str] = None):
     if map_loc is None:
         if device_count() > 0:

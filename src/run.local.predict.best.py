@@ -4,7 +4,10 @@ import polars as pl
 
 from deeptan.graph.recon import predict
 
-path_best_ckpt_seed_xx = "/home/wuch/prjs/git_nwafu/DeepTAN/src/.collected_logs/best_ckpts_seed_42.parquet"
+# /home/wuch/prjs/git_nwafu/DeepTAN/.venv/bin/python run.local.predict.best.py
+
+_seed = "seed_46"
+path_best_ckpt_seed_xx = f"/home/wuch/prjs/git_nwafu/DeepTAN/src/.collected_logs/best_ckpts_{_seed}.parquet"
 
 home_deeptan = "/mnt/hdd2/homext/wuch/xn2p"
 data_dir = os.path.join(home_deeptan, "data", "optimized_data")
@@ -17,8 +20,7 @@ if __name__ == "__main__":
     for _row in best_ckpt_seed_xx.iter_rows(named=True):
         _ckpt_path = _row["ckpt_path"]
         _litdata_dir = os.path.join(data_dir, _row["data"], _row["seed"], trnvaltst)
-        # _output_pkl_path = os.path.join(output_dir, _row["data"], _row["seed"], _row["task"], "preds.pkl")
-        _output_pkl_path = os.path.join(output_dir, _row["data"], f"preds+{_row['seed']}+{_row['task']}+{trnvaltst}+{_row['log_name']}.pkl")
+        _output_pkl_path = os.path.join(output_dir, _row["data"], f"preds+{_row['seed']}+{_row['task']}+{trnvaltst}.pkl")
 
         print("\nPredicting: ", _ckpt_path, _litdata_dir)
         try:
