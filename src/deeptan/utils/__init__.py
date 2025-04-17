@@ -2,4 +2,4 @@ r"""
 Utilities.
 """
 
-from deeptan.utils import data, metrics, peaks, uni
+from deeptan.utils import data, peaks, uni

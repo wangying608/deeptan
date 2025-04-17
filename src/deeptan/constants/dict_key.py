@@ -51,3 +51,29 @@ tsb_keys2pick = [
     "val/label_Precision",
     "val/label_Recall",
 ]
+
+title_metric_mapping = {
+    "jsd": "1 - JSD",
+    "mae": "1 - MAE",
+    "mse": "1 - MSE",
+    "pcc": "PCC",
+    "weighted_recall": "Weighted Recall",
+    "weighted_precision": "Weighted Precision",
+    "weighted_f1": "Weighted F1 Score",
+    "macro_f1": "Macro F1 Score",
+    "micro_f1": "Micro F1 Score",
+    "auprc": "AUPRC",
+    "auroc": "AUROC",
+    "accuracy": "ACC",
+}
+title_task_mapping = {
+    "multitask": "Multitask",
+    "multitask_noguide": "Multitask (no SGG)",
+    "focus_recon": "Focus on reconstruction",
+    "focus_label": "Focus on labelling",
+}
+title_colnameC2_mapping = {
+    "task": "Task",
+    "metric": "Metric",
+    "value": "Value",
+}

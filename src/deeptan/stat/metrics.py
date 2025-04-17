@@ -1,13 +1,14 @@
 import os
 import pickle
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
+import anndata
 import numpy as np
 import polars as pl
-from scib.metrics import kBET
-from scib.metrics import silhouette as ASW
+from scib_metrics import kbet, kbet_per_label, silhouette_batch, silhouette_label
+from scib_metrics.nearest_neighbors import jax_approx_min_k
 from scipy.spatial.distance import jensenshannon
-from scipy.stats import entropy, pearsonr
+from scipy.stats import pearsonr
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 from sklearn.metrics import adjusted_mutual_info_score as AMI
 from sklearn.metrics import adjusted_rand_score as ARI
@@ -31,10 +32,12 @@ class MetricsDictMaker:
     Make a dictionary of metrics for predictions of **a dataset**.
     """
 
-    def __init__(self, predictions_dir: str, true_data_dir: str, softmax_pred_labels: bool = True):
+    def __init__(self, predictions_dir: str, true_data_dir: str, softmax_pred_labels: bool = True, orig_h5ad: str | None = None):
         self.predictions_dir = predictions_dir
         self.true_data_dir = true_data_dir
         self.softmax_pred_labels = softmax_pred_labels
+        self.orig_h5ad = orig_h5ad
+        self.test_data_df = {}
 
         self.metrics_dict = {}
 
@@ -80,16 +83,43 @@ class MetricsDictMaker:
         self.metrics_dict["metrics"]["recon"] = {}
         for _fname in self.fnames:
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
-            _calculator = RegressionMetricsCalculator(self.metrics_dict["true"][f"seed_{_seed}_tst"]["X"], self.metrics_dict["prediction"][_fname]["X"])
+
+            _calculator = RegressionMetricsCalculator(
+                self.metrics_dict["true"][f"seed_{_seed}_tst"]["X"],
+                self.metrics_dict["prediction"][_fname]["X"],
+            )
             self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
 
         # For label
         self.metrics_dict["metrics"]["label"] = {}
         for _fname in self.fnames:
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
+
             n_class = self.metrics_dict["prediction"][_fname]["y"].shape[1]
-            _calculator = MulticlassMetricsCalculator(self.metrics_dict["true"][f"seed_{_seed}_tst"]["y"], self.metrics_dict["prediction"][_fname]["y"], n_class)
+            _calculator = MulticlassMetricsCalculator(
+                self.metrics_dict["true"][f"seed_{_seed}_tst"]["y"],
+                self.metrics_dict["prediction"][_fname]["y"],
+                n_class,
+            )
             self.metrics_dict["metrics"]["label"][_fname] = pl.DataFrame(_calculator.calculate_metrics())
+
+        # For cluster
+        self.metrics_dict["metrics"]["cluster"] = {}
+        for _fname in self.fnames:
+            _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
+
+            if self.orig_h5ad is not None:
+                batch_info = self.read_batch_from_h5ad(self.orig_h5ad, _seed)["batch"].to_numpy()
+            else:
+                batch_info = np.repeat("batch_0", len(self.test_data_df[f"seed_{_seed}_tst"]))
+
+            _calculator = ClusteringMetricsCalculator(
+                true_labels=self.metrics_dict["true"][f"seed_{_seed}_tst"]["y"],
+                pred_labels=self.metrics_dict["prediction"][_fname]["y"],
+                batches=batch_info,
+                X_emb=self.metrics_dict["prediction"][_fname]["g_embedding"],
+            )
+            self.metrics_dict["metrics"]["cluster"][_fname] = pl.DataFrame(_calculator.calculate_metrics())
 
     def load_predictions(self):
         """Loads predictions from pickle files."""
@@ -110,8 +140,8 @@ class MetricsDictMaker:
             # Use the 1st fname of seed xx to get feature names
             _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
             feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
-            test_data_df = pl.read_parquet(os.path.join(self.true_data_dir, f"split_{_seed}_2.parquet")).select(feature_names_seed_xx)
-            test_data = test_data_df.drop(["obs_names"]).to_numpy()
+            self.test_data_df[f"seed_{_seed}_tst"] = pl.read_parquet(os.path.join(self.true_data_dir, f"split_{_seed}_2.parquet")).select(feature_names_seed_xx)
+            test_data = self.test_data_df[f"seed_{_seed}_tst"].drop(["obs_names"]).to_numpy()
             # Apply log1p
             self.metrics_dict["true"][f"seed_{_seed}_tst"]["X"] = np.log1p(test_data)
 
@@ -120,8 +150,8 @@ class MetricsDictMaker:
             _labels_df = _labels_df.rename({"bc": "obs_names"})
             _labels_all = self.transform_ct_df(_labels_df)
 
-            self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df_flatten"] = _labels_all.join(test_data_df.select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
-            self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df"] = _labels_df.join(test_data_df.select(["obs_names"]), on="obs_names", how="right")
+            self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df_flatten"] = _labels_all.join(self.test_data_df[f"seed_{_seed}_tst"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
+            self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df"] = _labels_df.join(self.test_data_df[f"seed_{_seed}_tst"].select(["obs_names"]), on="obs_names", how="right")
             self.metrics_dict["true"][f"seed_{_seed}_tst"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df"].drop("obs_names").to_numpy()
 
     def detect_pkl(self):
@@ -159,6 +189,23 @@ class MetricsDictMaker:
         result_df = result_df.hstack(pl.DataFrame({"ct_": celltypes})).drop("ct").rename({"ct_": "ct"})
 
         return result_df
+
+    def read_batch_from_h5ad(self, h5ad_path: str, _seed: int) -> pl.DataFrame:
+        r"""
+        Read batch info from an h5ad file.
+        """
+        adata = anndata.read_h5ad(h5ad_path)
+        # batch_info = adata.obs["batch"].to_list()
+        possible_batch_keys = ["batch", "orig.ident", "Orig.ident"]
+        for _k in possible_batch_keys:
+            if _k in adata.obs.columns:
+                batch_info = adata.obs[_k].to_list()
+                break
+        else:
+            raise ValueError("No batch information found in the h5ad file. Available keys: ", possible_batch_keys)
+
+        result_df = pl.DataFrame({"obs_names": adata.obs_names.to_list(), "batch": batch_info})
+        return result_df.join(self.test_data_df[f"seed_{_seed}_tst"].select(["obs_names"]), on="obs_names", how="right")
 
 
 class RegressionMetricsCalculator:
@@ -308,31 +355,31 @@ class MulticlassMetricsCalculator:
         if not np.allclose(self._pred_probs.sum(axis=1), 1.0, atol=1e-3):
             raise ValueError("Predicted probabilities must be softmax normalized (rows should sum to 1)")
 
-    def _calculate_weighted_f1(self) -> float:
+    def _calculate_weighted_f1(self):
         return F1(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
 
-    def _calculate_macro_f1(self) -> float:
+    def _calculate_macro_f1(self):
         return F1(self._true, self._pred_labels, average="macro", labels=self._labels, zero_division=0.0)
 
-    def _calculate_micro_f1(self) -> float:
+    def _calculate_micro_f1(self):
         return F1(self._true, self._pred_labels, average="micro", labels=self._labels, zero_division=0.0)
 
-    def _calculate_auroc(self) -> float:
+    def _calculate_auroc(self):
         try:
             return AUROC(self._true_df, self._pred_probs, multi_class="ovr", average="weighted", labels=self._labels)
         except ValueError:
             return np.nan  # Return NaN if AUROC cannot be computed
 
-    def _calculate_auprc(self) -> float:
+    def _calculate_auprc(self):
         return AUPRC(self._true_df, self._pred_probs, average="weighted")
 
-    def _calculate_accuracy(self) -> float:
+    def _calculate_accuracy(self):
         return accuracy_score(self._true, self._pred_labels)
 
-    def _calculate_weighted_precision(self) -> float:
+    def _calculate_weighted_precision(self):
         return precision_score(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
 
-    def _calculate_weighted_recall(self) -> float:
+    def _calculate_weighted_recall(self):
         return recall_score(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
 
     def calculate_metrics(self) -> Dict[str, float]:
@@ -346,3 +393,110 @@ class MulticlassMetricsCalculator:
         for name, func in self.metric_functions.items():
             metrics[name] = func()
         return metrics
+
+
+class ClusteringMetricsCalculator:
+    r"""
+    Class to compute clustering metrics such as ARI, ASW, NMI, and kBET.
+    """
+
+    def __init__(self, true_labels: np.ndarray, pred_labels: np.ndarray, batches: np.ndarray, X_emb: np.ndarray):
+        """
+        Initialize the calculator with true labels and predicted labels.
+
+        Args:
+            true_labels (np.ndarray): 2D array of true cluster labels.
+            pred_labels (np.ndarray): 2D array of predicted cluster labels.
+            X (np.ndarray): 2D array of original data.
+            X_emb (np.ndarray): 2D array of embedded data.
+            batch_key (str): Key in adata.obs for batch information.
+            label_key (str): Key in adata.obs for cell labels.
+            emb_key (str): Key in adata.obsm for embedding data.
+        """
+        self._true = true_labels.argmax(axis=1)
+        self._pred = pred_labels.argmax(axis=1)
+        self.batch = batches
+        self.X_emb = X_emb
+
+        # Define metric calculation functions
+        self.metric_functions = {
+            "kbet_true_label": self._calculate_kbet_true_label,
+            "kbet_pred_label": self._calculate_kbet_pred_label,
+            "asw_true_label": self._calculate_asw_true_label,
+            "asw_pred_label": self._calculate_asw_pred_label,
+            # "asw_batch_true_label": self._calculate_asw_batch_true_label,
+            # "asw_batch_pred_label": self._calculate_asw_batch_pred_label,
+            "ari": self._calculate_ari,
+            "nmi": self._calculate_nmi,
+            "ami": self._calculate_ami,
+        }
+
+    def _calculate_asw_true_label(self):
+        return silhouette_label(X=self.X_emb, labels=self._true)
+
+    def _calculate_asw_pred_label(self):
+        return silhouette_label(X=self.X_emb, labels=self._pred)
+
+    # def _calculate_asw_batch_true_label(self):
+    #     return silhouette_batch(X=self.X_emb, labels=self._true, batch=self.batch)
+
+    # def _calculate_asw_batch_pred_label(self):
+    #     return silhouette_batch(X=self.X_emb, labels=self._pred, batch=self.batch)
+
+    def _calculate_kbet_true_label(self):
+        nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=50)
+        return kbet_per_label(X=nn_result, batches=self.batch, labels=self._true)
+
+    def _calculate_kbet_pred_label(self):
+        nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=50)
+        return kbet_per_label(X=nn_result, batches=self.batch, labels=self._pred)
+
+    def _calculate_ari(self) -> float:
+        return ARI(self._true, self._pred)
+
+    def _calculate_nmi(self):
+        return NMI(self._true, self._pred)
+
+    def _calculate_ami(self):
+        return AMI(self._true, self._pred)
+
+    def calculate_metrics(self) -> Dict[str, float]:
+        """
+        Calculate all metrics and return them as a dictionary.
+
+        Returns:
+            Dict[str, float]: Dictionary of metric results.
+        """
+        metrics = {}
+        for name, func in self.metric_functions.items():
+            metrics[name] = func()
+        return metrics
+
+    # def _calculate_asw_true_label(self):
+    #     return ASW(adata=self.adata_true_label, label_key=self.label_key, embed=self.emb_key)
+
+    # def _calculate_asw_pred_label(self):
+    #     return ASW(adata=self.adata_pred_label, label_key=self.label_key, embed=self.emb_key)
+
+    # def _calculate_kbet_true_label(self):
+    #     return kBET(adata=self.adata_true_label, batch_key=self.batch_key, label_key=self.label_key, type_="embed", embed=self.emb_key)
+
+    # def _calculate_kbet_pred_label(self):
+    #     return kBET(adata=self.adata_pred_label, batch_key=self.batch_key, label_key=self.label_key, type_="embed", embed=self.emb_key)
+
+    # def make_adata(self, X: np.ndarray, X_emb: np.ndarray, labels: np.ndarray, batches: np.ndarray, batch_key: str = "batch", label_key: str = "label", emb_key: str = "X_emb") -> anndata.AnnData:
+    #     """
+    #     Create an AnnData object from the given embedding, labels, batch key, and label key.
+    #     Args:
+    #         emb (np.ndarray): The embedding data.
+    #         labels (np.ndarray): The cell labels.
+    #         batch_key (str): The key in the AnnData object for the batch information.
+    #         label_key (str): The key in the AnnData object for the cell labels.
+    #     Returns:
+    #         AnnData: The AnnData object.
+    #     """
+    #     adata = anndata.AnnData(X=X)
+    #     adata.obsm[emb_key] = X_emb
+    #     adata.obs[label_key] = labels
+    #     adata.obs[batch_key] = batches
+    #     return adata
