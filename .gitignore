@@ -25,7 +25,4 @@ lightning_logs/
 optimized_data/
 *.npy
 *.npz
-*.parquet
-*.csv
-*.xlsx
 *.zip

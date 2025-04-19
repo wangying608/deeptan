@@ -5,9 +5,11 @@ import pickle
 import shutil
 
 import litdata
+import numpy as np
+import polars as pl
 
 import deeptan.constants as const
-from deeptan.utils.data import DeepTANDataModule
+from deeptan.utils.data import DeepTANDataModule, read_nmic_npz
 
 
 def parse_args():
@@ -21,6 +23,7 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default=".tmp_data_optimized", help="Directory for logging")
     parser.add_argument("--thre_mi", type=float, default=const.default.threshold_nmic, help="Threshold for edge attribute")
     parser.add_argument("--in_feat", type=str, default="", help="Path to a .csv with header, containing a list of features to specify. If None, all features are used")
+    parser.add_argument("--in_obs", type=str, default="", help="")
     parser.add_argument("--n_workers", type=int, default=const.default.n_threads, help="Number of workers for data loading")
 
     return parser.parse_args()
@@ -38,6 +41,11 @@ if __name__ == "__main__":
         specify_features = None
     else:
         specify_features = args.in_feat
+
+    if len(args.in_obs) < 2:
+        specify_trn_obs = None
+    else:
+        specify_trn_obs = args.in_obs
 
     files_fit = {
         const.dkey.abbr_train: args.trn_npz,
@@ -70,10 +78,22 @@ if __name__ == "__main__":
     if labels is not None:
         shutil.copy(labels, os.path.join(args.output_dir, const.fname.label_class_onehot))
 
+    # Check obs_names filter
+    if specify_trn_obs is not None:
+        _edge_attr, _edge_index, _mat, _mat_feat_indices, _obs_names, _node_names = read_nmic_npz(args.trn_npz)
+        _obs_names_goal = pl.read_parquet(specify_trn_obs)["obs_names"].to_list()
+        # Get intersection of _obs_names and _obs_names_goal
+        _obs_names_filtered = list(set(_obs_names) & set(_obs_names_goal))
+        # Get available indices in _obs_names for the following litdata getting indices
+        _obs_names_indices = np.where(np.isin(_obs_names, _obs_names_filtered))[0]
+        _trn_indices = _obs_names_indices.tolist()
+    else:
+        _trn_indices = list(range(datamodule.train.len()))
+
     # Optimize
     litdata.optimize(
         fn=datamodule.train.get,
-        inputs=list(range(datamodule.train.len())),
+        inputs=_trn_indices,
         output_dir=os.path.join(args.output_dir, const.dkey.abbr_train),
         chunk_bytes=const.default.lit_chunk_bytes,
         compression=const.default.lit_compression,

@@ -70,13 +70,34 @@ def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
     return output
 
 
+def read_nmic_npz(npz_path: str):
+    r"""
+    Read NMIC results from a .npz file and convert them into a graph data.
+    """
+    # Load the NMIC results
+    results = np.load(npz_path)
+    df = pl.read_parquet(npz_path.replace(".npz", ".parquet"))
+
+    # Extract relevant data
+    edge_attr: np.ndarray = results["mi_values"]
+    edge_index: np.ndarray = results["feat_pairs"].T
+    mat: np.ndarray = results["processed_mat"].T
+    mat_feat_indices: np.ndarray = results["mat_feat_indices"]
+
+    # Extract node features (assuming the first column is obs_names)
+    obs_names: List[str] = df.select("obs_names").to_series().to_list()
+    node_names: List[str] = df.columns[1:]
+
+    return edge_attr, edge_index, mat, mat_feat_indices, obs_names, node_names
+
+
 class NMICGraphDataset(GDataset):
     def __init__(
         self,
         npz_path: str,
         labels: str | None,
         edge_attr_threshold: float = 0.1,
-        specify_features: Union[None, List[str]] = None,
+        specify_features: Optional[List[str]] = None,
         if_log1p: bool = True,
     ):
         """
@@ -97,7 +118,7 @@ class NMICGraphDataset(GDataset):
             self.mat_feat_indices,
             self.obs_names,
             self.node_names,
-        ) = self.read_nmic_results(npz_path)
+        ) = read_nmic_npz(npz_path)
 
         # Check if obs_names and node_names are unique
         if len(set(self.obs_names)) != len(self.obs_names):
@@ -206,26 +227,6 @@ class NMICGraphDataset(GDataset):
             edge_attr=edge_attrs,
             node_names=node_names,
         )
-
-    def read_nmic_results(self, npz_path: str):
-        r"""
-        Read NMIC results from a .npz file and convert them into a graph data.
-        """
-        # Load the NMIC results
-        results = np.load(npz_path)
-        df = pl.read_parquet(npz_path.replace(".npz", ".parquet"))
-
-        # Extract relevant data
-        edge_attr: np.ndarray = results["mi_values"]
-        edge_index: np.ndarray = results["feat_pairs"].T
-        mat: np.ndarray = results["processed_mat"].T
-        mat_feat_indices: np.ndarray = results["mat_feat_indices"]
-
-        # Extract node features (assuming the first column is obs_names)
-        obs_names: List[str] = df.select("obs_names").to_series().to_list()
-        node_names: List[str] = df.columns[1:]
-
-        return edge_attr, edge_index, mat, mat_feat_indices, obs_names, node_names
 
     def pick_label(self, obs_name: str):
         if self.labels is None:

@@ -1,15 +1,18 @@
 import os
 import pickle
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 import anndata
+import igraph as ig
+import leidenalg
 import numpy as np
 import polars as pl
 from scib_metrics import kbet, kbet_per_label, silhouette_batch, silhouette_label
 from scib_metrics.nearest_neighbors import jax_approx_min_k
+from scipy.sparse import csr_matrix
 from scipy.spatial.distance import jensenshannon
-from scipy.stats import pearsonr
-from sklearn.metrics import accuracy_score, precision_score, recall_score
+from scipy.stats import pearsonr, spearmanr
+from sklearn.metrics import accuracy_score, confusion_matrix, precision_score, recall_score
 from sklearn.metrics import adjusted_mutual_info_score as AMI
 from sklearn.metrics import adjusted_rand_score as ARI
 from sklearn.metrics import average_precision_score as AUPRC
@@ -66,16 +69,42 @@ class MetricsDictMaker:
             _tmp_df = pl.DataFrame({"fname": [_fname] * _tmp_df.shape[0]}).hstack(_tmp_df)
             _dfs.append(_tmp_df)
         _tmp: pl.DataFrame = pl.concat(_dfs)
+        _tmp = pl.DataFrame({"Capability": ["Feature Reconstruction"] * _tmp.shape[0]}).hstack(_tmp)
+        _tmp = pl.DataFrame({"Method": ["DeepTAN"] * _tmp.shape[0]}).hstack(_tmp)
         self.metrics_dict["summary_recon"] = _tmp.join(self.ident, on="fname", how="left")
 
         # For label
         _dfs = []
+        _confusion_matrices = []
+        _label_names = []
         for _fname in self.fnames:
-            _tmp_df = self.metrics_dict["metrics"]["label"][_fname]
+            _tmp_df = self.metrics_dict["metrics"]["label"][_fname]["df"]
+            _tmp_df = pl.DataFrame({"fname": [_fname] * _tmp_df.shape[0]}).hstack(_tmp_df)
+            _dfs.append(_tmp_df)
+
+            _tmp_cm = self.metrics_dict["metrics"]["label"][_fname]["confusion_matrix"]
+            _confusion_matrices.append(_tmp_cm)
+            _label_names.append(self.metrics_dict["metrics"]["label"][_fname]["label_names"])
+
+        _tmp: pl.DataFrame = pl.concat(_dfs)
+        _tmp = pl.DataFrame({"Capability": ["Labelling"] * _tmp.shape[0]}).hstack(_tmp)
+        _tmp = pl.DataFrame({"Method": ["DeepTAN"] * _tmp.shape[0]}).hstack(_tmp)
+        self.metrics_dict["summary_label"] = _tmp.join(self.ident, on="fname", how="left")
+        # For confusion matrix
+        # self.metrics_dict["confusion_matrices_mean"] = np.mean(np.stack(_confusion_matrices, axis=0), axis=0)
+        self.metrics_dict["confusion_matrices"] = _confusion_matrices
+        self.metrics_dict["label_names"] = _label_names
+
+        # For clustering
+        _dfs = []
+        for _fname in self.fnames:
+            _tmp_df = self.metrics_dict["metrics"]["cluster"][_fname]
             _tmp_df = pl.DataFrame({"fname": [_fname] * _tmp_df.shape[0]}).hstack(_tmp_df)
             _dfs.append(_tmp_df)
         _tmp: pl.DataFrame = pl.concat(_dfs)
-        self.metrics_dict["summary_label"] = _tmp.join(self.ident, on="fname", how="left")
+        _tmp = pl.DataFrame({"Capability": ["Clustering"] * _tmp.shape[0]}).hstack(_tmp)
+        _tmp = pl.DataFrame({"Method": ["DeepTAN"] * _tmp.shape[0]}).hstack(_tmp)
+        self.metrics_dict["summary_clustering"] = _tmp.join(self.ident, on="fname", how="left")
 
     def compute_all_metrics(self):
         """Computes all metrics for the predictions."""
@@ -95,13 +124,18 @@ class MetricsDictMaker:
         for _fname in self.fnames:
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
 
-            n_class = self.metrics_dict["prediction"][_fname]["y"].shape[1]
+            self.metrics_dict["metrics"]["label"][_fname] = {}
+            _label_names = self.metrics_dict["true"][f"seed_{_seed}_tst"]["y_df"].drop(["obs_names"]).columns
             _calculator = MulticlassMetricsCalculator(
                 self.metrics_dict["true"][f"seed_{_seed}_tst"]["y"],
                 self.metrics_dict["prediction"][_fname]["y"],
-                n_class,
+                _label_names,
             )
-            self.metrics_dict["metrics"]["label"][_fname] = pl.DataFrame(_calculator.calculate_metrics())
+            _metrics, _confusion_matrix = _calculator.calculate_metrics()
+            # _metrics = _calculator.calculate_metrics()
+            self.metrics_dict["metrics"]["label"][_fname]["df"] = pl.DataFrame(_metrics)
+            self.metrics_dict["metrics"]["label"][_fname]["confusion_matrix"] = _confusion_matrix
+            self.metrics_dict["metrics"]["label"][_fname]["label_names"] = _calculator._label_names
 
         # For cluster
         self.metrics_dict["metrics"]["cluster"] = {}
@@ -225,6 +259,7 @@ class RegressionMetricsCalculator:
             "mae": self._calculate_mae,
             "jsd": self._calculate_jsd,
             "pcc": self._calculate_pcc,
+            "spearman": self._calculate_spearman,
         }
 
     def _validate_arrays(self):
@@ -256,6 +291,12 @@ class RegressionMetricsCalculator:
             return np.array([pearsonr(t_row, p_row)[0] for t_row, p_row in zip(self._true, self._pred)])
         else:  # Feature-wise (columns)
             return np.array([pearsonr(self._true[:, i], self._pred[:, i])[0] for i in range(self.n_features)])
+
+    def _calculate_spearman(self, axis: int) -> np.ndarray:
+        if axis == 1:  # Sample-wise (rows)
+            return np.array([spearmanr(t_row, p_row)[0] for t_row, p_row in zip(self._true, self._pred)])
+        else:  # Feature-wise (columns)
+            return np.array([spearmanr(self._true[:, i], self._pred[:, i])[0] for i in range(self.n_features)])
 
     def _calculate_metrics(self, axis: int) -> Dict[str, Any]:
         r"""
@@ -308,7 +349,7 @@ class MulticlassMetricsCalculator:
     Supported metrics include weighted F1, macro F1, micro F1, AUROC, AUPRC, accuracy, precision, and recall.
     """
 
-    def __init__(self, true_labels: np.ndarray, pred_probs: np.ndarray, num_classes: int):
+    def __init__(self, true_labels: np.ndarray, pred_probs: np.ndarray, label_names: List[str]):
         """
         Initialize the calculator with true labels and predicted probabilities.
 
@@ -319,12 +360,21 @@ class MulticlassMetricsCalculator:
         """
         self._true_df = true_labels
         self._pred_probs = pred_probs
-        self._num_classes = num_classes
-        self._labels = np.arange(num_classes).tolist()  # Default labels are 0, 1, ..., num_classes-1
+        self._label_names = label_names
+        self._num_classes = len(label_names)
 
         # Convert predicted probabilities to predicted labels
         self._pred_labels = np.argmax(pred_probs, axis=1)
         self._true = np.argmax(self._true_df, axis=1)
+
+        # Find unique labels to avoid errors in confusion matrix
+        self._unique_labels = np.unique(np.concatenate((self._true, self._pred_labels)))
+        self._unique_labels.sort()
+        self._label_names = [self._label_names[i] for i in self._unique_labels]
+        _label_map = {label: i for i, label in enumerate(self._unique_labels)}
+        self._true = np.array([_label_map[label] for label in self._true])
+        self._pred_labels = np.array([_label_map[label] for label in self._pred_labels])
+        self._num_classes = len(self._unique_labels)
 
         self._validate_inputs()
 
@@ -348,25 +398,25 @@ class MulticlassMetricsCalculator:
             raise ValueError("True labels must be a 1-dimensional array.")
         if len(self._pred_probs.shape) != 2:
             raise ValueError("Predicted probabilities must be a 2-dimensional array.")
-        if self._true.shape[0] != self._pred_probs.shape[0]:
-            raise ValueError("True labels and predicted probabilities must have the same number of samples.")
-        if self._pred_probs.shape[1] != self._num_classes:
-            raise ValueError("Number of columns in predicted probabilities must match the number of classes.")
+        # if self._true.shape[0] != self._pred_probs.shape[0]:
+        #     raise ValueError("True labels and predicted probabilities must have the same number of samples.")
+        # if self._pred_probs.shape[1] != self._num_classes:
+        #     raise ValueError("Number of columns in predicted probabilities must match the number of classes.")
         if not np.allclose(self._pred_probs.sum(axis=1), 1.0, atol=1e-3):
             raise ValueError("Predicted probabilities must be softmax normalized (rows should sum to 1)")
 
     def _calculate_weighted_f1(self):
-        return F1(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
+        return F1(self._true, self._pred_labels, average="weighted", zero_division=0.0)
 
     def _calculate_macro_f1(self):
-        return F1(self._true, self._pred_labels, average="macro", labels=self._labels, zero_division=0.0)
+        return F1(self._true, self._pred_labels, average="macro", zero_division=0.0)
 
     def _calculate_micro_f1(self):
-        return F1(self._true, self._pred_labels, average="micro", labels=self._labels, zero_division=0.0)
+        return F1(self._true, self._pred_labels, average="micro", zero_division=0.0)
 
     def _calculate_auroc(self):
         try:
-            return AUROC(self._true_df, self._pred_probs, multi_class="ovr", average="weighted", labels=self._labels)
+            return AUROC(self._true_df, self._pred_probs, multi_class="ovr", average="weighted")
         except ValueError:
             return np.nan  # Return NaN if AUROC cannot be computed
 
@@ -377,12 +427,15 @@ class MulticlassMetricsCalculator:
         return accuracy_score(self._true, self._pred_labels)
 
     def _calculate_weighted_precision(self):
-        return precision_score(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
+        return precision_score(self._true, self._pred_labels, average="weighted", zero_division=0.0)
 
     def _calculate_weighted_recall(self):
-        return recall_score(self._true, self._pred_labels, average="weighted", labels=self._labels, zero_division=0.0)
+        return recall_score(self._true, self._pred_labels, average="weighted", zero_division=0.0)
 
-    def calculate_metrics(self) -> Dict[str, float]:
+    def _confusion_matrix(self):
+        return confusion_matrix(self._true, self._pred_labels)
+
+    def calculate_metrics(self):
         """
         Calculate all metrics and return them as a dictionary.
 
@@ -392,7 +445,8 @@ class MulticlassMetricsCalculator:
         metrics = {}
         for name, func in self.metric_functions.items():
             metrics[name] = func()
-        return metrics
+        return metrics, self._confusion_matrix()
+        # return metrics
 
 
 class ClusteringMetricsCalculator:
@@ -400,36 +454,38 @@ class ClusteringMetricsCalculator:
     Class to compute clustering metrics such as ARI, ASW, NMI, and kBET.
     """
 
-    def __init__(self, true_labels: np.ndarray, pred_labels: np.ndarray, batches: np.ndarray, X_emb: np.ndarray):
+    def __init__(self, true_labels: np.ndarray, pred_labels: np.ndarray, batches: np.ndarray, X_emb: np.ndarray, n_neighbors=50):
         """
         Initialize the calculator with true labels and predicted labels.
 
         Args:
             true_labels (np.ndarray): 2D array of true cluster labels.
             pred_labels (np.ndarray): 2D array of predicted cluster labels.
-            X (np.ndarray): 2D array of original data.
+            batches (np.ndarray): 1D array representing batch information for each cell.
             X_emb (np.ndarray): 2D array of embedded data.
-            batch_key (str): Key in adata.obs for batch information.
-            label_key (str): Key in adata.obs for cell labels.
-            emb_key (str): Key in adata.obsm for embedding data.
+            n_neighbors (int): Number of neighbors to consider for nearest neighbor calculations. Defaults to 50.
         """
         self._true = true_labels.argmax(axis=1)
         self._pred = pred_labels.argmax(axis=1)
         self.batch = batches
         self.X_emb = X_emb
+        self.nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=n_neighbors)
 
         # Define metric calculation functions
         self.metric_functions = {
-            "kbet_true_label": self._calculate_kbet_true_label,
-            "kbet_pred_label": self._calculate_kbet_pred_label,
+            "kbet": self._calculate_kbet,
             "asw_true_label": self._calculate_asw_true_label,
             "asw_pred_label": self._calculate_asw_pred_label,
-            # "asw_batch_true_label": self._calculate_asw_batch_true_label,
-            # "asw_batch_pred_label": self._calculate_asw_batch_pred_label,
             "ari": self._calculate_ari,
             "nmi": self._calculate_nmi,
             "ami": self._calculate_ami,
+            "ari_leiden": self._calculate_ari_leiden,
+            "nmi_leiden": self._calculate_nmi_leiden,
+            "ami_leiden": self._calculate_ami_leiden,
         }
+
+        # Calculate Leiden labels
+        self.leiden_labels = self._calculate_leiden_labels()
 
     def _calculate_asw_true_label(self):
         return silhouette_label(X=self.X_emb, labels=self._true)
@@ -437,19 +493,9 @@ class ClusteringMetricsCalculator:
     def _calculate_asw_pred_label(self):
         return silhouette_label(X=self.X_emb, labels=self._pred)
 
-    # def _calculate_asw_batch_true_label(self):
-    #     return silhouette_batch(X=self.X_emb, labels=self._true, batch=self.batch)
-
-    # def _calculate_asw_batch_pred_label(self):
-    #     return silhouette_batch(X=self.X_emb, labels=self._pred, batch=self.batch)
-
-    def _calculate_kbet_true_label(self):
-        nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=50)
-        return kbet_per_label(X=nn_result, batches=self.batch, labels=self._true)
-
-    def _calculate_kbet_pred_label(self):
-        nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=50)
-        return kbet_per_label(X=nn_result, batches=self.batch, labels=self._pred)
+    def _calculate_kbet(self):
+        _result = kbet(X=self.nn_result, batches=self.batch)
+        return _result[0]
 
     def _calculate_ari(self) -> float:
         return ARI(self._true, self._pred)
@@ -459,6 +505,37 @@ class ClusteringMetricsCalculator:
 
     def _calculate_ami(self):
         return AMI(self._true, self._pred)
+
+    def _calculate_leiden_labels(self):
+        """
+        Calculate Leiden clustering labels from the embedding.
+
+        Returns:
+            np.ndarray: Leiden cluster labels.
+        """
+        indices = self.nn_result.indices
+        n_samples = self.X_emb.shape[0]
+
+        # Create a sparse adjacency matrix
+        rows = np.repeat(np.arange(n_samples), self.nn_result.n_neighbors)
+        cols = indices.ravel()  # Assuming indices is a 1D array of indices
+        data = np.ones_like(rows)
+        adj_matrix = csr_matrix((data, (rows, cols)), shape=(n_samples, n_samples))
+
+        dense_adj_matrix = adj_matrix.toarray()
+        g = ig.Graph.Adjacency(dense_adj_matrix.astype(bool).tolist())
+        partition_type = leidenalg.RBConfigurationVertexPartition
+        partition = leidenalg.find_partition(g, partition_type)
+        return np.array(partition.membership)
+
+    def _calculate_ari_leiden(self) -> float:
+        return ARI(self._true, self.leiden_labels)
+
+    def _calculate_nmi_leiden(self):
+        return NMI(self._true, self.leiden_labels)
+
+    def _calculate_ami_leiden(self):
+        return AMI(self._true, self.leiden_labels)
 
     def calculate_metrics(self) -> Dict[str, float]:
         """

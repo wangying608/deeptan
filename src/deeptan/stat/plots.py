@@ -41,7 +41,7 @@ def kde_grid_plot(
     dir4save: Optional[str] = None,
 ):
     try:
-        plt.clf()
+        plt.close("all")
     except:
         pass
 
@@ -143,7 +143,7 @@ def kde_grid_plot(
     return fig
 
 
-def unpivot_summary(df: pl.DataFrame, seed: int | None = None) -> pl.DataFrame:
+def unpivot_summary(df: pl.DataFrame, seed: Optional[int] = None) -> pl.DataFrame:
     r"""
     Unpivot a summary dataframe to long format.
     """
@@ -158,14 +158,19 @@ def unpivot_summary(df: pl.DataFrame, seed: int | None = None) -> pl.DataFrame:
         return _df.drop(cols2drop).rename({"sample_mean": "value"})
     else:
         _df = _df.drop(cols2drop)
-    _df = _df.unpivot(index=["task"], on=_df.columns[:-1], variable_name="metric", value_name="value")
+    ind_cols = ["Method", "Capability", "task"]
+    on_cols = _df.columns
+    for _c in ind_cols:
+        on_cols.remove(_c)
+    _df = _df.unpivot(index=ind_cols, on=on_cols, variable_name="metric", value_name="value")
     return _df
 
 
 def metrics_plot_data(metrics_data: MetricsDictMaker, seed: Optional[int] = None):
     _df_plot_label = unpivot_summary(metrics_data.metrics_dict["summary_label"], seed=seed)
     _df_plot_recon = unpivot_summary(metrics_data.metrics_dict["summary_recon"], seed=seed).select(_df_plot_label.columns)
-    _df_plot_allmetrics = _df_plot_recon.vstack(_df_plot_label)
+    _df_plot_clust = unpivot_summary(metrics_data.metrics_dict["summary_clustering"], seed=seed).select(_df_plot_recon.columns)
+    _df_plot_allmetrics = _df_plot_recon.vstack(_df_plot_label).vstack(_df_plot_clust)
 
     # Pick metrics that are smaller the better and apply 1-value
     metrics_sb = ["mse", "mae", "jsd"]
@@ -176,19 +181,21 @@ def metrics_plot_data(metrics_data: MetricsDictMaker, seed: Optional[int] = None
     _df_plot_allmetrics = _df_plot_allmetrics.with_columns(pl.col("task").map_elements(lambda x: const.dkey.title_task_mapping.get(x, x), return_dtype=pl.Utf8).alias("task"))
     _df_plot_allmetrics = _df_plot_allmetrics.rename(const.dkey.title_colnameC2_mapping)
 
+    return _df_plot_allmetrics
+
     # Prepare data for radar chart
-    _tasks = _df_plot_allmetrics.group_by("Task").agg(pl.col("Value").alias("Values"))
-    _metrics = _df_plot_allmetrics["Metric"].unique().to_list()
-    _task_dict = {_t: _tasks.filter(pl.col("Task") == _t)["Values"].to_list()[0] for _t in _tasks["Task"]}
+    # _tasks = _df_plot_allmetrics.group_by("Task").agg(pl.col("Value").alias("Values"))
+    # _metrics = _df_plot_allmetrics["Metric"].unique().to_list()
+    # _task_dict = {_t: _tasks.filter(pl.col("Task") == _t)["Values"].to_list()[0] for _t in _tasks["Task"]}
 
-    # Prepare angles for radar chart
-    _n_metrics = len(_metrics)
-    angles = np.linspace(0, 2 * np.pi, _n_metrics, endpoint=False).tolist()
-    for key in _task_dict:
-        _task_dict[key] += _task_dict[key][:1]
-    angles += angles[:1]
+    # # Prepare angles for radar chart
+    # _n_metrics = len(_metrics)
+    # angles = np.linspace(0, 2 * np.pi, _n_metrics, endpoint=False).tolist()
+    # for key in _task_dict:
+    #     _task_dict[key] += _task_dict[key][:1]
+    # angles += angles[:1]
 
-    return _df_plot_allmetrics, _task_dict, angles
+    # return _df_plot_allmetrics, _task_dict, angles
 
 
 def metrics_plot(
@@ -197,24 +204,46 @@ def metrics_plot(
     dir4save: Optional[str] = None,
 ):
     try:
-        plt.clf()
+        plt.close("all")
     except:
         pass
 
     sns.set_theme(style="ticks")
     sns.set_context("paper", font_scale=1.0)
 
+    # Catplot for faceting based on Capability
+    fig = sns.catplot(
+        data=df4plot,
+        kind="bar",
+        x="Metric",
+        y="Value",
+        hue="Task",
+        row="Capability",  # Facet by Capability
+        height=4,
+        aspect=1.5,
+        sharey=False,
+        sharex=False,
+        width=0.6,  # Adjust the width of the bars
+        palette="colorblind",  # Color palette
+    )
+
+    # Adjusting labels and ticks
+    fig.set_axis_labels("Metric", "Value")
+    fig.set_xticklabels(rotation=30, ha="right")
+    fig.set_titles("{row_name}")  # Set facet titles
+    for ax in fig.axes.flat:
+        ax.tick_params(axis="both", which="major", length=3)
+        ax.tick_params(axis="both", which="minor", length=2)
+
     # Bar plot
-    fig = plt.figure(figsize=(8, 4))
-    sns.barplot(df4plot, x="Metric", y="Value", hue="Task")
-    plt.legend(loc="upper right", bbox_to_anchor=(1, 1))
-    plt.xlabel("Metric")
-    plt.ylabel("Value")
-    plt.xticks(rotation=30, ha="right")
-    plt.tick_params(axis="both", which="major", length=3)
-    plt.tick_params(axis="both", which="minor", length=2)
-    # plt.xaxis.set_major_formatter(ticker.FuncFormatter(format_ticks))
-    # plt.yaxis.set_major_formatter(ticker.FuncFormatter(format_ticks))
+    # fig = plt.figure(figsize=(8, 4))
+    # sns.barplot(df4plot, x="Metric", y="Value", hue="Task")
+    # plt.legend(loc="upper right", bbox_to_anchor=(1, 1))
+    # plt.xlabel("Metric")
+    # plt.ylabel("Value")
+    # plt.xticks(rotation=30, ha="right")
+    # plt.tick_params(axis="both", which="major", length=3)
+    # plt.tick_params(axis="both", which="minor", length=2)
 
     fig.tight_layout()
 
