@@ -11,6 +11,8 @@ abbr_train = "trn"
 abbr_val = "val"
 abbr_test = "tst"
 
+splits = [abbr_train, abbr_val, abbr_test]
+
 title_trn_loss = "trn/loss"
 title_val_loss = "val/loss"
 title_tst_loss = "tst/loss"
@@ -84,6 +86,7 @@ title_task_mapping = {
     "multitask_noguide": "Multitask (no SGG)",
     "focus_recon": "Focus on reconstruction",
     "focus_label": "Focus on labelling",
+    "focus_label_on_focus_recon": "Fine-tuned on reconstruction",
 }
 title_colnameC2_mapping = {
     "task": "Task",

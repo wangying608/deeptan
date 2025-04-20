@@ -1,6 +1,7 @@
 import os
 from typing import Dict, List, Optional
 
+import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
 import polars as pl
@@ -23,8 +24,10 @@ def kde_grid_plot_data(
         _dataset[_task] = {}
         _dataset[_task][dim] = {}
         for _met in metrics:
-            _fname = metrics_data.metrics_dict["summary_recon"].filter((pl.col("task") == _task) & (pl.col("metric") == _met) & (pl.col("seed_num") == seed))["fname"].item()
-            _dataset[_task][dim][_met] = metrics_data.metrics_dict["metrics"]["recon"][_fname][dim][_met]
+            _dataset[_task][dim][_met] = {}
+            for _split in const.dkey.splits:
+                _fname = metrics_data.metrics_dict["summary_recon"].filter((pl.col("task") == _task) & (pl.col("metric") == _met) & (pl.col("seed_num") == seed) & (pl.col("split") == _split))["fname"].item()
+                _dataset[_task][dim][_met][_split] = metrics_data.metrics_dict["metrics"]["recon"][_fname][dim][_met]
     return _dataset
 
 
@@ -39,6 +42,7 @@ def kde_grid_plot(
     dim: str = "sample_metrics",
     fig_name: Optional[str] = None,
     dir4save: Optional[str] = None,
+    split: str = "tst",
 ):
     try:
         plt.close("all")
@@ -77,8 +81,8 @@ def kde_grid_plot(
 
         for j, y_lab in enumerate(y_labs):
             ax = axes[i, j]
-            x_data = dataset[x_lab][dim][_met]["values"]
-            y_data = dataset[y_lab][dim][_met]["values"]
+            x_data = dataset[x_lab][dim][_met][split]["values"]
+            y_data = dataset[y_lab][dim][_met][split]["values"]
 
             # 绘制主KDE图
             sns.kdeplot(ax=ax, x=x_data, y=y_data, fill=True)
@@ -88,8 +92,8 @@ def kde_grid_plot(
             ax_histy = ax.inset_axes([1.04, 0, 0.25, 1], sharey=ax)
 
             # 绘制边缘分布
-            sns.kdeplot(x=dataset[x_lab][dim][_met]["values"], ax=ax_histx, fill=True, legend=False)
-            sns.kdeplot(y=dataset[y_lab][dim][_met]["values"], ax=ax_histy, fill=True, legend=False)
+            sns.kdeplot(x=dataset[x_lab][dim][_met][split]["values"], ax=ax_histx, fill=True, legend=False)
+            sns.kdeplot(y=dataset[y_lab][dim][_met][split]["values"], ax=ax_histy, fill=True, legend=False)
 
             # 移除边缘分布图的刻度、标签和边框
             ax_histx.set_ylabel(None)
@@ -143,10 +147,11 @@ def kde_grid_plot(
     return fig
 
 
-def unpivot_summary(df: pl.DataFrame, seed: Optional[int] = None) -> pl.DataFrame:
+def unpivot_summary(df: pl.DataFrame, split: str, seed: Optional[int] = None) -> pl.DataFrame:
     r"""
     Unpivot a summary dataframe to long format.
     """
+    df = df.filter(pl.col("split") == split)
     if seed is not None:
         _df = df.filter(pl.col("seed_num") == seed)
     else:
@@ -166,10 +171,10 @@ def unpivot_summary(df: pl.DataFrame, seed: Optional[int] = None) -> pl.DataFram
     return _df
 
 
-def metrics_plot_data(metrics_data: MetricsDictMaker, seed: Optional[int] = None):
-    _df_plot_label = unpivot_summary(metrics_data.metrics_dict["summary_label"], seed=seed)
-    _df_plot_recon = unpivot_summary(metrics_data.metrics_dict["summary_recon"], seed=seed).select(_df_plot_label.columns)
-    _df_plot_clust = unpivot_summary(metrics_data.metrics_dict["summary_clustering"], seed=seed).select(_df_plot_recon.columns)
+def metrics_plot_data(metrics_data: MetricsDictMaker, split: str, seed: Optional[int] = None):
+    _df_plot_label = unpivot_summary(metrics_data.metrics_dict["summary_label"], split, seed=seed)
+    _df_plot_recon = unpivot_summary(metrics_data.metrics_dict["summary_recon"], split, seed=seed).select(_df_plot_label.columns)
+    _df_plot_clust = unpivot_summary(metrics_data.metrics_dict["summary_clustering"], split, seed=seed).select(_df_plot_recon.columns)
     _df_plot_allmetrics = _df_plot_recon.vstack(_df_plot_label).vstack(_df_plot_clust)
 
     # Pick metrics that are smaller the better and apply 1-value
@@ -208,46 +213,76 @@ def metrics_plot(
     except:
         pass
 
+    # 设置主题和上下文
     sns.set_theme(style="ticks")
     sns.set_context("paper", font_scale=1.0)
 
-    # Catplot for faceting based on Capability
-    fig = sns.catplot(
-        data=df4plot,
-        kind="bar",
-        x="Metric",
-        y="Value",
-        hue="Task",
-        row="Capability",  # Facet by Capability
-        height=4,
-        aspect=1.5,
-        sharey=False,
-        sharex=False,
-        width=0.6,  # Adjust the width of the bars
-        palette="colorblind",  # Color palette
-    )
+    # 假设 df4plot 是输入数据框
+    # 计算每个 Capability 的 Metric 数量
+    capability_metric_counts = df4plot.group_by("Capability").agg(pl.count("Metric").alias("num_metrics")).to_pandas()
+    capability_metric_counts = capability_metric_counts.sort_values(by="Capability")
 
-    # Adjusting labels and ticks
-    fig.set_axis_labels("Metric", "Value")
-    fig.set_xticklabels(rotation=30, ha="right")
-    fig.set_titles("{row_name}")  # Set facet titles
-    for ax in fig.axes.flat:
-        ax.tick_params(axis="both", which="major", length=3)
-        ax.tick_params(axis="both", which="minor", length=2)
+    # 动态计算每个子图的高度
+    base_height = 0.06  # 每个 Metric 占用的高度
+    heights = capability_metric_counts["num_metrics"] * base_height
 
-    # Bar plot
-    # fig = plt.figure(figsize=(8, 4))
-    # sns.barplot(df4plot, x="Metric", y="Value", hue="Task")
-    # plt.legend(loc="upper right", bbox_to_anchor=(1, 1))
-    # plt.xlabel("Metric")
-    # plt.ylabel("Value")
-    # plt.xticks(rotation=30, ha="right")
-    # plt.tick_params(axis="both", which="major", length=3)
-    # plt.tick_params(axis="both", which="minor", length=2)
+    # 创建子图布局
+    fig = plt.figure(figsize=(3.1, sum(heights)))  # 总高度为所有子图高度之和
+    gs = gridspec.GridSpec(len(heights), 1, height_ratios=heights)
 
-    fig.tight_layout()
+    # 遍历每个 Capability，绘制子图
+    for i, (capability, num_metrics) in enumerate(zip(capability_metric_counts["Capability"], capability_metric_counts["num_metrics"])):
+        # 筛选出当前 Capability 的数据
+        data_subset = df4plot.filter(pl.col("Capability") == capability).to_pandas()
+
+        # 创建子图
+        ax = fig.add_subplot(gs[i])
+
+        # 绘制水平条形图
+        sns.barplot(
+            data=data_subset,
+            x="Value",
+            y="Metric",
+            hue="Task",
+            orient="h",
+            palette="colorblind",
+            ax=ax,
+            width=0.7,  # 固定柱子宽度
+        )
+
+        # 设置标题和标签
+        ax.set_title(capability, fontsize=10, y=0.98)
+        ax.set_xlabel("Value" if i == len(heights) - 1 else "")
+        ax.set_ylabel("")
+        ax.tick_params(axis="both", which="major", length=2)
+        ax.tick_params(axis="y", length=0)  # 移除 y 轴刻度线
+
+        y_ticks = ax.get_yticks()
+        ax.set_yticks(y_ticks)
+        ax.set_yticklabels(ax.get_yticklabels(), rotation=30, ha="right")
+
+        # 如果不是最后一个子图，隐藏 x 轴标签
+        # if i < len(heights) - 1:
+        #     ax.set_xticklabels([])
+
+        # 隐藏图例（只保留一个图例）
+        # if i != 0:  # 除了第一个子图外，隐藏其他子图的图例
+        #     ax.legend_.remove()
+        ax.legend_.remove()
+
+        # 删除顶部和右侧边框
+        ax.spines["top"].set_visible(False)  # 隐藏顶部边框
+        ax.spines["right"].set_visible(False)  # 隐藏右侧边框
+
+    # 手动添加一个全局图例
+    handles, labels = ax.get_legend_handles_labels()  # 获取最后一个子图的图例信息
+    fig.legend(handles, labels, loc="lower center", ncol=3, bbox_to_anchor=(0.5, -0.05), frameon=False)
+
+    # 调整布局
+    plt.tight_layout()
 
     if fig_name is not None and dir4save is not None:
         fig.savefig(os.path.join(dir4save, f"{fig_name}.png"), dpi=300)
         fig.savefig(os.path.join(dir4save, f"{fig_name}.pdf"))
+
     return fig
