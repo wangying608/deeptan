@@ -193,6 +193,9 @@ class MetricsDictMaker:
                 # Apply log1p
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)
 
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["obs_names"] = self.xxx_data_df[f"seed_{_seed}_{_split}"]["obs_names"].to_list()
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["feature_names"] = feature_names_seed_xx[1:]
+
                 # Load true labels
                 _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet"))
                 _labels_df = _labels_df.rename({"bc": "obs_names"})

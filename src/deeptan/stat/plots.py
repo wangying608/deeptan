@@ -26,8 +26,11 @@ def kde_grid_plot_data(
         for _met in metrics:
             _dataset[_task][dim][_met] = {}
             for _split in const.dkey.splits:
-                _fname = metrics_data.metrics_dict["summary_recon"].filter((pl.col("task") == _task) & (pl.col("metric") == _met) & (pl.col("seed_num") == seed) & (pl.col("split") == _split))["fname"].item()
-                _dataset[_task][dim][_met][_split] = metrics_data.metrics_dict["metrics"]["recon"][_fname][dim][_met]
+                try:
+                    _fname = metrics_data.metrics_dict["summary_recon"].filter((pl.col("task") == _task) & (pl.col("metric") == _met) & (pl.col("seed_num") == seed) & (pl.col("split") == _split))["fname"].item()
+                    _dataset[_task][dim][_met][_split] = metrics_data.metrics_dict["metrics"]["recon"][_fname][dim][_met]
+                except:
+                    continue
     return _dataset
 
 

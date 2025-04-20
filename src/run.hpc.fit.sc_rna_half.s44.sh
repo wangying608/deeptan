@@ -14,7 +14,7 @@ DEEPTAN_HOME=$MY_HOME/prj/deeptan
 SIF=$DEEPTAN_HOME/deeptan_20250408.sif
 myscript=run_05_fit_tune.py
 
-optdata=sc_rna_annotated_minmi0.0_top2000_half
+optdata=sc_rna_annotated_minmi0.1_top2000_half
 folder=seed_44
 task_name=multitask
 ntrial=1
