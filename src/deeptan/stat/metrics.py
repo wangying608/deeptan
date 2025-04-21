@@ -1,6 +1,6 @@
 import os
 import pickle
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional
 
 import anndata
 import igraph as ig
@@ -30,6 +30,41 @@ def format_ticks(x, pos):
     Format the ticks on the x-axis of a plot.
     """
     return f"{x:.2f}"
+
+
+def transform_ct_df(df: pl.DataFrame):
+    # 熔化数据框以使每个类别成为一行
+    melted_df = df.unpivot(index=["obs_names"], on=df.columns[1:], variable_name="ct", value_name="value")
+
+    # 过滤出值为1的行，因为每行只有一个1，所以这样可以得到正确的类别名称
+    filtered_df = melted_df.filter(pl.col("value") == 1)
+
+    # 选择需要的列
+    result_df = filtered_df.select(["obs_names", "ct"])
+
+    celltypes_ = result_df["ct"].to_list()
+    celltypes = [ct.replace("ct_", "") for ct in celltypes_ if ct.startswith("ct_")]
+    result_df = result_df.hstack(pl.DataFrame({"ct_": celltypes})).drop("ct").rename({"ct_": "ct"})
+
+    return result_df
+
+
+def read_batch_from_h5ad(h5ad_path: str) -> pl.DataFrame:
+    r"""
+    Read batch info from an h5ad file.
+    """
+    adata = anndata.read_h5ad(h5ad_path)
+    # batch_info = adata.obs["batch"].to_list()
+    possible_batch_keys = ["batch", "orig.ident", "Orig.ident"]
+    for _k in possible_batch_keys:
+        if _k in adata.obs.columns:
+            batch_info = adata.obs[_k].to_list()
+            break
+    else:
+        raise ValueError("No batch information found in the h5ad file. Available keys: ", possible_batch_keys)
+
+    result_df = pl.DataFrame({"obs_names": adata.obs_names.to_list(), "batch": batch_info})
+    return result_df
 
 
 class MetricsDictMaker:
@@ -124,13 +159,14 @@ class MetricsDictMaker:
             self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
 
             self.metrics_dict["prediction"][_fname]["X"] = None
-            self.metrics_dict["prediction"][_fname]["node_recon_all"] = None
         self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = None
 
         # For label
         print("Computing metrics for label...")
         self.metrics_dict["metrics"]["label"] = {}
         for _fname in self.fnames:
+            if "y" not in self.metrics_dict["prediction"][_fname]:
+                continue
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
@@ -155,13 +191,14 @@ class MetricsDictMaker:
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
             if self.orig_h5ad is not None:
-                batch_info = self.read_batch_from_h5ad(self.orig_h5ad, _seed, _split)["batch"].to_numpy()
+                batch_info = self._read_batch_from_h5ad(self.orig_h5ad, _seed, _split)["batch"].to_numpy()
             else:
                 batch_info = np.repeat("batch_0", len(self.xxx_data_df[f"seed_{_seed}_{_split}"]))
 
             _calculator = ClusteringMetricsCalculator(
                 true_labels=self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"],
-                pred_labels=self.metrics_dict["prediction"][_fname]["y"],
+                # pred_labels=self.metrics_dict["prediction"][_fname]["y"],
+                pred_labels=None,
                 batches=batch_info,
                 X_emb=self.metrics_dict["prediction"][_fname]["g_embedding"],
             )
@@ -174,6 +211,7 @@ class MetricsDictMaker:
             with open(_path, "rb") as f:
                 self.metrics_dict["prediction"][_fname] = pickle.load(f)
             self.metrics_dict["prediction"][_fname]["X"] = np.squeeze(self.metrics_dict["prediction"][_fname]["node_recon_all"], axis=-1)
+            self.metrics_dict["prediction"][_fname]["node_recon_all"] = None
             self.metrics_dict["prediction"][_fname]["y"] = self.metrics_dict["prediction"][_fname]["labels"]
             if self.softmax_pred_labels:
                 self.metrics_dict["prediction"][_fname]["y"] = self.softmax(self.metrics_dict["prediction"][_fname]["y"])
@@ -199,7 +237,7 @@ class MetricsDictMaker:
                 # Load true labels
                 _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet"))
                 _labels_df = _labels_df.rename({"bc": "obs_names"})
-                _labels_all = self.transform_ct_df(_labels_df)
+                _labels_all = transform_ct_df(_labels_df)
 
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
@@ -225,37 +263,11 @@ class MetricsDictMaker:
                 _fname.append(_file)
         return pl.DataFrame({"fname": _fname, "seed": _seeds, "seed_num": _seeds_num, "task": _tasks, "split": _split, "path": _paths})
 
-    def transform_ct_df(self, df: pl.DataFrame):
-        # 熔化数据框以使每个类别成为一行
-        melted_df = df.unpivot(index=["obs_names"], on=df.columns[1:], variable_name="ct", value_name="value")
-
-        # 过滤出值为1的行，因为每行只有一个1，所以这样可以得到正确的类别名称
-        filtered_df = melted_df.filter(pl.col("value") == 1)
-
-        # 选择需要的列
-        result_df = filtered_df.select(["obs_names", "ct"])
-
-        celltypes_ = result_df["ct"].to_list()
-        celltypes = [ct.replace("ct_", "") for ct in celltypes_ if ct.startswith("ct_")]
-        result_df = result_df.hstack(pl.DataFrame({"ct_": celltypes})).drop("ct").rename({"ct_": "ct"})
-
-        return result_df
-
-    def read_batch_from_h5ad(self, h5ad_path: str, _seed: int, _split: str) -> pl.DataFrame:
+    def _read_batch_from_h5ad(self, h5ad_path: str, _seed: int, _split: str) -> pl.DataFrame:
         r"""
         Read batch info from an h5ad file.
         """
-        adata = anndata.read_h5ad(h5ad_path)
-        # batch_info = adata.obs["batch"].to_list()
-        possible_batch_keys = ["batch", "orig.ident", "Orig.ident"]
-        for _k in possible_batch_keys:
-            if _k in adata.obs.columns:
-                batch_info = adata.obs[_k].to_list()
-                break
-        else:
-            raise ValueError("No batch information found in the h5ad file. Available keys: ", possible_batch_keys)
-
-        result_df = pl.DataFrame({"obs_names": adata.obs_names.to_list(), "batch": batch_info})
+        result_df = read_batch_from_h5ad(h5ad_path)
         return result_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
 
 
@@ -471,7 +483,7 @@ class ClusteringMetricsCalculator:
     Class to compute clustering metrics such as ARI, ASW, NMI, and kBET.
     """
 
-    def __init__(self, true_labels: np.ndarray, pred_labels: np.ndarray, batches: np.ndarray, X_emb: np.ndarray, n_neighbors=50):
+    def __init__(self, true_labels: np.ndarray, pred_labels: Optional[np.ndarray], batches: np.ndarray, X_emb: np.ndarray, n_neighbors=50):
         """
         Initialize the calculator with true labels and predicted labels.
 
@@ -483,10 +495,18 @@ class ClusteringMetricsCalculator:
             n_neighbors (int): Number of neighbors to consider for nearest neighbor calculations. Defaults to 50.
         """
         self._true = true_labels.argmax(axis=1)
-        self._pred = pred_labels.argmax(axis=1)
+
         self.batch = batches
         self.X_emb = X_emb
         self.nn_result = jax_approx_min_k(X=self.X_emb, n_neighbors=n_neighbors)
+
+        # Calculate Leiden labels
+        self.leiden_labels = self._calculate_leiden_labels()
+
+        if pred_labels is None:
+            self._pred = self.leiden_labels
+        else:
+            self._pred = pred_labels.argmax(axis=1)
 
         # Define metric calculation functions
         self.metric_functions = {
@@ -500,9 +520,6 @@ class ClusteringMetricsCalculator:
             "nmi_leiden": self._calculate_nmi_leiden,
             "ami_leiden": self._calculate_ami_leiden,
         }
-
-        # Calculate Leiden labels
-        self.leiden_labels = self._calculate_leiden_labels()
 
     def _calculate_asw_true_label(self):
         return silhouette_label(X=self.X_emb, labels=self._true)
