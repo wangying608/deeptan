@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--thre_mi", type=float, default=const.default.threshold_nmic, help="Threshold for edge attribute")
     parser.add_argument("--in_feat", type=str, default="", help="Path to a .csv with header, containing a list of features to specify. If None, all features are used")
     parser.add_argument("--in_obs", type=str, default="", help="")
+    parser.add_argument("--onlytest", action="store_true", help="Only run the test phase")
     parser.add_argument("--n_workers", type=int, default=const.default.n_threads, help="Number of workers for data loading")
 
     return parser.parse_args()
@@ -91,22 +92,23 @@ if __name__ == "__main__":
         _trn_indices = list(range(datamodule.train.len()))
 
     # Optimize
-    litdata.optimize(
-        fn=datamodule.train.get,
-        inputs=_trn_indices,
-        output_dir=os.path.join(args.output_dir, const.dkey.abbr_train),
-        chunk_bytes=const.default.lit_chunk_bytes,
-        compression=const.default.lit_compression,
-        num_workers=min(args.n_workers, const.default.n_threads),
-    )
-    litdata.optimize(
-        fn=datamodule.val.get,
-        inputs=list(range(datamodule.val.len())),
-        output_dir=os.path.join(args.output_dir, const.dkey.abbr_val),
-        chunk_bytes=const.default.lit_chunk_bytes,
-        compression=const.default.lit_compression,
-        num_workers=min(args.n_workers, const.default.n_threads),
-    )
+    if not args.onlytest:
+        litdata.optimize(
+            fn=datamodule.train.get,
+            inputs=_trn_indices,
+            output_dir=os.path.join(args.output_dir, const.dkey.abbr_train),
+            chunk_bytes=const.default.lit_chunk_bytes,
+            compression=const.default.lit_compression,
+            num_workers=min(args.n_workers, const.default.n_threads),
+        )
+        litdata.optimize(
+            fn=datamodule.val.get,
+            inputs=list(range(datamodule.val.len())),
+            output_dir=os.path.join(args.output_dir, const.dkey.abbr_val),
+            chunk_bytes=const.default.lit_chunk_bytes,
+            compression=const.default.lit_compression,
+            num_workers=min(args.n_workers, const.default.n_threads),
+        )
     litdata.optimize(
         fn=datamodule.test.get,
         inputs=list(range(datamodule.test.len())),

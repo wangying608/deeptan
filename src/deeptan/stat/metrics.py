@@ -72,7 +72,15 @@ class MetricsDictMaker:
     Make a dictionary of metrics for predictions of **a dataset**.
     """
 
-    def __init__(self, predictions_dir: str, true_data_dir: str, softmax_pred_labels: bool = True, orig_h5ad: str | None = None):
+    def __init__(
+        self,
+        predictions_dir: str,
+        true_data_dir: str,
+        softmax_pred_labels: bool = True,
+        orig_h5ad: str | None = None,
+        s_task: Optional[str] = None,
+        s_split: Optional[str] = None,
+    ):
         self.predictions_dir = predictions_dir
         self.true_data_dir = true_data_dir
         self.softmax_pred_labels = softmax_pred_labels
@@ -81,7 +89,7 @@ class MetricsDictMaker:
 
         self.metrics_dict = {}
 
-        self.ident = self.detect_pkl()
+        self.ident = self.detect_pkl(s_task, s_split)
         self.fnames = self.ident["fname"].to_list()
         self.metrics_dict["identify"] = self.ident
         self.metrics_dict["prediction"] = {}
@@ -159,7 +167,7 @@ class MetricsDictMaker:
             self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
 
             self.metrics_dict["prediction"][_fname]["X"] = None
-        self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = None
+            # self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = None
 
         # For label
         print("Computing metrics for label...")
@@ -223,8 +231,10 @@ class MetricsDictMaker:
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"] = {}
 
                 # Use the 1st fname of seed xx to get feature names
-                _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
-                feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
+                # _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
+                # feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
+                _path_feat_top2000 = [i for i in os.listdir(os.path.join(self.true_data_dir, "top2000")) if i.find(f"{_seed}") != -1][0]
+                feature_names_seed_xx = ["obs_names"] + pl.read_csv(os.path.join(self.true_data_dir, "top2000", _path_feat_top2000)).to_series(0).to_list()
                 _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
                 self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx)
                 xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
@@ -243,25 +253,35 @@ class MetricsDictMaker:
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
 
-    def detect_pkl(self):
+    def detect_pkl(self, s_task: Optional[str], s_split: Optional[str]):
         """Detects all pickle files in the predictions directory."""
-        _fname = []
+        _fnames = []
         _seeds = []
         _seeds_num = []
         _tasks = []
-        _split = []
+        _splits = []
         _paths = []
         for _file in os.listdir(self.predictions_dir):
             if _file.endswith(".pkl"):
                 _path = os.path.join(self.predictions_dir, _file)
-                _prop = _path.removesuffix(".pkl").split("+")
+                _prop = _file.removesuffix(".pkl").split("+")
+
+                _task = _prop[2]
+                _split = _prop[3]
+                if s_task is not None and _task != s_task:
+                    print(f"Skipping task {_task} as it does not match the specified task {s_task}.")
+                    continue
+                if s_split is not None and _split != s_split:
+                    print(f"Skipping split {_split} as it does not match the specified split {s_split}.")
+                    continue
+
                 _seeds.append(_prop[1])
                 _seeds_num.append(int(_prop[1].replace("seed_", "")))
-                _tasks.append(_prop[2])
-                _split.append(_prop[3])
+                _tasks.append(_task)
+                _splits.append(_split)
                 _paths.append(_path)
-                _fname.append(_file)
-        return pl.DataFrame({"fname": _fname, "seed": _seeds, "seed_num": _seeds_num, "task": _tasks, "split": _split, "path": _paths})
+                _fnames.append(_file)
+        return pl.DataFrame({"fname": _fnames, "seed": _seeds, "seed_num": _seeds_num, "task": _tasks, "split": _splits, "path": _paths})
 
     def _read_batch_from_h5ad(self, h5ad_path: str, _seed: int, _split: str) -> pl.DataFrame:
         r"""

@@ -80,6 +80,9 @@ title_metric_mapping = {
     "ari_leiden": "ARI (Leiden)",
     "nmi_leiden": "NMI (Leiden)",
     "ami_leiden": "AMI (Leiden)",
+    "method": "Method",
+    "train_size": "Train size",
+    "n_feat": "Number of features for test",
 }
 title_task_mapping = {
     "multitask": "Multitask",
