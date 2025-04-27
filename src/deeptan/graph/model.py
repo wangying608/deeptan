@@ -220,15 +220,6 @@ class DeepTAN(ltn.LightningModule):
         self._init_metrics()
 
     def forward(self, batch: GData) -> Dict[str, Any]:
-        # assert batch.x is not None, "Input x is None"
-        # assert batch.edge_index is not None, "Input edge_index is None"
-        # assert batch.x.dim() == 2, f"The input dim is wrong: {batch.x.shape}"
-        # assert batch.edge_index.max() < batch.x.size(0), f"The edge index is wrong: {batch.edge_index.shape}"
-
-        # Check if all node names are valid
-        # for nodes in batch.node_names:
-        #     assert all(n in self.dict_node_names for n in nodes), f"Node names are not valid: {batch.node_names}"
-
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(batch, "batch", torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device))
 
@@ -395,36 +386,23 @@ class DeepTAN(ltn.LightningModule):
         self.metrics_common = torch.nn.ModuleDict({f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_") for k in ["train", "val", "test"]})
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
-        # assert batch.x is not None
         losses = {}
 
         node_true_val_for_loss = batch.x.squeeze(1)
-        # print("\nSize of batch.x:", batch.x.shape)
-        # print("\nShape of xhat and x:\n", outputs["node_recon_for_loss"].shape, node_true_val_for_loss.shape)
 
         self.metrics_common[f"{stage}_metrics"].update(outputs["node_recon_for_loss"], node_true_val_for_loss)
 
         # Node reconstruction loss
         recon_loss = F.mse_loss(outputs["node_recon_for_loss"], node_true_val_for_loss)
 
-        # kl_loss = F.kl_div(
-        #     F.log_softmax(outputs["node_recon_for_loss"], dim=1),
-        #     F.softmax(node_true_val_for_loss, dim=1),
-        #     log_target=True,
-        #     reduction="mean",
-        # )
-
         recon_loss_zeros = F.mse_loss(
             outputs["node_recon_for_loss_zeros"],
             torch.zeros_like(outputs["node_recon_for_loss_zeros"]),
         )
 
-        # losses["recon_KLD"] = kl_loss
         losses["recon_MSE"] = recon_loss
         losses["recon_zeros"] = recon_loss_zeros
 
-        # Total reconstruction loss
-        # losses["recon"] = recon_loss + kl_loss + recon_loss_zeros
         losses["recon"] = recon_loss + recon_loss_zeros
 
         # Graph-level label prediction loss
@@ -479,24 +457,6 @@ class DeepTAN(ltn.LightningModule):
                 self.current_epoch_work = 0
             if self.current_epoch < 3:
                 self.current_epoch_work = 0
-
-            # if self.current_epoch_work == 0:
-            #     # Focus on reconstruction loss
-            #     self.g_label_predictor.requires_grad_(False)
-            #     self.ge_decoder.requires_grad_(True)
-            #     self.amsgp.requires_grad_(True)
-            # elif self.current_epoch_work == 1:
-            #     # Focus on label prediction loss
-            #     self.g_label_predictor.requires_grad_(True)
-            #     self.ge_decoder.requires_grad_(False)
-            #     self.amsgp.requires_grad_(False)
-            # else:
-            #     # Mix both losses
-            #     self.g_label_predictor.requires_grad_(True)
-            #     self.ge_decoder.requires_grad_(True)
-            #     self.amsgp.requires_grad_(True)
-
-            # self.zero_grad(set_to_none=False)
 
         if self.focus_task is None:
             if stage == "train":
@@ -602,7 +562,6 @@ def train_model(
     """
 
     callback_es = EarlyStopping(
-        # monitor=const.dkey.title_val_loss,
         monitor="val/loss_unweighted",
         patience=es_patience,
         mode="min",
@@ -611,19 +570,14 @@ def train_model(
     callback_ckpt = ModelCheckpoint(
         dirpath=log_dir,
         filename=const.default.ckpt_fname_format,
-        # monitor=const.dkey.title_val_loss,
         monitor="val/loss_unweighted",
     )
     lr_monitor = LearningRateMonitor(logging_interval="step")
 
     logger_tr = TensorBoardLogger(save_dir=log_dir, name="")
 
-    # profiler = AdvancedProfiler(dirpath=log_dir, filename="perf_logs")
-
     trainer = Trainer(
         fast_dev_run=fast_dev_run,
-        # profiler=profiler,
-        # strategy="ddp_spawn",
         enable_progress_bar=True,
         accumulate_grad_batches=accumulate_grad_batches,
         logger=logger_tr,
