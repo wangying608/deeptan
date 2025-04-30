@@ -12,6 +12,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 
 import deeptan.constants as const
+from deeptan.utils.uni import get_adaptive_chunk_size
 
 
 class NodeEmbedding(nn.Module):
@@ -162,6 +163,9 @@ class AMSGP(torch.nn.Module):
         self.thre_sg_overlap = threshold_subgraph_overlap
         self.dropout = dropout
         self.chunk_size = chunk_size
+        self.node_emb_dim = node_emb_dim
+        self.n_heads_node_emb = n_heads_node_emb
+        self.n_heads_pooling = n_heads_pooling
 
         # Node embedding
         self.node_embedding_layers = NodeEmbedding(
@@ -194,6 +198,8 @@ class AMSGP(torch.nn.Module):
         unique_batches = torch.unique(batch)
         graph_embs = []
 
+        self._device = x.device
+
         # print("\nStart graph embedding...")
         for graph_id in unique_batches:
             # print("Graph ID:", graph_id)
@@ -204,7 +210,7 @@ class AMSGP(torch.nn.Module):
             # Skip empty graphs
             if node_indices.numel() == 0:
                 print("Warning: Empty graph detected")
-                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
             # Extract edges for the current graph
@@ -212,8 +218,8 @@ class AMSGP(torch.nn.Module):
             sub_edge_index = edge_index[:, edge_mask]
 
             # Adjust edge indices to local indices
-            local_node_ids = torch.arange(mask.sum(), device=x.device)
-            global_to_local = torch.zeros_like(mask, dtype=torch.long, device=x.device)
+            local_node_ids = torch.arange(mask.sum(), device=self._device)
+            global_to_local = torch.zeros_like(mask, dtype=torch.long, device=self._device)
             global_to_local[node_indices] = local_node_ids
 
             # Apply global-to-local mapping
@@ -226,7 +232,7 @@ class AMSGP(torch.nn.Module):
             # Validate subgraph edge indices
             if sub_edge_index.numel() == 0:
                 print("Warning: Empty subgraph detected")
-                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
             # Compute dynamic centrality
@@ -248,20 +254,21 @@ class AMSGP(torch.nn.Module):
                 graph_embs.append(g_emb)
             else:
                 # Process empty subgraph case
-                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=x.device))
+                graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
 
         # Stack all graph embeddings
         return torch.stack(graph_embs), E_all, ids
 
     def _calculate_dynamic_centrality(self, h, edge_index):
+        chunk_size = get_adaptive_chunk_size(h.size())
         with torch.no_grad():
             row, col = edge_index
             num_edges = edge_index.size(1)
             sim_ = []
 
             # Calculate similarity for each edge in batches to reduce peak memory usage.
-            for i in range(0, num_edges, self.chunk_size):
-                idx = slice(i, min(i + self.chunk_size, num_edges))
+            for i in range(0, num_edges, chunk_size):
+                idx = slice(i, min(i + chunk_size, num_edges))
                 h_i = h[row[idx]]
                 h_j = h[col[idx]]
 
@@ -294,6 +301,7 @@ class AMSGP(torch.nn.Module):
 
     def _generate_multiscale_subgraphs(self, edge_index, centrality, h) -> List[GData]:
         """Generate hierarchical subgraphs using centrality histogram bins.
+
         基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
 
         This method generates multiscale subgraphs by dividing nodes into bins based on their centrality.
@@ -329,8 +337,10 @@ class AMSGP(torch.nn.Module):
             if current_nodes.numel() == 0:
                 continue
 
+            chunk_size = get_adaptive_chunk_size((current_nodes.shape[0], edge_index.shape[1], h.shape[1]))
+
             # Batch process nodes in chunks
-            for nodes in current_nodes.split(min(self.chunk_size, current_nodes.numel(), const.default.subg_chunk_size)):
+            for nodes in current_nodes.split(min(chunk_size, current_nodes.numel())):
                 subsets, subg_edge_indices = self._batch_k_hop_subgraph(nodes, self.n_hop, edge_index, num_nodes)
 
                 for subset, subg_edge_idx, center_node in zip(subsets, subg_edge_indices, nodes.tolist()):
@@ -426,17 +436,6 @@ class AMSGP(torch.nn.Module):
             edge_indices.append(sub_edge_index)
         return subsets, edge_indices
 
-    # @staticmethod
-    # def hist_fd(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    #     """Freedman-Diaconis histogram calculation."""
-    #     q75, q25 = torch.quantile(tensor, torch.tensor([0.75, 0.25], device=tensor.device))
-    #     iqr = q75 - q25
-    #     bin_width = 2 * iqr * (tensor.numel() ** (-1 / 3))
-    #     num_bins = max(1, int((tensor.max() - tensor.min()) / (bin_width + 1e-8)))
-    #     counts = torch.histc(tensor, bins=num_bins)
-    #     edges = torch.linspace(tensor.min(), tensor.max(), num_bins + 1, device=tensor.device)
-    #     return counts, edges
-
     @staticmethod
     def hist_fd(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Freedman-Diaconis rule with memory optimization."""
@@ -468,20 +467,20 @@ class AMSGP(torch.nn.Module):
         return hist, edges
 
     def _create_graph_embeddings(self, subgraphs):
-        chunk_size = self.chunk_size
+        num_subgraphs = len(subgraphs)
+        if num_subgraphs == 0:
+            return torch.zeros(self.output_dim_g_emb, device=self._device)
+
+        chunk_size = get_adaptive_chunk_size((num_subgraphs, const.default.estimated_nfeat_per_g, self.node_emb_dim))
         all_embs = []
         for i in range(0, len(subgraphs), chunk_size):
             subgraph_chunk = subgraphs[i : i + chunk_size]
             chunk_embs = [self._process_subgraph(g) for g in subgraph_chunk]
-            chunk_embs = torch.cat(chunk_embs, dim=0) if chunk_embs else torch.empty(0, self.output_dim_g_emb, device=self.x.device)
+            chunk_embs = torch.cat(chunk_embs, dim=0) if chunk_embs else torch.empty(0, self.output_dim_g_emb, device=self._device)
             all_embs.append(chunk_embs)
-        embs = torch.cat(all_embs, dim=0) if all_embs else torch.zeros(0, self.output_dim_g_emb, device=self.x.device)
+        embs = torch.cat(all_embs, dim=0) if all_embs else torch.zeros(0, self.output_dim_g_emb, device=self._device)
 
         # Build super graph
-        num_subgraphs = len(subgraphs)
-        if num_subgraphs == 0:
-            return torch.zeros(self.output_dim_g_emb, device=self.x.device)
-
         edge_index = to_undirected(torch.combinations(torch.arange(num_subgraphs, device=embs.device)).t())
         super_nodes = GData(x=embs, edge_index=edge_index)
 
@@ -544,11 +543,13 @@ class WGATLayer_chunked(MessagePassing):
         if num_edges == 0:
             print("Empty edge index, returning zeros.")
             return torch.zeros_like(x_i)
-        h_chunks = []
+
+        chunk_size = get_adaptive_chunk_size((num_edges, self.output_dim, self.num_heads))
 
         # Process in chunks to reduce peak memory
-        for i in range(0, num_edges, self.chunk_size):
-            idx = slice(i, min(i + self.chunk_size, num_edges))
+        h_chunks = []
+        for i in range(0, num_edges, chunk_size):
+            idx = slice(i, min(i + chunk_size, num_edges))
             _chunk_size = idx.stop - idx.start
             # Split computation to avoid concatenation
             h_i = self.W_i(x_i[idx]).view(_chunk_size, self.num_heads, self.output_dim)
@@ -556,7 +557,8 @@ class WGATLayer_chunked(MessagePassing):
             h = h_i + h_j
 
             # Calculate attention coefficients
-            a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
+            # a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
+            a = torch.einsum("bho,ho->bh", h, self.attn)
 
             if edge_attr is not None:
                 a = a * edge_attr[idx].view(-1, 1)  # .expand(-1, self.num_heads)
@@ -567,75 +569,11 @@ class WGATLayer_chunked(MessagePassing):
             # Transform and weight features
             x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
             # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
-            x_trans = torch.einsum("b l h, b l -> b h", x_trans, a)
+            x_trans = torch.einsum("blh,bl->bh", x_trans, a)
             h_chunks.append(x_trans)
 
         h = torch.cat(h_chunks, dim=0)
         return h
-
-
-'''
-class WGATLayer(MessagePassing):
-    r"""
-    (NMIC) Weighted Graph Attention Layer.
-    """
-
-    def __init__(
-        self,
-        input_dim: int,
-        output_dim: int,
-        num_heads: int,
-        dropout: float = const.default.dropout,
-    ):
-        r"""
-        Initialize the Weighted Graph Attention Layer.
-
-        Args:
-            input_dim: The dimension of the input embeddings.
-            output_dim: The dimension of the output embeddings.
-            num_heads: The number of attention heads.
-            dropout: The dropout probability for the attention weights.
-        """
-        super().__init__(aggr="add")
-        self.output_dim = output_dim
-        self.num_heads = num_heads
-        self.dropout = dropout
-
-        # Split weight matrix into two parts to avoid concatenation
-        self.W_i = nn.Linear(input_dim, output_dim * num_heads)
-        self.W_j = nn.Linear(input_dim, output_dim * num_heads)
-
-        self.trans = nn.Linear(input_dim, output_dim * num_heads)
-        self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
-        self.reset_parameters()
-
-    def reset_parameters(self):
-        nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
-        nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
-        nn.init.normal_(self.attn, mean=0, std=0.1)
-
-    def forward(self, x, edge_index, edge_attr=None):
-        return self.propagate(edge_index, x=x, edge_attr=edge_attr)
-
-    def message(self, x_i, x_j, edge_attr):
-        h_i = self.W_i(x_i).view(x_i.size(0), self.num_heads, self.output_dim)
-        h_j = self.W_j(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
-        h = h_i + h_j
-
-        # a = (h * self.attn.unsqueeze(0)).sum(dim=-1)
-        h = (h * self.attn.unsqueeze(0)).sum(dim=-1)
-
-        if edge_attr is not None:
-            h = h * edge_attr.view(-1, 1)  # .expand(-1, self.num_heads)
-
-        h = F.softmax(h, dim=0)
-
-        x_trans = self.trans(x_j).view(x_j.size(0), self.num_heads, self.output_dim)
-        # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
-        x_trans = torch.einsum("b l h, b l -> b h", x_trans, h)
-
-        return x_trans
-'''
 
 
 class GE_Decoder(nn.Module):
@@ -660,6 +598,7 @@ class GE_Decoder(nn.Module):
         self.output_dim = output_dim
         self.hidden_dim = hidden_dim
         self.chunk_size = chunk_size
+        self.n_heads = n_heads
 
         # Cross-attention layer
         self.cross_attn = nn.MultiheadAttention(embed_dim=h_dim, num_heads=n_heads, dropout=dropout, batch_first=True)
@@ -707,16 +646,14 @@ class GE_Decoder(nn.Module):
         batch_size = z.size(0)
         num_all_nodes = E_all.size(0)
 
-        h_chunks = []
+        chunk_size = get_adaptive_chunk_size((num_all_nodes, batch_size, self.h_dim, self.n_heads, 7))
 
         # Process all data in chunks
-        for i in range(0, num_all_nodes, self.chunk_size):
-            end_idx = min(i + self.chunk_size, num_all_nodes)
-            current_chunk = E_all[i:end_idx]
-
-            # Expand z and current chunk to batch dimension
+        h_chunks = []
+        for i in range(0, num_all_nodes, chunk_size):
+            end_idx = min(i + chunk_size, num_all_nodes)
+            E_chunk = E_all[i:end_idx].unsqueeze(0).expand(batch_size, -1, -1)
             z_chunk = z.unsqueeze(1).expand(-1, end_idx - i, -1)
-            E_chunk = current_chunk.unsqueeze(0).expand(batch_size, -1, -1)
 
             # Feature fusion
             fused_chunk = self.fusion(torch.cat([z_chunk, E_chunk], dim=-1))
@@ -774,7 +711,12 @@ class SelfAtt_(nn.Module):
     Self-attention (pooling) layer.
     """
 
-    def __init__(self, dim: int, dropout: float = const.default.dropout, pool: bool = False):
+    def __init__(
+        self,
+        dim: int,
+        dropout: float = const.default.dropout,
+        pool: bool = False,
+    ):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
         self.proj = nn.Linear(dim, dim)

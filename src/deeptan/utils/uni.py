@@ -7,13 +7,14 @@ import random
 import string
 import time
 from multiprocessing import cpu_count
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import optuna
 import polars as pl
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
-from torch.cuda import device_count
+from torch import cuda
 from torch_geometric.data import Batch
 
 import deeptan.constants as const
@@ -34,17 +35,63 @@ def get_avail_cpu_count(target_n: int) -> int:
     return n_cpu
 
 
-def print_nested_keys(d):
-    for key in d:
-        print(key)
-        value = d[key]
-        if isinstance(value, dict):
-            print_nested_keys(value)
+def estimate_tensor_memory(tensor_shape: Tuple[int, ...], dtype_size: int = 4) -> int:
+    """Estimate memory (bytes) required for a tensor given its shape."""
+    return int(np.prod(tensor_shape) * dtype_size)
+
+
+def get_adaptive_chunk_size(
+    tensor_shape: Tuple[int, ...],
+    dim: int = 0,
+    operation_overhead: float = const.default.operation_overhead,
+    mem_safety_factor: float = const.default.mem_safety_factor,
+    min_chunk_size: int = 2,
+) -> int:
+    r"""
+    Dynamically compute chunk size based on multi-dimensional tensor shape.
+
+    Args:
+        tensor_shape: The shape of the tensor to chunk.
+        dim: The dimension along which to chunk the tensor.
+        operation_overhead: A factor to account for additional memory usage due to operations.
+        mem_safety_factor: A factor to ensure there is enough memory left after operations.
+        min_chunk_size: The minimum chunk size to use.
+    """
+    if not cuda.is_available():
+        return const.default.chunk_size
+
+    required_mem = estimate_tensor_memory(tensor_shape)
+    # print(f"Required memory (GB): {required_mem / (1024**3)} GB")
+
+    if required_mem == 0:
+        return const.default.chunk_size
+
+    free_mem, _ = cuda.mem_get_info()
+    available_mem = free_mem * mem_safety_factor
+    max_allowed_mem = available_mem / operation_overhead
+    # print(f"Available memory (GB): {available_mem / (1024**3)} GB")
+    # print(f"Max allowed memory (GB): {max_allowed_mem / (1024**3)} GB")
+
+    if required_mem > max_allowed_mem:
+        max_chunks = np.ceil(required_mem / max_allowed_mem)
+    else:
+        max_chunks = 1
+
+    # Calculate the chunk size
+    chunk_size = max(
+        min_chunk_size,
+        min(
+            int(tensor_shape[dim] // max_chunks),
+            const.default.chunk_size,
+        ),
+    )
+
+    return max(chunk_size, 1)
 
 
 def get_map_location(map_loc: Optional[str] = None):
     if map_loc is None:
-        if device_count() > 0:
+        if cuda.device_count() > 0:
             which_dev = find_usable_cuda_devices(1)
             if len(which_dev) == 0:
                 return "cpu"

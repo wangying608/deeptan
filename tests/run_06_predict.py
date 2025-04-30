@@ -41,7 +41,7 @@ if __name__ == "__main__":
         print(f"Results already exist at {output_pkl_path}")
 
     if args.getcor:
-        output_cor_mat = os.path.join(os.path.dirname(output_pkl_path), "correlation_matrix.npz")
+        output_cor_mat = os.path.join(os.path.dirname(output_pkl_path), os.path.basename(output_pkl_path) + "." + "correlation_matrix.npz")
         if not os.path.exists(output_cor_mat) or args.overwrite:
             compute_feature_correlations(output_cor_mat, output_pkl_path)
         else:

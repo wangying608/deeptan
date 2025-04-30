@@ -13,8 +13,6 @@ lr = 0.0002
 es = 5
 min_epoch = 3
 max_epoch = 50
-chunk_size = 512
-subg_chunk_size = 2
 dropout = 0.3
 negative_slope = 0.2
 node_emb_dim = 128
@@ -26,6 +24,11 @@ n_heads_node_emb = 8
 n_heads_ge_decoder = 8
 n_heads_label_pred = 8
 n_hop = 1
+
+chunk_size = 2048
+mem_safety_factor = 0.45
+operation_overhead = 3.1
+estimated_nfeat_per_g = 1000
 
 threshold_nmic = 0.3
 threshold_subg_overlap = 0.95
