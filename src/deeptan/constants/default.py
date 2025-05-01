@@ -26,7 +26,7 @@ n_heads_label_pred = 8
 n_hop = 1
 
 chunk_size = 2048
-mem_safety_factor = 0.45
+mem_safety_factor = 0.8
 operation_overhead = 3.1
 estimated_nfeat_per_g = 1000
 

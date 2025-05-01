@@ -9,7 +9,7 @@ from deeptan.graph.model import DeepTANTune
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="DeepTAN tuning pipeline.")
+    parser = argparse.ArgumentParser(description="DeepTAN fitting and tuning pipeline.")
     parser.add_argument("--auto_tune", "--atune", action="store_true", help="Whether to perform hyperparameter tuning")
 
     parser.add_argument("--em", type=str, default="", help="Existing model checkpoint path for loading")
