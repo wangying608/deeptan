@@ -25,10 +25,9 @@ n_heads_ge_decoder = 8
 n_heads_label_pred = 8
 n_hop = 1
 
-chunk_size = 2048
-mem_safety_factor = 0.8
-operation_overhead = 3.1
-estimated_nfeat_per_g = 1000
+chunk_size = 512
+mem_safety_factor = 0.85
+operation_overhead = 3.3
 
 threshold_nmic = 0.3
 threshold_subg_overlap = 0.95

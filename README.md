@@ -11,14 +11,9 @@ A novel graph-based multi-task framework designed to infer large-scale multi-omi
 </div>
 
 ## Quick start
-First, install DeepTAN:
 
 ```bash
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 pip install deeptan
-```
-
-Second, install additional libraries for PyG:
-
-```bash
-pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.5.1+cu124.html
+pip install pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.6.0%2Bcu126.html
 ```

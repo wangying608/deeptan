@@ -545,6 +545,7 @@ def train_model(
     log_dir: str,
     accumulate_grad_batches: int = const.default.accumulate_grad_batches,
     accelerator: str = const.default.accelerator,
+    devices: list[int] | str | int = const.default.devices,
     fast_dev_run: bool = False,
 ):
     r"""Fit the model.
@@ -558,6 +559,7 @@ def train_model(
         log_dir (str): The directory to log the training results.
         accumulate_grad_batches (int): The number of batches to accumulate gradients over.
         accelerator (str): The accelerator to use.
+        devices (list[int] | str | int): The devices to use.
         fast_dev_run (bool): Whether to run a fast development run.
     """
 
@@ -584,6 +586,7 @@ def train_model(
         log_every_n_steps=1,
         precision=const.default.precision,
         accelerator=accelerator,
+        devices=devices,
         max_epochs=max_epochs,
         min_epochs=min_epochs,
         callbacks=[callback_es, callback_ckpt, lr_monitor],
@@ -870,7 +873,7 @@ class DeepTANTune:
             log_dir=os.path.join(self.log_dir, self.log_name),
             accumulate_grad_batches=self.args["acc_grad_batch"],
             accelerator=self.args["accelerator"],
-            # fast_dev_run=True,
+            devices=self.args["devices"],
         )
 
     def objective(self, trial: optuna.Trial) -> float:
@@ -912,6 +915,7 @@ class DeepTANTune:
                 log_dir=os.path.join(self.log_dir, self.log_name, f"trial_{trial.number}"),
                 accumulate_grad_batches=self.args["acc_grad_batch"],
                 accelerator=self.args["accelerator"],
+                devices=self.args["devices"],
             )
 
             if val_loss is None:

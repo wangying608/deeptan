@@ -231,10 +231,10 @@ class MetricsDictMaker:
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"] = {}
 
                 # Use the 1st fname of seed xx to get feature names
-                # _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
-                # feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
-                _path_feat_top2000 = [i for i in os.listdir(os.path.join(self.true_data_dir, "top2000")) if i.find(f"{_seed}") != -1][0]
-                feature_names_seed_xx = ["obs_names"] + pl.read_csv(os.path.join(self.true_data_dir, "top2000", _path_feat_top2000)).to_series(0).to_list()
+                _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
+                feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
+                # _path_feat_top2000 = [i for i in os.listdir(os.path.join(self.true_data_dir, "top2000")) if i.find(f"{_seed}") != -1][0]
+                # feature_names_seed_xx = ["obs_names"] + pl.read_csv(os.path.join(self.true_data_dir, "top2000", _path_feat_top2000)).to_series(0).to_list()
                 _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
                 self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx)
                 xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
@@ -249,9 +249,15 @@ class MetricsDictMaker:
                 _labels_df = _labels_df.rename({"bc": "obs_names"})
                 _labels_all = transform_ct_df(_labels_df)
 
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(
+                    self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right"
+                ).select(["obs_names", "ct"])
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(
+                    self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right"
+                )
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = (
+                    self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
+                )
 
     def detect_pkl(self, s_task: Optional[str], s_split: Optional[str]):
         """Detects all pickle files in the predictions directory."""
@@ -379,12 +385,22 @@ class RegressionMetricsCalculator:
             dict: Nested dictionary with all results
             pl.DataFrame: Summary DataFrame
         """
-        results = {"sample_metrics": self.calculate_sample_metrics(), "feature_metrics": self.calculate_feature_metrics(), "shape": {"n_samples": self.n_samples, "n_features": self.n_features}}
+        results = {
+            "sample_metrics": self.calculate_sample_metrics(),
+            "feature_metrics": self.calculate_feature_metrics(),
+            "shape": {"n_samples": self.n_samples, "n_features": self.n_features},
+        }
 
         # Create summary DataFrame
         summary_data = []
         for metric in self.metric_functions.keys():
-            summary_data.append({"metric": metric, "sample_mean": results["sample_metrics"][metric]["mean"], "feature_mean": results["feature_metrics"][metric]["mean"]})
+            summary_data.append(
+                {
+                    "metric": metric,
+                    "sample_mean": results["sample_metrics"][metric]["mean"],
+                    "feature_mean": results["feature_metrics"][metric]["mean"],
+                }
+            )
         df = pl.DataFrame(summary_data)
 
         results.update({"averaged": df})

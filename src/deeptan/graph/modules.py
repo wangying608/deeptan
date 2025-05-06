@@ -12,7 +12,7 @@ from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph, to_undirected
 
 import deeptan.constants as const
-from deeptan.utils.uni import get_adaptive_chunk_size
+from deeptan.utils.uni import GetAdaptiveChunkSize
 
 
 class NodeEmbedding(nn.Module):
@@ -181,6 +181,10 @@ class AMSGP(torch.nn.Module):
         # Multi-scale pooling architecture
         self._init_pooling_layers(fusion_dims_node_emb[-1], output_dim_g_emb, n_heads_pooling)
 
+        # Adaptive chunk size calculation
+        self.adap_chunk_size_dyn_cent = GetAdaptiveChunkSize()
+        self.adap_chunk_size_mul_subg = GetAdaptiveChunkSize()
+
     def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
         self.xgat_pool = WGATLayer_chunked(input_dim, output_dim, heads, self.dropout, self.chunk_size)
@@ -260,7 +264,7 @@ class AMSGP(torch.nn.Module):
         return torch.stack(graph_embs), E_all, ids
 
     def _calculate_dynamic_centrality(self, h, edge_index):
-        chunk_size = get_adaptive_chunk_size(h.size())
+        chunk_size = self.adap_chunk_size_dyn_cent.calc(h.size(), 0)
         with torch.no_grad():
             row, col = edge_index
             num_edges = edge_index.size(1)
@@ -333,11 +337,10 @@ class AMSGP(torch.nn.Module):
         for bin_idx in reversed(range(num_bins)):
             bin_mask = self._generate_bin_mask(centrality, edges, bin_idx)
             current_nodes = torch.where(bin_mask)[0]
-
             if current_nodes.numel() == 0:
                 continue
 
-            chunk_size = get_adaptive_chunk_size((current_nodes.shape[0], edge_index.shape[1], h.shape[1]))
+            chunk_size = self.adap_chunk_size_mul_subg.calc((current_nodes.shape[0], edge_index.shape[1], h.shape[1]), 0)
 
             # Batch process nodes in chunks
             for nodes in current_nodes.split(min(chunk_size, current_nodes.numel())):
@@ -426,12 +429,12 @@ class AMSGP(torch.nn.Module):
     @staticmethod
     def _batch_k_hop_subgraph(nodes: torch.Tensor, num_hops: int, edge_index: torch.Tensor, num_nodes: int) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Custom implementation of batch k-hop subgraph extraction."""
-
+        nodes_cpu = nodes.cpu().numpy().tolist()
         subsets = []
         edge_indices = []
 
-        for node in nodes:
-            subset, sub_edge_index, _, _ = k_hop_subgraph(node_idx=node.item(), num_hops=num_hops, edge_index=edge_index, num_nodes=num_nodes, relabel_nodes=True)
+        for _node in nodes_cpu:
+            subset, sub_edge_index, _, _ = k_hop_subgraph(node_idx=_node, num_hops=num_hops, edge_index=edge_index, num_nodes=num_nodes, relabel_nodes=True)
             subsets.append(subset)
             edge_indices.append(sub_edge_index)
         return subsets, edge_indices
@@ -471,13 +474,14 @@ class AMSGP(torch.nn.Module):
         if num_subgraphs == 0:
             return torch.zeros(self.output_dim_g_emb, device=self._device)
 
-        chunk_size = get_adaptive_chunk_size((num_subgraphs, const.default.estimated_nfeat_per_g, self.node_emb_dim))
-        all_embs = []
-        for i in range(0, len(subgraphs), chunk_size):
-            subgraph_chunk = subgraphs[i : i + chunk_size]
-            chunk_embs = [self._process_subgraph(g) for g in subgraph_chunk]
-            chunk_embs = torch.cat(chunk_embs, dim=0) if chunk_embs else torch.empty(0, self.output_dim_g_emb, device=self._device)
-            all_embs.append(chunk_embs)
+        # chunk_size = get_adaptive_chunk_size((num_subgraphs, const.default.estimated_nfeat_per_g, self.node_emb_dim))
+        # print(f"Caculating embeddings for {num_subgraphs} subgraphs (dims = {num_subgraphs, const.default.estimated_nfeat_per_g, self.node_emb_dim}) in chunks of size {chunk_size}.\n")
+        # all_embs = []
+        # for i in range(0, len(subgraphs), chunk_size):
+        #     chunk_embs = [self._process_subgraph(g) for g in subgraphs[i : i + chunk_size]]
+        #     chunk_embs = torch.cat(chunk_embs, dim=0) if chunk_embs else torch.empty(0, self.output_dim_g_emb, device=self._device)
+        #     all_embs.append(chunk_embs)
+        all_embs = [self._process_subgraph(g) for g in subgraphs]
         embs = torch.cat(all_embs, dim=0) if all_embs else torch.zeros(0, self.output_dim_g_emb, device=self._device)
 
         # Build super graph
@@ -530,6 +534,9 @@ class WGATLayer_chunked(MessagePassing):
         self.attn = nn.Parameter(torch.empty(num_heads, output_dim))
         self.reset_parameters()
 
+        # Adaptive chunk size calculation
+        self.adap_chunk_size = GetAdaptiveChunkSize()
+
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
         nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
@@ -544,7 +551,7 @@ class WGATLayer_chunked(MessagePassing):
             print("Empty edge index, returning zeros.")
             return torch.zeros_like(x_i)
 
-        chunk_size = get_adaptive_chunk_size((num_edges, self.output_dim, self.num_heads))
+        chunk_size = self.adap_chunk_size.calc((num_edges, self.output_dim, self.num_heads, 3), 0)
 
         # Process in chunks to reduce peak memory
         h_chunks = []
@@ -633,6 +640,9 @@ class GE_Decoder(nn.Module):
             nn.Linear(hidden_dim, output_dim),
         )
 
+        # Adaptive chunk size calculation
+        self.adap_chunk_size = GetAdaptiveChunkSize()
+
     def forward(self, z: torch.Tensor, E_all: torch.Tensor):
         """
         Args:
@@ -646,20 +656,25 @@ class GE_Decoder(nn.Module):
         batch_size = z.size(0)
         num_all_nodes = E_all.size(0)
 
-        chunk_size = get_adaptive_chunk_size((num_all_nodes, batch_size, self.h_dim, self.n_heads, 7))
+        chunk_size_fuse = self.adap_chunk_size.calc((num_all_nodes, batch_size, self.z_dim + self.h_dim))
+        global_fused_chunks = []
+        for i in range(0, num_all_nodes, chunk_size_fuse):
+            end_idx = min(i + chunk_size_fuse, num_all_nodes)
+            chunk_z = z.unsqueeze(1).expand(-1, end_idx - i, -1)
+            chunk_E = E_all[i:end_idx].unsqueeze(0).expand(batch_size, -1, -1)
+            global_fused_chunks.append(self.fusion(torch.cat([chunk_z, chunk_E], dim=-1)))
+        global_fused = torch.cat(global_fused_chunks, dim=1)
+        del global_fused_chunks, chunk_z, chunk_E
 
-        # Process all data in chunks
+        head_dim = self.h_dim // self.n_heads
+        chunk_size_attn = self.adap_chunk_size.calc(tensor_shape=(num_all_nodes, batch_size, self.h_dim, self.n_heads, head_dim), dim=1)
         h_chunks = []
-        for i in range(0, num_all_nodes, chunk_size):
-            end_idx = min(i + chunk_size, num_all_nodes)
-            E_chunk = E_all[i:end_idx].unsqueeze(0).expand(batch_size, -1, -1)
-            z_chunk = z.unsqueeze(1).expand(-1, end_idx - i, -1)
-
-            # Feature fusion
-            fused_chunk = self.fusion(torch.cat([z_chunk, E_chunk], dim=-1))
+        for j in range(0, num_all_nodes, chunk_size_attn):
+            end_idx = min(j + chunk_size_attn, num_all_nodes)
+            seq_chunk = global_fused[:, j:end_idx]
 
             # Cross-attention
-            attn_chunk, _ = self.cross_attn(query=fused_chunk, key=fused_chunk, value=fused_chunk)
+            attn_chunk, _ = self.cross_attn(query=seq_chunk, key=seq_chunk, value=seq_chunk)
 
             # Apply residual blocks
             for block in self.res_blocks:

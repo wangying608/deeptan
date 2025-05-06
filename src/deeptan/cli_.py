@@ -167,6 +167,7 @@ def deeptan_fit_tune():
     parser.add_argument("--acc_grad_batch", "--agb", type=int, default=const.default.accumulate_grad_batches, help="Accumulate gradients over multiple batches")
     parser.add_argument("--chunk_size", "--ck", type=int, default=const.default.chunk_size, help="A proper chunk size can balance memory usage and speed")
     parser.add_argument("--accelerator", "--ac", type=str, default=const.default.accelerator, help="cpu, gpu, tpu, hpu, mps, auto")
+    parser.add_argument("--devices", "--dev", type=str, default=const.default.devices, help="Devices to use")
     parser.add_argument("--ntrials", "--nt", type=int, default=const.default.n_trials, help="Number of trials for hyperparameter tuning")
     parser.add_argument("--njobs", "--nj", type=int, default=const.default.n_jobs, help="The number of parallel jobs for Optuna. If this argument is set to -1, the number is set to CPU count.")
     args = parser.parse_args()
@@ -189,6 +190,7 @@ def deeptan_fit_tune():
             "chunk_size": args.chunk_size,
             "is_regression": args.is_regression,
             "accelerator": args.accelerator,
+            "devices": args.devices,
             "input_node_emb_dim": args.input_node_emb_dim,
             "acc_grad_batch": args.acc_grad_batch,
             "guide_gat": guide_gat,
@@ -218,6 +220,7 @@ def deeptan_predict():
     parser.add_argument("--em", type=str, required=True, help="Existing model checkpoint path.")
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
     parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
+    parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
     parser.add_argument("--getcor", action="store_true", help="Get correlations between feature pairs and labels")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     args = parser.parse_args()
@@ -238,7 +241,7 @@ def deeptan_predict():
             model_ckpt_path=model_path,
             litdata_dir=litdata_dir,
             output_pkl_path=output_pkl_path,
-            map_location=None,
+            map_location=args.map_location,
             batch_size=8,
         )
     else:

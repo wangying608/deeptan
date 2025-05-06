@@ -35,58 +35,43 @@ def get_avail_cpu_count(target_n: int) -> int:
     return n_cpu
 
 
-def estimate_tensor_memory(tensor_shape: Tuple[int, ...], dtype_size: int = 4) -> int:
-    """Estimate memory (bytes) required for a tensor given its shape."""
-    return int(np.prod(tensor_shape) * dtype_size)
+class GetAdaptiveChunkSize:
+    def __init__(
+        self,
+        mem_safety_factor: Optional[float] = None,
+        operation_overhead: Optional[float] = None,
+        min_chunk_size: int = 2,
+    ):
+        self.mem_safety_factor = mem_safety_factor if mem_safety_factor is not None else const.default.mem_safety_factor
+        self.operation_overhead = operation_overhead if operation_overhead is not None else const.default.operation_overhead
+        self.min_chunk_size = min_chunk_size
 
+        self.total_mem = 0
+        if cuda.is_available():
+            _free_mem, total_mem = cuda.mem_get_info()
+            self.total_mem = total_mem
 
-def get_adaptive_chunk_size(
-    tensor_shape: Tuple[int, ...],
-    dim: int = 0,
-    operation_overhead: float = const.default.operation_overhead,
-    mem_safety_factor: float = const.default.mem_safety_factor,
-    min_chunk_size: int = 2,
-) -> int:
-    r"""
-    Dynamically compute chunk size based on multi-dimensional tensor shape.
+    def calc(self, tensor_shape: Tuple[int, ...], dim: int = 0, use_total_as_avail: bool = False) -> int:
+        required_mem = self.estimate_tensor_memory(tensor_shape)
+        if required_mem == 0 or self.total_mem == 0:
+            return const.default.chunk_size
 
-    Args:
-        tensor_shape: The shape of the tensor to chunk.
-        dim: The dimension along which to chunk the tensor.
-        operation_overhead: A factor to account for additional memory usage due to operations.
-        mem_safety_factor: A factor to ensure there is enough memory left after operations.
-        min_chunk_size: The minimum chunk size to use.
-    """
-    if not cuda.is_available():
-        return const.default.chunk_size
+        if use_total_as_avail:
+            max_allowed_mem = self.total_mem * self.mem_safety_factor / self.operation_overhead
+        else:
+            max_allowed_mem = cuda.mem_get_info()[0] * self.mem_safety_factor / self.operation_overhead
 
-    required_mem = estimate_tensor_memory(tensor_shape)
-    # print(f"Required memory (GB): {required_mem / (1024**3)} GB")
+        if required_mem > max_allowed_mem:
+            n_chunks = np.ceil(required_mem / max_allowed_mem)
+        else:
+            n_chunks = 1
+        chunk_size = max(self.min_chunk_size, int(tensor_shape[dim] // n_chunks))
+        # print(f"Chunk size {chunk_size} for tensor shape {tensor_shape}, Required memory: {required_mem / (1024**3)} GB, Max allowed memory: {max_allowed_mem / (1024**3)} GB, Total memory: {self.total_mem / (1024**3)} GB.")
+        return chunk_size
 
-    if required_mem == 0:
-        return const.default.chunk_size
-
-    free_mem, _ = cuda.mem_get_info()
-    available_mem = free_mem * mem_safety_factor
-    max_allowed_mem = available_mem / operation_overhead
-    # print(f"Available memory (GB): {available_mem / (1024**3)} GB")
-    # print(f"Max allowed memory (GB): {max_allowed_mem / (1024**3)} GB")
-
-    if required_mem > max_allowed_mem:
-        max_chunks = np.ceil(required_mem / max_allowed_mem)
-    else:
-        max_chunks = 1
-
-    # Calculate the chunk size
-    chunk_size = max(
-        min_chunk_size,
-        min(
-            int(tensor_shape[dim] // max_chunks),
-            const.default.chunk_size,
-        ),
-    )
-
-    return max(chunk_size, 1)
+    def estimate_tensor_memory(self, tensor_shape: Tuple[int, ...], dtype_size: int = 4) -> int:
+        """Estimate memory (bytes) required for a tensor given its shape."""
+        return int(np.prod(tensor_shape) * dtype_size)
 
 
 def get_map_location(map_loc: Optional[str] = None):
@@ -223,8 +208,8 @@ def read_optuna_db(path_optuna_db: str) -> Dict[str, Any]:
     trials_df = loaded_study.trials_dataframe()
     best_trial = loaded_study.best_trial
     best_params = best_trial.params
-    best_trial_duration = best_trial.duration.total_seconds()
-    best_trial_datetime_start = best_trial.datetime_start.isoformat()
+    best_trial_duration = best_trial.duration.total_seconds() if best_trial.duration is not None else None
+    best_trial_datetime_start = best_trial.datetime_start.isoformat() if best_trial.datetime_start is not None else None
     return {
         "study_name": study_name,
         "min_loss": min_loss,

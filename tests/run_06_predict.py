@@ -9,6 +9,7 @@ def parse_args():
     parser.add_argument("--em", type=str, required=True, help="Existing model checkpoint path.")
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
     parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
+    parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
     parser.add_argument("--getcor", action="store_true", help="Get correlations between feature pairs and labels")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     return parser.parse_args()
@@ -34,7 +35,7 @@ if __name__ == "__main__":
             model_ckpt_path=model_path,
             litdata_dir=litdata_dir,
             output_pkl_path=output_pkl_path,
-            map_location=None,
+            map_location=args.maplocation,
             batch_size=8,
         )
     else:

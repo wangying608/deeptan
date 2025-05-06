@@ -8,9 +8,9 @@ import pacmap
 import polars as pl
 import seaborn as sns
 from matplotlib import ticker
+from metrics import MetricsDictMaker, format_ticks
 
 import deeptan.constants as const
-from deeptan.stat.metrics import MetricsDictMaker, format_ticks
 
 
 def kde_grid_plot_data(
