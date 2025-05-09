@@ -2,6 +2,7 @@ r"""
 Universal functions.
 """
 
+import concurrent.futures
 import os
 import random
 import string
@@ -41,6 +42,7 @@ class GetAdaptiveChunkSize:
         mem_safety_factor: Optional[float] = None,
         operation_overhead: Optional[float] = None,
         min_chunk_size: int = 2,
+        total_vram: Optional[int] = None,
     ):
         self.mem_safety_factor = mem_safety_factor if mem_safety_factor is not None else const.default.mem_safety_factor
         self.operation_overhead = operation_overhead if operation_overhead is not None else const.default.operation_overhead
@@ -48,10 +50,22 @@ class GetAdaptiveChunkSize:
 
         self.total_mem = 0
         if cuda.is_available():
-            _free_mem, total_mem = cuda.mem_get_info()
-            self.total_mem = total_mem
+            self.total_mem = sum(cuda.mem_get_info(device=i)[1] for i in range(cuda.device_count()))
 
-    def calc(self, tensor_shape: Tuple[int, ...], dim: int = 0, use_total_as_avail: bool = False) -> int:
+        if total_vram is not None:
+            self.total_mem = total_vram * 1024 * 1024 * 1024
+        else:
+            # Try to read total VRAM from environment variable
+            _total_mem = os.getenv("TOTAL_VRAM", None)
+            if _total_mem is not None:
+                try:
+                    self.total_mem = int(_total_mem) * 1024 * 1024 * 1024
+                except ValueError:
+                    pass
+
+        # print(f"Total VRAM: {self.total_mem / (1024 * 1024 * 1024):.2f} GB")
+
+    def calc(self, tensor_shape: Tuple[int, ...], dim: int = 0, use_total_as_avail: bool = True) -> int:
         required_mem = self.estimate_tensor_memory(tensor_shape)
         if required_mem == 0 or self.total_mem == 0:
             return const.default.chunk_size
@@ -59,7 +73,7 @@ class GetAdaptiveChunkSize:
         if use_total_as_avail:
             max_allowed_mem = self.total_mem * self.mem_safety_factor / self.operation_overhead
         else:
-            max_allowed_mem = cuda.mem_get_info()[0] * self.mem_safety_factor / self.operation_overhead
+            max_allowed_mem = sum(cuda.mem_get_info(device=i)[0] for i in range(cuda.device_count())) * self.mem_safety_factor / self.operation_overhead
 
         if required_mem > max_allowed_mem:
             n_chunks = np.ceil(required_mem / max_allowed_mem)
@@ -99,6 +113,48 @@ def random_string(length: int = 7) -> str:
     return result
 
 
+def process_ckpt_path(path_x: str) -> pl.DataFrame | None:
+    """Process a single checkpoint path and return the corresponding DataFrame."""
+    tsb_dir = os.path.join(os.path.dirname(path_x), "version_0")
+    tsb_event = read_tensorboard_events(tsb_dir, False)
+    assert isinstance(tsb_event, Dict), "tsb_event must be a dictionary."
+    _df = tsbevent2df(tsb_event)
+    if _df.width > 0:
+        path_x_frag = path_x.split(os.sep)
+        if path_x_frag[-2].startswith("trial_"):
+            posmv = 1
+        else:
+            posmv = 0
+        _log_name = path_x_frag[-2 - posmv]
+        _task = path_x_frag[-3 - posmv]
+        _seed = path_x_frag[-4 - posmv]
+        _data = path_x_frag[-5 - posmv]
+
+        _info_df = pl.DataFrame({"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]})
+        return _info_df.hstack(_df)
+    else:
+        print(f"No records found in {tsb_dir}. Skipping...")
+        return None
+
+
+def collect_tensorboard_events(dir_log: str) -> pl.DataFrame:
+    r"""Collect info from tensorboard events."""
+    paths_ckpt = search_ckpt(dir_log)
+    records: List[pl.DataFrame] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=const.default.n_threads) as executor:
+        futures = [executor.submit(process_ckpt_path, path_x) for path_x in paths_ckpt]
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result is not None:
+                records.append(result)
+
+    if len(records) == 0:
+        raise ValueError("No records found.")
+    return pl.concat(records, how="diagonal", rechunk=True)
+
+
+'''
 def collect_tensorboard_events(dir_log: str):
     r"""Collect info from tensorboard events."""
     paths_ckpt = search_ckpt(dir_log)
@@ -137,6 +193,7 @@ def collect_tensorboard_events(dir_log: str):
     df = pl.concat(records, how="diagonal", rechunk=True)
 
     return df
+'''
 
 
 def search_ckpt(dir_log: str):

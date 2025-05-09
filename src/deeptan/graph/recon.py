@@ -1,7 +1,8 @@
 import os
 import pickle
-from typing import Any, Optional
+from typing import Any, List, Optional
 
+import h5py
 import numpy as np
 import polars as pl
 import torch
@@ -20,6 +21,7 @@ def predict(
     output_pkl_path: str,
     map_location: Optional[str] = None,
     batch_size: int = 8,
+    save_h5: bool = True,
 ):
     os.makedirs(os.path.dirname(output_pkl_path), exist_ok=True)
     # Load a DeepTAN model
@@ -34,7 +36,7 @@ def predict(
     model.freeze()
 
     # Load the LitData dataset
-    dataloader = StreamingDataLoader(StreamingDataset(litdata_dir), batch_size=batch_size, collate_fn=collate_fn)
+    dataloader = StreamingDataLoader(StreamingDataset(litdata_dir, max_cache_size="10GB"), batch_size=batch_size, collate_fn=collate_fn)
 
     # Predict
     trainer = Trainer(logger=False)
@@ -48,11 +50,11 @@ def predict(
     label_names = pl.read_parquet(os.path.join(os.path.dirname(litdata_dir), const.fname.label_class_onehot)).columns
     feature_dict_and_label_dim.update({"label_names": label_names})
 
-    process_results(results, output_pkl_path, feature_dict_and_label_dim)
+    process_results(results, output_pkl_path, feature_dict_and_label_dim, save_h5, False)
     return None
 
 
-def process_results(pickle_file: str | Any, output_pkl: str, others2save: Optional[dict] = None):
+def process_results(pickle_file: str | Any, output_pkl: str, others2save: Optional[dict] = None, save_h5: bool = True, only_return: bool = False):
     r"""
     Process the results of DeepTAN from the pickle file and save them to a numpy pickle file.
     """
@@ -107,93 +109,224 @@ def process_results(pickle_file: str | Any, output_pkl: str, others2save: Option
 
     if others2save is not None:
         results_dict.update(others2save)
-    print(results_dict.keys())
 
-    if not output_pkl.endswith(".pkl"):
-        output_pkl += ".pkl"
-    print(f"Saving results to {output_pkl}")
-    with open(output_pkl, "wb") as f:
-        pickle.dump(results_dict, f)
+    if only_return:
+        return results_dict
 
-    # return output_pkl
+    os.makedirs(os.path.dirname(output_pkl), exist_ok=True)
+    if save_h5:
+        if not output_pkl.endswith(".h5"):
+            output_pkl = output_pkl.replace(".pkl", ".h5") if output_pkl.endswith(".pkl") else output_pkl + ".h5"
+        print(f"Saving results to {output_pkl}")
+        with h5py.File(output_pkl, "w") as f:
+            for key, value in results_dict.items():
+                f.create_dataset(key, data=value, compression="gzip", compression_opts=5)
+
+    else:
+        output_pkl = output_pkl if output_pkl.endswith(".pkl") else output_pkl + ".h5"
+        print(f"Saving results to {output_pkl}")
+        with open(output_pkl, "wb") as f:
+            pickle.dump(results_dict, f)
 
 
-def compute_feature_correlations(
-    output_npz: str,
-    pickle_path: Optional[str] = None,
-    node_recon: Optional[np.ndarray] = None,
-    labels: Optional[np.ndarray] = None,
-    device: Optional[str] = None,
+class FeaturePerturbationStreamingDataset(StreamingDataset):
+    def __getitem__(self, index):
+        _gdata = super().__getitem__(index)
+        node_names = _gdata.node_names[0]
+
+        # Get indices of features to perturb
+        feat_idx = [i for i, _name in enumerate(node_names) if _name in self.feature_names2perturb]
+        if len(feat_idx) == 0:
+            return _gdata
+
+        # Get the values to overwrite
+        _feat_names = [node_names[i] for i in feat_idx]
+        _overwrite_values = []
+        for _name in _feat_names:
+            # Search for the position of _name in self.feature_names2perturb and get the corresponding overwrite value
+            _overwrite_values.append(self.overwrite_values[self.feature_names2perturb.index(_name)])
+
+        # Clone the graph data
+        _gdata_clone = _gdata.clone()
+        _x = _gdata_clone.x.clone()
+        assert _x.ndim == 2, f"Expected _x.ndim to be 2, but got {_x.ndim}"
+
+        # Perturb the features
+        _x[feat_idx, :] = torch.tensor(_overwrite_values, dtype=_gdata.x.dtype, device=_gdata.x.device)
+        _gdata_clone.x = _x
+        return _gdata_clone
+
+    def _perturb(self, feature_names: List[str], overwrite_values: List[Any]):
+        if len(feature_names) == 0:
+            raise ValueError("feature_idx cannot be empty")
+        if len(feature_names) != len(overwrite_values):
+            raise ValueError("feature_idx and overwrite_values must have the same length")
+        self.feature_names2perturb = feature_names
+        self.overwrite_values = overwrite_values
+
+
+def predict_perturbation(
+    model_ckpt_path: str,
+    litdata_dir: str,
+    output_path: str,
+    n_perturbations: int = 5,
+    map_location: Optional[str] = None,
+    overwrite_files: bool = True,
 ):
-    """
-    Compute feature correlation matrix.
+    r"""
+    Predict with feature perturbations by analyzing original feature ranges and perturbing each feature multiple times.
 
     Args:
-        output_npy: Path to output npy file containing correlation matrix
-        pickle_path: Path to pickle file containing processed results
-        node_recon: 3D array of shape (n_samples, n_features, dim)
-        labels: 1D array of shape (n_samples,)
-        device: Device to use for computation
-
-    Returns:
-        Correlation matrix of shape (n_features, n_features)
+        model_ckpt_path: Path to model checkpoint
+        litdata_dir: Path to LitData directory
+        output_path: Output path for results
+        n_perturbations: Number of perturbations per feature
+        map_location: Device to load model on
+        overwrite_files: Whether to overwrite existing files
     """
-    device = get_map_location(device)
-    # --- Input Validation ---
-    if pickle_path is not None:
-        with open(pickle_path, "rb") as f:
-            data = pickle.load(f)
-        node_recon = data["node_recon"]
-        labels = data["labels"].squeeze()
-    assert node_recon is not None and labels is not None, "Both node_recon and labels must be provided"
+    batch_size: int = 1
+    # Load original dataset to analyze feature statistics
+    orig_dataloader = StreamingDataLoader(StreamingDataset(litdata_dir, max_cache_size="10GB"), batch_size=batch_size, collate_fn=collate_fn)
+    feature_stats = {}
+    all_feat_values = {}
 
-    n_samples, n_features, dim = node_recon.shape
+    for _gdata in orig_dataloader:
+        _node_names = _gdata.node_names[0]
+        _x = _gdata.x
+        for i, _name in enumerate(_node_names):
+            if _name not in all_feat_values:
+                all_feat_values[_name] = _x[i].unsqueeze(0)
+            else:
+                all_feat_values[_name] = torch.cat([all_feat_values[_name], _x[i].unsqueeze(0)], dim=0)
 
-    # Convert data to PyTorch tensors and move to device
-    labels_tensor = torch.from_numpy(labels).float().to(device)
+    node_names = list(all_feat_values.keys())
 
-    # Precompute label statistics
-    y_mean = torch.mean(labels_tensor)
-    y_centered = labels_tensor - y_mean
-    sum_y_sq = torch.sum(y_centered**2)
+    # Compute stats for each feature
+    for feat_idx, feat_name in enumerate(node_names):
+        feat_vals = all_feat_values[feat_name]
+        feature_stats[feat_name] = {
+            "mean": feat_vals.mean().item(),
+            "std": feat_vals.std().item(),
+            "min": feat_vals.min().item(),
+            "max": feat_vals.max().item(),
+        }
 
-    # Initialize accumulators on device
-    sum_x = torch.zeros((n_features, n_features), device=device)
-    sum_x_sq = torch.zeros((n_features, n_features), device=device)
-    sum_xy = torch.zeros((n_features, n_features), device=device)
+    # Prepare perturbation values for each feature
+    perturbation_plans = []
+    for feat_name in node_names:
+        stats = feature_stats[feat_name]
+        # Generate perturbation values within ±2 std of mean, clamped to feature range
+        base_values = torch.linspace(
+            max(stats["min"], stats["mean"] - 2 * stats["std"]),
+            min(stats["max"], stats["mean"] + 2 * stats["std"]),
+            n_perturbations,
+        ).tolist()
+        perturbation_plans.append((feat_name, base_values))
 
-    # Process each sample
-    for s in tqdm(range(n_samples), desc="Processing samples"):
-        sample_feat = torch.from_numpy(node_recon[s]).float().to(device)
+    # =========================================================================
+    # Load additional metadata like in predict()
+    with open(os.path.join(os.path.dirname(litdata_dir), const.fname.litdata_others2save_pkl), "rb") as f:
+        feature_dict_and_label_dim = pickle.load(f)
+    label_names = pl.read_parquet(os.path.join(os.path.dirname(litdata_dir), const.fname.label_class_onehot)).columns
+    feature_dict_and_label_dim.update({"label_names": label_names})
+    # print(feature_dict_and_label_dim.keys())
+    # for _k in feature_dict_and_label_dim.keys():
+    #     print(_k, type(feature_dict_and_label_dim[_k]))
+    # =================
+    # dict_keys(['dict_node_names', 'output_g_label_dim', 'label_names'])
+    # dict_node_names <class 'dict'>
+    # output_g_label_dim <class 'int'>
+    # label_names <class 'list'>
 
-        # Compute absolute dot products using matrix multiplication
-        # dot_products = torch.abs(torch.mm(sample_feat, sample_feat.T))  # (n_features, n_features)
-        dot_products = torch.mm(sample_feat, sample_feat.T)
+    # Prepare output file
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    _output_path = output_path if output_path.endswith(".h5") else output_path + ".h5"
+    if os.path.exists(_output_path):
+        if overwrite_files:
+            os.remove(_output_path)
+        else:
+            raise FileExistsError(f"File {_output_path} already exists. Set overwrite_files=True to overwrite.")
 
-        # Update accumulators
-        sum_x += dot_products
-        sum_x_sq += dot_products**2
-        sum_xy += dot_products * y_centered[s]
+    # Load model
+    path_hparams = os.path.join(os.path.dirname(model_ckpt_path), "version_0", "hparams.yaml")
+    if os.path.exists(path_hparams):
+        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location), hparams_file=path_hparams)
+    else:
+        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
+    model.eval()
+    model.freeze()
 
-    # Compute final statistics
-    sum_x_centered_sq = sum_x_sq - (sum_x**2) / n_samples
+    with h5py.File(_output_path, "w") as f:
+        # Save feature stats and metadata first
+        metadata_grp = f.create_group("metadata")
 
-    # Compute correlation matrix
-    denominator = torch.sqrt(sum_x_centered_sq * sum_y_sq)
-    with torch.no_grad():
-        corr_matrix = torch.where(denominator != 0, sum_xy / denominator, torch.zeros_like(denominator))
+        for key, value in feature_dict_and_label_dim.items():
+            try:
+                if isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+                    # Handle string lists
+                    dt = h5py.string_dtype(encoding="utf-8")
+                    metadata_grp.create_dataset(key, data=np.array(value, dtype=object), dtype=dt)
+                elif isinstance(value, dict):
+                    # Handle nested dictionaries
+                    sub_grp = metadata_grp.create_group(key)
+                    for subkey, subvalue in value.items():
+                        if isinstance(subvalue, (list, tuple)) and all(isinstance(x, str) for x in subvalue):
+                            dt = h5py.string_dtype(encoding="utf-8")
+                            sub_grp.create_dataset(subkey, data=np.array(subvalue, dtype=object), dtype=dt)
+                        else:
+                            sub_grp.create_dataset(subkey, data=subvalue)
+                else:
+                    # Handle arrays and other numeric data
+                    metadata_grp.create_dataset(key, data=value)
+            except Exception as e:
+                print(f"Warning: Failed to save {key} to HDF5: {str(e)}")
+                continue
 
-    # Compute weighted correlation matrix
-    mean_x_matrix = sum_x / n_samples
-    mean_x_matrix = torch.abs(mean_x_matrix)
-    # [0,1]
-    mean_x_matrix = mean_x_matrix / mean_x_matrix.max()
-    corr_weighted = corr_matrix * mean_x_matrix
-    output_weighted = corr_weighted.cpu().numpy()
-    print(f"\n🔥Correlation matrix shape: {output_weighted.shape}")
+        # Save feature stats
+        feat_stats_grp = f.create_group("feature_stats")
+        for feat_name, stats in feature_stats.items():
+            feat_grp = feat_stats_grp.create_group(feat_name)
+            for stat_name, stat_val in stats.items():
+                feat_grp.create_dataset(stat_name, data=stat_val)
 
-    # Move results back to CPU and convert to numpy
-    output = corr_matrix.cpu().numpy()
+        # Save perturbation plans
+        perturb_plans_grp = f.create_group("perturbation_plans")
+        for i, (feat_name, values) in enumerate(perturbation_plans):
+            perturb_plans_grp.create_dataset(f"{i}_feature", data=feat_name)
+            perturb_plans_grp.create_dataset(f"{i}_values", data=values)
 
-    # Save output_weighted and output to a npz
-    np.savez(output_npz, corr_matrix=output, corr_weighted=output_weighted)
+        # Create group for results
+        results_grp = f.create_group("perturbation_results")
+
+        # Process each feature perturbation
+        for feat_idx, (feat_name, perturb_values) in enumerate(tqdm(perturbation_plans, desc="Perturbing features")):
+            # Create perturbed dataset for this feature
+            perturb_dataset = FeaturePerturbationStreamingDataset(litdata_dir, max_cache_size="10GB")
+
+            # Process each perturbation value
+            for val_idx, value in enumerate(perturb_values):
+                perturb_dataset._perturb(feature_names=[feat_name], overwrite_values=[value])
+                dataloader = StreamingDataLoader(perturb_dataset, batch_size=batch_size, collate_fn=collate_fn)
+                trainer = Trainer(logger=False, devices=1)
+                results = trainer.predict(model=model, dataloaders=dataloader)
+
+                if results:
+                    # Save results immediately
+                    results_dict = process_results(results, "", feature_dict_and_label_dim, save_h5=False, only_return=True)
+                    result_grp = results_grp.create_group(f"{feat_idx}_{val_idx}")
+                    result_grp.create_dataset("perturbed_feature", data=feat_name)
+                    result_grp.create_dataset("perturb_value", data=value)
+
+                    for key, value in results_dict.items():
+                        try:
+                            if isinstance(value, np.ndarray) and value.dtype == object:
+                                # Convert object arrays to string arrays
+                                dt = h5py.string_dtype(encoding="utf-8")
+                                result_grp.create_dataset(key, data=np.array(value, dtype=object), dtype=dt)
+                            else:
+                                result_grp.create_dataset(key, data=value, compression="gzip", compression_opts=5)
+                        except Exception as e:
+                            print(f"Warning: Failed to save {key} to HDF5: {str(e)}")
+                            continue
+
+    print(f"Saved output to {_output_path}")

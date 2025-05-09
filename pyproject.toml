@@ -13,7 +13,7 @@ requires-python = ">=3.10, <3.13"
 dependencies = [
     "leidenalg>=0.10.2",
     "lightning>=2.5.1.post0",
-    "litdata==0.2.46",
+    "litdata>=0.2.46",
     "mosaicml-streaming>=0.11.0",
     "numpy>=2.1.2",
     "optuna>=4.2.0",
@@ -29,16 +29,16 @@ dependencies = [
     "torchmetrics>=1.7.1",
     "zstd>=1.5.6.2",
     "setuptools",
-    "torch==2.6.0",
-    "torchaudio==2.6.0",
-    "torchvision==0.21.0",
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "torchvision>=0.21.0",
     "torch-geometric>=2.6.1",
 ]
 license = { file = "LICENSE" }
 keywords = ["bioinformatics", "deep learning", "pytorch"]
 classifiers = [
     "Environment :: Console",
-    "Environment :: GPU :: NVIDIA CUDA :: 12 :: 12.6",
+    "Environment :: GPU :: NVIDIA CUDA :: 12",
     "Natural Language :: English",
     "Natural Language :: Chinese (Simplified)",
     "Development Status :: 2 - Pre-Alpha",
@@ -58,9 +58,10 @@ Homepage = "https://github.com/cma2015/DeepTAN"
 [project.scripts]
 hello = "deeptan.cli_:hello"
 print_h5 = "deeptan.cli_:print_h5"
-deeptan-litdata = "deeptan.cli_:deeptan_optimize_data"
+deeptan-litdata = "deeptan.cli_:deeptan_litdata"
 deeptan-fit = "deeptan.cli_:deeptan_fit_tune"
 deeptan-predict = "deeptan.cli_:deeptan_predict"
+deeptan-perturb = "deeptan.cli_:deeptan_perturb"
 
 [tool.uv.pip]
 index-url = "https://mirror.sjtu.edu.cn/pypi/web/simple"

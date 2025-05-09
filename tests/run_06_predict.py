@@ -1,7 +1,7 @@
 import argparse
 import os
 
-from deeptan.graph.recon import compute_feature_correlations, predict
+from deeptan.graph.recon import predict
 
 
 def parse_args():
@@ -29,7 +29,7 @@ if __name__ == "__main__":
     if not output_pkl_path.endswith(".pkl"):
         output_pkl_path += ".pkl"
 
-    if not os.path.exists(output_pkl_path) or args.overwrite:
+    if (not os.path.exists(output_pkl_path) and not os.path.exists(output_pkl_path.replace(".pkl", ".h5"))) or args.overwrite:
         print(f"Predicting with model {model_path} on data {litdata_dir}")
         predict(
             model_ckpt_path=model_path,
@@ -37,13 +37,18 @@ if __name__ == "__main__":
             output_pkl_path=output_pkl_path,
             map_location=args.maplocation,
             batch_size=8,
+            save_h5=True,
         )
     else:
-        print(f"Results already exist at {output_pkl_path}")
-
-    if args.getcor:
-        output_cor_mat = os.path.join(os.path.dirname(output_pkl_path), os.path.basename(output_pkl_path) + "." + "correlation_matrix.npz")
-        if not os.path.exists(output_cor_mat) or args.overwrite:
-            compute_feature_correlations(output_cor_mat, output_pkl_path)
+        # print(f"Results already exist at {output_pkl_path}")
+        if os.path.exists(output_pkl_path):
+            print(f"Results already exist at {output_pkl_path}")
         else:
-            print(f"Correlation matrix already exists at {output_cor_mat}")
+            print(f"Results already exist at {output_pkl_path.replace('.pkl', '.h5')}")
+
+    # if args.getcor:
+    #     output_cor_mat = os.path.join(os.path.dirname(output_pkl_path), os.path.basename(output_pkl_path) + "." + "correlation_matrix.npz")
+    #     if not os.path.exists(output_cor_mat) or args.overwrite:
+    #         compute_feature_correlations(output_cor_mat, output_pkl_path)
+    #     else:
+    #         print(f"Correlation matrix already exists at {output_cor_mat}")

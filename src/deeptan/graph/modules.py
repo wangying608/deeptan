@@ -551,9 +551,11 @@ class WGATLayer_chunked(MessagePassing):
             print("Empty edge index, returning zeros.")
             return torch.zeros_like(x_i)
 
-        chunk_size = self.adap_chunk_size.calc((num_edges, self.output_dim, self.num_heads, 3), 0)
+        chunk_size = min(
+            self.adap_chunk_size.calc(tensor_shape=(num_edges, self.output_dim, self.num_heads, 3), dim=0),
+            const.default.chunk_size,
+        )
 
-        # Process in chunks to reduce peak memory
         h_chunks = []
         for i in range(0, num_edges, chunk_size):
             idx = slice(i, min(i + chunk_size, num_edges))
@@ -574,9 +576,11 @@ class WGATLayer_chunked(MessagePassing):
             a = F.softmax(a, dim=0)
 
             # Transform and weight features
-            x_trans = self.trans(x_j[idx]).view(_chunk_size, self.num_heads, self.output_dim)
+            x_trans = self.trans(x_j[idx])
+            x_trans = x_trans.view(_chunk_size, self.num_heads, self.output_dim)
             # x_trans = (x_trans * a.unsqueeze(-1)).sum(dim=1)
             x_trans = torch.einsum("blh,bl->bh", x_trans, a)
+
             h_chunks.append(x_trans)
 
         h = torch.cat(h_chunks, dim=0)

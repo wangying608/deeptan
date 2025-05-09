@@ -12,7 +12,7 @@ import scanpy as sc
 
 import deeptan.constants as const
 from deeptan.graph.model import DeepTANTune
-from deeptan.graph.recon import compute_feature_correlations, predict
+from deeptan.graph.recon import predict, predict_perturbation
 from deeptan.utils.data import DeepTANDataModule, read_nmic_npz
 
 
@@ -49,7 +49,7 @@ def print_h5():
         sc.pl.umap(adata, color="Orig.ident", title="UMAP by Experiment")
 
 
-def deeptan_optimize_data():
+def deeptan_litdata():
     parser = argparse.ArgumentParser(description="Optimize data for Deeptan model")
     parser.add_argument("--labels", type=str, default="", help="Path to label data in .parquet format")
     parser.add_argument("--bs", type=int, default=const.default.bs, help="Batch size for training")
@@ -221,7 +221,6 @@ def deeptan_predict():
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
     parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
     parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
-    parser.add_argument("--getcor", action="store_true", help="Get correlations between feature pairs and labels")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     args = parser.parse_args()
 
@@ -235,7 +234,7 @@ def deeptan_predict():
     if not output_pkl_path.endswith(".pkl"):
         output_pkl_path += ".pkl"
 
-    if not os.path.exists(output_pkl_path) or args.overwrite:
+    if (not os.path.exists(output_pkl_path) and not os.path.exists(output_pkl_path.replace(".pkl", ".h5"))) or args.overwrite:
         print(f"Predicting with model {model_path} on data {litdata_dir}")
         predict(
             model_ckpt_path=model_path,
@@ -243,13 +242,45 @@ def deeptan_predict():
             output_pkl_path=output_pkl_path,
             map_location=args.map_location,
             batch_size=8,
+            save_h5=True,
         )
     else:
-        print(f"Results already exist at {output_pkl_path}")
-
-    if args.getcor:
-        output_cor_mat = os.path.join(os.path.dirname(output_pkl_path), os.path.basename(output_pkl_path) + "." + "correlation_matrix.npz")
-        if not os.path.exists(output_cor_mat) or args.overwrite:
-            compute_feature_correlations(output_cor_mat, output_pkl_path)
+        if os.path.exists(output_pkl_path):
+            print(f"Results already exist at {output_pkl_path}")
         else:
-            print(f"Correlation matrix already exists at {output_cor_mat}")
+            print(f"Results already exist at {output_pkl_path.replace('.pkl', '.h5')}")
+
+
+def deeptan_perturb():
+    parser = argparse.ArgumentParser(description="DeepTAN perturbation script.")
+    parser.add_argument("--em", type=str, required=True, help="Existing model checkpoint path.")
+    parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
+    parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
+    parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
+    parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
+    args = parser.parse_args()
+
+    model_path = args.em
+    litdata_dir = args.litdata
+
+    # Create output directory
+    output_dir = os.path.dirname(args.output)
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = args.output
+    if not output_path.endswith(".pkl"):
+        output_path += ".pkl"
+
+    if (not os.path.exists(output_path) and not os.path.exists(output_path.replace(".pkl", ".h5"))) or args.overwrite:
+        print(f"Predicting with model {model_path} on data {litdata_dir}")
+        predict_perturbation(
+            model_ckpt_path=model_path,
+            litdata_dir=litdata_dir,
+            output_path=output_path,
+            n_perturbations=5,
+            map_location=args.maplocation,
+        )
+    else:
+        if os.path.exists(output_path):
+            print(f"Results already exist at {output_path}")
+        else:
+            print(f"Results already exist at {output_path.replace('.pkl', '.h5')}")

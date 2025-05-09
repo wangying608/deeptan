@@ -405,7 +405,7 @@ class DeepTANDataModuleLit(LightningDataModule):
 
     def setup(self, stage=None):
         self.dataloder_trn = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "trn")),
+            StreamingDataset(os.path.join(self.litdata_dir, "trn"), max_cache_size="10GB"),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -416,7 +416,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             drop_last=True,
         )
         self.dataloader_val = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "val")),
+            StreamingDataset(os.path.join(self.litdata_dir, "val"), max_cache_size="10GB"),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -425,7 +425,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "tst")),
+            StreamingDataset(os.path.join(self.litdata_dir, "tst"), max_cache_size="10GB"),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
