@@ -25,7 +25,7 @@ n_heads_ge_decoder = 8
 n_heads_label_pred = 8
 n_hop = 1
 
-chunk_size = 512
+chunk_size = 2048
 mem_safety_factor = 0.85
 operation_overhead = 3.3
 

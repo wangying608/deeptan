@@ -10,7 +10,6 @@ def parse_args():
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
     parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
     parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
-    parser.add_argument("--getcor", action="store_true", help="Get correlations between feature pairs and labels")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     return parser.parse_args()
 
@@ -23,21 +22,12 @@ if __name__ == "__main__":
     # Create output directory
     output_dir = os.path.dirname(args.output)
     os.makedirs(output_dir, exist_ok=True)
-    output_pkl_path = args.output
-    if not output_pkl_path.endswith(".pkl"):
-        output_pkl_path += ".pkl"
 
-    if (not os.path.exists(output_pkl_path) and not os.path.exists(output_pkl_path.replace(".pkl", ".h5"))) or args.overwrite:
-        print(f"Predicting with model {model_path} on data {litdata_dir}")
-        predict_perturbation(
-            model_ckpt_path=model_path,
-            litdata_dir=litdata_dir,
-            output_path=output_pkl_path,
-            n_perturbations=5,
-            map_location=args.maplocation,
-        )
-    else:
-        if os.path.exists(output_pkl_path):
-            print(f"Results already exist at {output_pkl_path}")
-        else:
-            print(f"Results already exist at {output_pkl_path.replace('.pkl', '.h5')}")
+    predict_perturbation(
+        model_ckpt_path=model_path,
+        litdata_dir=litdata_dir,
+        output_path=args.output,
+        n_perturbations=5,
+        map_location=args.maplocation,
+        overwrite_files=args.overwrite,
+    )

@@ -10,6 +10,7 @@ import time
 from multiprocessing import cpu_count
 from typing import Any, Dict, List, Optional, Tuple
 
+import h5py
 import numpy as np
 import optuna
 import polars as pl
@@ -275,3 +276,73 @@ def read_optuna_db(path_optuna_db: str) -> Dict[str, Any]:
         "best_trial_datetime_start": best_trial_datetime_start,
         "trials_df": trials_df,
     }
+
+
+def save_to_h5(
+    data_dict: dict,
+    file_path: str,
+    mode: str = "a",
+    compression: bool = True,
+    group_path: Optional[str] = None,
+) -> None:
+    """
+    Save a dictionary to an HDF5 file, handling various data types including:
+    - numpy arrays (with optional compression)
+    - string arrays/lists
+    - nested dictionaries
+    - other numeric data
+
+    Args:
+        data_dict: Dictionary containing data to save
+        file_path: Output HDF5 file path
+        mode: Mode in which to open the file ('a' for append, 'w' for overwrite)
+        compression: Whether to use compression for arrays
+        group_path: Path to the group where data should be saved (e.g., '/group/subgroup')
+    """
+    with h5py.File(file_path, mode) as f:
+        target = f
+        if group_path:
+            target = target.require_group(group_path)
+        for key, value in data_dict.items():
+            try:
+                if isinstance(value, np.ndarray):
+                    if value.dtype.kind == "U":
+                        _dt = h5py.string_dtype(encoding="utf-8")
+                        target.create_dataset(key, data=value, dtype=_dt, compression="gzip" if compression else None)
+                    else:
+                        target.create_dataset(key, data=value, compression="gzip" if compression else None)
+                elif isinstance(value, (list, tuple)) and all(isinstance(x, str) for x in value):
+                    _dt = h5py.string_dtype(encoding="utf-8")
+                    target.create_dataset(key, data=value, dtype=_dt)
+                elif isinstance(value, dict):
+                    sub_grp = target.create_group(key)
+                    if value:
+                        for subkey, subvalue in value.items():
+                            if isinstance(subvalue, (list, tuple)) and all(isinstance(x, str) for x in subvalue):
+                                _dt = h5py.string_dtype(encoding="utf-8")
+                                sub_grp.create_dataset(subkey, data=subvalue, dtype=_dt)
+                            else:
+                                sub_grp.create_dataset(subkey, data=subvalue)
+                else:
+                    target.create_dataset(key, data=value)
+            except Exception as e:
+                print(f"Warning: Failed to save {key} to HDF5: {str(e)}")
+                continue
+
+
+def path_exists_in_hdf5(file_path: str, hdf5_path: str) -> bool:
+    """
+    Check if a path exists in an HDF5 file.
+
+    Args:
+        file_path: Path to the HDF5 file
+        hdf5_path: Path within the HDF5 file (e.g., '/group/subgroup/dataset')
+
+    Returns:
+        bool: True if path exists, False otherwise
+    """
+    try:
+        with h5py.File(file_path, "r") as f:
+            return hdf5_path in f
+    except (OSError, KeyError):
+        return False

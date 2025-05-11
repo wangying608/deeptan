@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deeptan"
-version = "0.1.3"
+version = "0.1.4"
 description = "DeepTAN: A multi-task framework designed to infer multi-omics trait-associated networks and reconstruct phenotype-specific omics states from mosaic data input."
 authors = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 maintainers = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]

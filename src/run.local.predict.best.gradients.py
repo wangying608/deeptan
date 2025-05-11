@@ -33,15 +33,15 @@ if __name__ == "__main__":
         for _n_feat in ns_feat:
             _dataset = _row["data"].split("top")[0] + f"top{_n_feat}"
             _litdata_dir = os.path.join(data_dir, _dataset, _row["seed"], _split)
-            _output_pkl_path = os.path.join(output_dir, _row["data"] + f"+top_{_n_feat}", f"preds+{_row['seed']}+{_row['task']}+{_split}.pkl")
-            if os.path.exists(_output_pkl_path):
-                print(f"Output file already exists: {_output_pkl_path}")
+            _output_path = os.path.join(output_dir, _row["data"] + f"+top_{_n_feat}", f"preds+{_row['seed']}+{_row['task']}+{_split}.h5")
+            if os.path.exists(_output_path):
+                print(f"Output file already exists: {_output_path}")
                 continue
 
             print("\nPredicting: ", _ckpt_path, _litdata_dir)
             try:
-                predict(model_ckpt_path=_ckpt_path, litdata_dir=_litdata_dir, output_pkl_path=_output_pkl_path, map_location=None, batch_size=8)
-                print("Results saved to: ", _output_pkl_path, "\n")
+                predict(model_ckpt_path=_ckpt_path, litdata_dir=_litdata_dir, output_path=_output_path, map_location=None, batch_size=8)
+                print("Results saved to: ", _output_path, "\n")
             except Exception as e:
                 print(f"Error occurred while predicting: {_ckpt_path}, {_litdata_dir}. Error: {e}")
                 continue

@@ -1,13 +1,13 @@
 import os
-import pickle
 from typing import Any, Dict, List, Optional
 
 import anndata
+import h5py
 import igraph as ig
 import leidenalg
 import numpy as np
 import polars as pl
-from scib_metrics import kbet, kbet_per_label, silhouette_batch, silhouette_label
+from scib_metrics import kbet, silhouette_label
 from scib_metrics.nearest_neighbors import jax_approx_min_k
 from scipy.sparse import csr_matrix
 from scipy.spatial.distance import jensenshannon
@@ -33,13 +33,10 @@ def format_ticks(x, pos):
 
 
 def transform_ct_df(df: pl.DataFrame):
-    # 熔化数据框以使每个类别成为一行
     melted_df = df.unpivot(index=["obs_names"], on=df.columns[1:], variable_name="ct", value_name="value")
 
-    # 过滤出值为1的行，因为每行只有一个1，所以这样可以得到正确的类别名称
     filtered_df = melted_df.filter(pl.col("value") == 1)
 
-    # 选择需要的列
     result_df = filtered_df.select(["obs_names", "ct"])
 
     celltypes_ = result_df["ct"].to_list()
@@ -87,14 +84,23 @@ class MetricsDictMaker:
         self.orig_h5ad = orig_h5ad
         self.xxx_data_df = {}
 
-        self.metrics_dict = {}
+        self.metrics_dict = {
+            "identify": None,
+            "prediction": {},  # Will store h5 file paths and metadata
+            "true": {},
+            "metrics": {
+                "recon": {},
+                "label": {},
+                "cluster": {},
+            },
+            "summary_recon": None,
+            "summary_label": None,
+            "summary_clustering": None,
+        }
 
-        self.ident = self.detect_pkl(s_task, s_split)
+        self.ident = self.detect_predictions(s_task, s_split)
         self.fnames = self.ident["fname"].to_list()
         self.metrics_dict["identify"] = self.ident
-        self.metrics_dict["prediction"] = {}
-        self.metrics_dict["true"] = {}
-        self.metrics_dict["metrics"] = {}
 
     def run(self):
         self.load_predictions()
@@ -102,9 +108,69 @@ class MetricsDictMaker:
         self.compute_all_metrics()
         self.make_metrics_summary()
 
-    def softmax(self, x, axis=-1):
-        e_x = np.exp(x - np.max(a=x, axis=axis, keepdims=True))
-        return e_x / e_x.sum(axis=axis, keepdims=True)
+    def load_predictions(self):
+        """Loads predictions from pickle files."""
+        for _fname in self.fnames:
+            _path = self.ident.filter(pl.col("fname") == _fname)["path"].item()
+            self.metrics_dict["prediction"][_fname] = {"path": _path}
+            # with open(_path, "rb") as f:
+            #     self.metrics_dict["prediction"][_fname] = pickle.load(f)
+            # self.metrics_dict["prediction"][_fname]["X"] = np.squeeze(self.metrics_dict["prediction"][_fname]["node_recon_all"], axis=-1)
+            # self.metrics_dict["prediction"][_fname]["node_recon_all"] = None
+            # self.metrics_dict["prediction"][_fname]["y"] = self.metrics_dict["prediction"][_fname]["labels"]
+            # if self.softmax_pred_labels:
+            #     self.metrics_dict["prediction"][_fname]["y"] = self.softmax(self.metrics_dict["prediction"][_fname]["y"])
+
+    def load_true(self):
+        """Load true data from parquet files."""
+        for i, _split in enumerate(const.dkey.splits):
+            seeds_uniq = self.ident["seed_num"].unique().sort().to_list()
+            for _seed in seeds_uniq:
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"] = {}
+
+                # Use the 1st fname of seed xx to get feature names
+                _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
+                feature_names_seed_xx = ["obs_names"] + list(self._get_dict_node_names(_fname).keys())
+
+                _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
+                self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx)
+                xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)
+
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["obs_names"] = self.xxx_data_df[f"seed_{_seed}_{_split}"]["obs_names"].to_list()
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["feature_names"] = feature_names_seed_xx[1:]
+
+                # Load true labels
+                _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet")).rename({"bc": "obs_names"})
+                _labels_all = transform_ct_df(_labels_df)
+
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
+
+    def _get_dict_node_names(self, fname: str) -> dict:
+        """Read dict_node_names from the h5 file."""
+        path = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(path, "r") as f:
+            if "dict_node_names" in f:
+                return {k: v[()] if not isinstance(v, h5py.Group) else {k2: v2[()] for k2, v2 in v.items()} for k, v in f["dict_node_names"].items()}
+        return {}
+
+    def _get_label_names(self, fname: str) -> list:
+        """Read label_names from the h5 file."""
+        path = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(path, "r") as f:
+            if "label_names" in f:
+                return [n.decode("utf-8") if isinstance(n, bytes) else n for n in f["label_names"][()]]
+        return []
+
+    def _read_h5_dataset(self, fname: str, dataset_name: str) -> np.ndarray:
+        """Lazily read a specific dataset from an h5 file."""
+        path = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(path, "r") as f:
+            if dataset_name in f:
+                return f[dataset_name][()]
+        return np.array([])
 
     def make_metrics_summary(self):
         # For recon
@@ -135,8 +201,6 @@ class MetricsDictMaker:
         _tmp = pl.DataFrame({"Capability": ["Labelling"] * _tmp.shape[0]}).hstack(_tmp)
         _tmp = pl.DataFrame({"Method": ["DeepTAN"] * _tmp.shape[0]}).hstack(_tmp)
         self.metrics_dict["summary_label"] = _tmp.join(self.ident, on="fname", how="left")
-        # For confusion matrix
-        # self.metrics_dict["confusion_matrices_mean"] = np.mean(np.stack(_confusion_matrices, axis=0), axis=0)
         self.metrics_dict["confusion_matrices"] = _confusion_matrices
         self.metrics_dict["label_names"] = _label_names
 
@@ -153,47 +217,45 @@ class MetricsDictMaker:
 
     def compute_all_metrics(self):
         """Computes all metrics for the predictions."""
-        # For recon
+
+        # For reconstruction
         print("\nComputing metrics for recon...")
-        self.metrics_dict["metrics"]["recon"] = {}
         for _fname in self.fnames:
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
-            _calculator = RegressionMetricsCalculator(
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"],
-                self.metrics_dict["prediction"][_fname]["X"],
-            )
-            self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
+            X_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"]
+            X_pred = np.squeeze(self._read_h5_dataset(_fname, "node_recon_all"), axis=-1)
 
-            self.metrics_dict["prediction"][_fname]["X"] = None
-            # self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = None
+            _calculator = RegressionMetricsCalculator(X_true, X_pred)
+            self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
 
         # For label
         print("Computing metrics for label...")
-        self.metrics_dict["metrics"]["label"] = {}
         for _fname in self.fnames:
-            if "y" not in self.metrics_dict["prediction"][_fname]:
-                continue
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
-            self.metrics_dict["metrics"]["label"][_fname] = {}
-            _label_names = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop(["obs_names"]).columns
-            _calculator = MulticlassMetricsCalculator(
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"],
-                self.metrics_dict["prediction"][_fname]["y"],
-                _label_names,
-            )
+            y_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"]
+            y_pred = self._read_h5_dataset(_fname, "labels")
+            label_names = self._get_label_names(_fname)
+
+            if len(y_pred) == 0:
+                continue
+
+            if self.softmax_pred_labels:
+                y_pred = self.softmax(y_pred)
+
+            _calculator = MulticlassMetricsCalculator(y_true, y_pred, label_names)
             _metrics, _confusion_matrix = _calculator.calculate_metrics()
-            # _metrics = _calculator.calculate_metrics()
-            self.metrics_dict["metrics"]["label"][_fname]["df"] = pl.DataFrame(_metrics)
-            self.metrics_dict["metrics"]["label"][_fname]["confusion_matrix"] = _confusion_matrix
-            self.metrics_dict["metrics"]["label"][_fname]["label_names"] = _calculator._label_names
+            self.metrics_dict["metrics"]["label"][_fname] = {
+                "df": pl.DataFrame(_metrics),
+                "confusion_matrix": _confusion_matrix,
+                "label_names": _calculator._label_names,
+            }
 
         # For cluster
         print("Calculating cluster metrics...\n")
-        self.metrics_dict["metrics"]["cluster"] = {}
         for _fname in self.fnames:
             _seed = self.ident.filter(pl.col("fname") == _fname)["seed_num"].item()
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
@@ -203,64 +265,18 @@ class MetricsDictMaker:
             else:
                 batch_info = np.repeat("batch_0", len(self.xxx_data_df[f"seed_{_seed}_{_split}"]))
 
+            g_embedding = self._read_h5_dataset(_fname, "g_embedding")
+            y_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"]
             _calculator = ClusteringMetricsCalculator(
-                true_labels=self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"],
-                # pred_labels=self.metrics_dict["prediction"][_fname]["y"],
+                true_labels=y_true,
                 pred_labels=None,
                 batches=batch_info,
-                X_emb=self.metrics_dict["prediction"][_fname]["g_embedding"],
+                X_emb=g_embedding,
             )
             self.metrics_dict["metrics"]["cluster"][_fname] = pl.DataFrame(_calculator.calculate_metrics())
 
-    def load_predictions(self):
-        """Loads predictions from pickle files."""
-        for _fname in self.fnames:
-            _path = self.ident.filter(pl.col("fname") == _fname)["path"].item()
-            with open(_path, "rb") as f:
-                self.metrics_dict["prediction"][_fname] = pickle.load(f)
-            self.metrics_dict["prediction"][_fname]["X"] = np.squeeze(self.metrics_dict["prediction"][_fname]["node_recon_all"], axis=-1)
-            self.metrics_dict["prediction"][_fname]["node_recon_all"] = None
-            self.metrics_dict["prediction"][_fname]["y"] = self.metrics_dict["prediction"][_fname]["labels"]
-            if self.softmax_pred_labels:
-                self.metrics_dict["prediction"][_fname]["y"] = self.softmax(self.metrics_dict["prediction"][_fname]["y"])
-
-    def load_true(self):
-        for i, _split in enumerate(const.dkey.splits):
-            seeds_uniq = self.ident["seed_num"].unique().sort().to_list()
-            for _seed in seeds_uniq:
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"] = {}
-
-                # Use the 1st fname of seed xx to get feature names
-                _fname = self.ident.filter(pl.col("seed_num") == _seed)["fname"].to_list()[0]
-                feature_names_seed_xx = ["obs_names"] + list(self.metrics_dict["prediction"][_fname]["dict_node_names"].keys())
-                # _path_feat_top2000 = [i for i in os.listdir(os.path.join(self.true_data_dir, "top2000")) if i.find(f"{_seed}") != -1][0]
-                # feature_names_seed_xx = ["obs_names"] + pl.read_csv(os.path.join(self.true_data_dir, "top2000", _path_feat_top2000)).to_series(0).to_list()
-                _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
-                self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx)
-                xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
-                # Apply log1p
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)
-
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["obs_names"] = self.xxx_data_df[f"seed_{_seed}_{_split}"]["obs_names"].to_list()
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["feature_names"] = feature_names_seed_xx[1:]
-
-                # Load true labels
-                _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet"))
-                _labels_df = _labels_df.rename({"bc": "obs_names"})
-                _labels_all = transform_ct_df(_labels_df)
-
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(
-                    self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right"
-                ).select(["obs_names", "ct"])
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(
-                    self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right"
-                )
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = (
-                    self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
-                )
-
-    def detect_pkl(self, s_task: Optional[str], s_split: Optional[str]):
-        """Detects all pickle files in the predictions directory."""
+    def detect_predictions(self, s_task: Optional[str], s_split: Optional[str]):
+        """Detects .h5 files in the predictions directory."""
         _fnames = []
         _seeds = []
         _seeds_num = []
@@ -268,9 +284,9 @@ class MetricsDictMaker:
         _splits = []
         _paths = []
         for _file in os.listdir(self.predictions_dir):
-            if _file.endswith(".pkl"):
+            if _file.endswith(".h5"):
                 _path = os.path.join(self.predictions_dir, _file)
-                _prop = _file.removesuffix(".pkl").split("+")
+                _prop = _file.removesuffix(".h5").split("+")
 
                 _task = _prop[2]
                 _split = _prop[3]
@@ -287,7 +303,16 @@ class MetricsDictMaker:
                 _splits.append(_split)
                 _paths.append(_path)
                 _fnames.append(_file)
-        return pl.DataFrame({"fname": _fnames, "seed": _seeds, "seed_num": _seeds_num, "task": _tasks, "split": _splits, "path": _paths})
+        return pl.DataFrame(
+            {
+                "fname": _fnames,
+                "seed": _seeds,
+                "seed_num": _seeds_num,
+                "task": _tasks,
+                "split": _splits,
+                "path": _paths,
+            }
+        )
 
     def _read_batch_from_h5ad(self, h5ad_path: str, _seed: int, _split: str) -> pl.DataFrame:
         r"""
@@ -295,6 +320,10 @@ class MetricsDictMaker:
         """
         result_df = read_batch_from_h5ad(h5ad_path)
         return result_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
+
+    def softmax(self, x, axis=-1):
+        e_x = np.exp(x - np.max(a=x, axis=axis, keepdims=True))
+        return e_x / e_x.sum(axis=axis, keepdims=True)
 
 
 class RegressionMetricsCalculator:

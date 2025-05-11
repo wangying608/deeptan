@@ -219,7 +219,7 @@ def deeptan_predict():
     parser = argparse.ArgumentParser(description="DeepTAN prediction script.")
     parser.add_argument("--em", type=str, required=True, help="Existing model checkpoint path.")
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
-    parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
+    parser.add_argument("--output", "--out", type=str, required=True, help="Path to output file")
     parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     args = parser.parse_args()
@@ -230,32 +230,27 @@ def deeptan_predict():
     # Create output directory
     output_dir = os.path.dirname(args.output)
     os.makedirs(output_dir, exist_ok=True)
-    output_pkl_path = args.output
-    if not output_pkl_path.endswith(".pkl"):
-        output_pkl_path += ".pkl"
+    output_path = args.output if args.output.endswith(".h5") else f"{args.output}.h5"
 
-    if (not os.path.exists(output_pkl_path) and not os.path.exists(output_pkl_path.replace(".pkl", ".h5"))) or args.overwrite:
+    if not os.path.exists(output_path) or args.overwrite:
         print(f"Predicting with model {model_path} on data {litdata_dir}")
         predict(
             model_ckpt_path=model_path,
             litdata_dir=litdata_dir,
-            output_pkl_path=output_pkl_path,
+            output_path=output_path,
             map_location=args.map_location,
             batch_size=8,
             save_h5=True,
         )
     else:
-        if os.path.exists(output_pkl_path):
-            print(f"Results already exist at {output_pkl_path}")
-        else:
-            print(f"Results already exist at {output_pkl_path.replace('.pkl', '.h5')}")
+        print(f"Results already exist at {output_path}")
 
 
 def deeptan_perturb():
     parser = argparse.ArgumentParser(description="DeepTAN perturbation script.")
     parser.add_argument("--em", type=str, required=True, help="Existing model checkpoint path.")
     parser.add_argument("--litdata", "--data", type=str, required=True, help="Path to litdata directory")
-    parser.add_argument("--output", "--out", type=str, required=True, help="Path to output pickle file")
+    parser.add_argument("--output", "--out", type=str, required=True, help="Path to output file")
     parser.add_argument("--maplocation", "--maploc", type=str, default=None, help="Map location for model loading")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing output directory")
     args = parser.parse_args()
@@ -266,11 +261,9 @@ def deeptan_perturb():
     # Create output directory
     output_dir = os.path.dirname(args.output)
     os.makedirs(output_dir, exist_ok=True)
-    output_path = args.output
-    if not output_path.endswith(".pkl"):
-        output_path += ".pkl"
+    output_path = args.output if args.output.endswith(".h5") else f"{args.output}.h5"
 
-    if (not os.path.exists(output_path) and not os.path.exists(output_path.replace(".pkl", ".h5"))) or args.overwrite:
+    if not os.path.exists(output_path) or args.overwrite:
         print(f"Predicting with model {model_path} on data {litdata_dir}")
         predict_perturbation(
             model_ckpt_path=model_path,
@@ -280,7 +273,4 @@ def deeptan_perturb():
             map_location=args.maplocation,
         )
     else:
-        if os.path.exists(output_path):
-            print(f"Results already exist at {output_path}")
-        else:
-            print(f"Results already exist at {output_path.replace('.pkl', '.h5')}")
+        print(f"Results already exist at {output_path}")
