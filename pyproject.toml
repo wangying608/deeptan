@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deeptan"
-version = "0.1.4"
+version = "0.1.5"
 description = "DeepTAN: A multi-task framework designed to infer multi-omics trait-associated networks and reconstruct phenotype-specific omics states from mosaic data input."
 authors = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 maintainers = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
@@ -56,12 +56,12 @@ classifiers = [
 Homepage = "https://github.com/cma2015/DeepTAN"
 
 [project.scripts]
-hello = "deeptan.cli_:hello"
-print_h5 = "deeptan.cli_:print_h5"
-deeptan-litdata = "deeptan.cli_:deeptan_litdata"
-deeptan-fit = "deeptan.cli_:deeptan_fit_tune"
-deeptan-predict = "deeptan.cli_:deeptan_predict"
-deeptan-perturb = "deeptan.cli_:deeptan_perturb"
+hello_deeptan = "deeptan.cli.hello:hello"
+print_h5 = "deeptan.cli.print_h5:print_h5"
+deeptan-litdata = "deeptan.cli.deeptan_litdata:deeptan_litdata"
+deeptan-fit = "deeptan.cli.deeptan_fit:deeptan_fit_tune"
+deeptan-predict = "deeptan.cli.deeptan_predict:deeptan_predict"
+deeptan-perturb = "deeptan.cli.deeptan_perturb:deeptan_perturb"
 
 [tool.uv.pip]
 index-url = "https://mirror.sjtu.edu.cn/pypi/web/simple"

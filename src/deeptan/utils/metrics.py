@@ -148,13 +148,24 @@ class MetricsDictMaker:
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
 
-    def _get_dict_node_names(self, fname: str) -> dict:
+    def _get_dict_node_names(self, fname: str) -> Dict[str, int]:
         """Read dict_node_names from the h5 file."""
         path = self.metrics_dict["prediction"][fname]["path"]
+
+        def decode_item(item):
+            if isinstance(item, h5py.Dataset):
+                data = item[()]
+                if isinstance(data, bytes):
+                    return data.decode("utf-8")  # Handle byte strings
+                return data
+            elif isinstance(item, h5py.Group):
+                return {k: decode_item(v) for k, v in item.items()}
+            return item
+
         with h5py.File(path, "r") as f:
-            if "dict_node_names" in f:
-                return {k: v[()] if not isinstance(v, h5py.Group) else {k2: v2[()] for k2, v2 in v.items()} for k, v in f["dict_node_names"].items()}
-        return {}
+            if "dict_node_names" not in f:
+                raise KeyError("dict_node_names not found in the h5 file.")
+            return {k: decode_item(v) for k, v in f["dict_node_names"].items()}
 
     def _get_label_names(self, fname: str) -> list:
         """Read label_names from the h5 file."""
@@ -170,7 +181,6 @@ class MetricsDictMaker:
         with h5py.File(path, "r") as f:
             if dataset_name in f:
                 return f[dataset_name][()]
-        return np.array([])
 
     def make_metrics_summary(self):
         # For recon

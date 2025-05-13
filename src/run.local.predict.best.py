@@ -16,8 +16,8 @@ home_deeptan = "/mnt/hdd2/homext/wuch/xn2p"
 data_dir = os.path.join(home_deeptan, "data", "optimized_data")
 output_dir = os.path.join(home_deeptan, "run", "predict", "deeptan")
 
-splits = const.dkey.splits
-# splits = [const.dkey.abbr_test]
+# splits = const.dkey.splits
+splits = [const.dkey.abbr_test]
 
 
 if __name__ == "__main__":
@@ -32,9 +32,4 @@ if __name__ == "__main__":
                 continue
 
             print("\nPredicting: ", _ckpt_path, _litdata_dir)
-            try:
-                predict(model_ckpt_path=_ckpt_path, litdata_dir=_litdata_dir, output_path=_output_path, map_location=None, batch_size=8, save_h5=True)
-                print("Results saved to: ", _output_path, "\n")
-            except Exception as e:
-                print(f"Error occurred while predicting: {_ckpt_path}, {_litdata_dir}. Error: {e}")
-                continue
+            predict(model_ckpt_path=_ckpt_path, litdata_dir=_litdata_dir, output_path=_output_path, map_location=None, batch_size=32, save_h5=True)

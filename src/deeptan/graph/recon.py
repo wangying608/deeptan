@@ -117,6 +117,7 @@ def process_results(pickle_file: str | Any, output_path: str, others2save: Optio
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     if save_h5:
+        _output_path = output_path
         if not output_path.endswith(".h5"):
             _output_path = output_path.replace(".pkl", ".h5") if output_path.endswith(".pkl") else output_path + ".h5"
         print(f"\nSaving results to {_output_path}")
