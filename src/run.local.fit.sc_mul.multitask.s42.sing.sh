@@ -11,7 +11,7 @@ ntrial=20
 njob=1
 bs=16
 agd=2
-ck=256
+ck=512
 
 dirlitdata_t=$DEEPTAN_HOME/data/optimized_data/$optdata/$folder
 dirlitdata_v=/mnt/litdata

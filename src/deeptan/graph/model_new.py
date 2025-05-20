@@ -209,7 +209,7 @@ class DeepTAN(ltn.LightningModule):
 
         # Graph-level label predictor
         self.g_label_predictor = GLabelPredictor(
-            output_dim_g_emb,
+            self.num_all_nodes,
             self.output_dim,
             const.default.label_pred_hidden_dims,
             dropout,
@@ -239,7 +239,7 @@ class DeepTAN(ltn.LightningModule):
         recon_node_emb, pred_feat_values = self.ge_decoder(z, E_all)
 
         # Graph-level label prediction
-        pred_labels = self.g_label_predictor(z)
+        pred_labels = self.g_label_predictor(pred_feat_values)
 
         # Node-level reconstruction loss
         predicted_value_for_loss_nonzero, predicted_value_for_loss_zero = self.create_node_masks(batch.node_names, pred_feat_values, ids, self.device)

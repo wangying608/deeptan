@@ -43,7 +43,7 @@ from torchmetrics.regression import (
 
 import deeptan.constants as const
 from deeptan.constants.art import ascii_art
-from deeptan.graph.modules import AMSGP, GE_Decoder, GLabelPredictor
+from deeptan.graph.modules_diffpool import AMSGP, GE_Decoder, GLabelPredictor
 from deeptan.utils.data import (
     DeepTANDataModule,
     DeepTANDataModuleLit,
@@ -227,7 +227,7 @@ class DeepTAN(ltn.LightningModule):
         self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
 
         # Embedding features
-        z, E_all, ids = self.amsgp(
+        z, E_all, ids, diffpool_loss = self.amsgp(
             node_names=batch.node_names,
             x=batch.x,
             edge_attr=batch.edge_attr if self.guide_gat else None,
@@ -251,6 +251,7 @@ class DeepTAN(ltn.LightningModule):
             "label_pred": pred_labels,
             "node_recon_for_loss": predicted_value_for_loss_nonzero,
             "node_recon_for_loss_zeros": predicted_value_for_loss_zero,
+            "diffpool_loss": diffpool_loss,
         }
 
     def training_step(self, batch: GData, batch_idx: int):
@@ -466,7 +467,8 @@ class DeepTAN(ltn.LightningModule):
         # Dynamic weight adjustment
         total_loss, unweighted_loss = self._balance_losses(losses, stage)
         losses["loss_unweighted"] = unweighted_loss
-        losses["loss"] = total_loss
+        # print(f"Total loss: {total_loss}, DiffPool loss: {outputs['diffpool_loss']}")
+        losses["loss"] = total_loss + 0.1 * outputs["diffpool_loss"]
         losses["loss_smooth"] = self.loss_smooth
         return losses
 

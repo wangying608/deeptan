@@ -17,8 +17,6 @@ from sklearn.metrics import adjusted_mutual_info_score as AMI
 from sklearn.metrics import adjusted_rand_score as ARI
 from sklearn.metrics import average_precision_score as AUPRC
 from sklearn.metrics import f1_score as F1
-from sklearn.metrics import homogeneity_score as HOM
-from sklearn.metrics import mean_squared_error as MSE
 from sklearn.metrics import normalized_mutual_info_score as NMI
 from sklearn.metrics import roc_auc_score as AUROC
 
@@ -630,11 +628,12 @@ class ClusteringMetricsCalculator:
         cols = indices.ravel()  # Assuming indices is a 1D array of indices
         data = np.ones_like(rows)
         adj_matrix = csr_matrix((data, (rows, cols)), shape=(n_samples, n_samples))
+        adj_matrix = adj_matrix + adj_matrix.T
 
         dense_adj_matrix = adj_matrix.toarray()
         g = ig.Graph.Adjacency(dense_adj_matrix.astype(bool).tolist())
         partition_type = leidenalg.RBConfigurationVertexPartition
-        partition = leidenalg.find_partition(g, partition_type)
+        partition = leidenalg.find_partition(g, partition_type, n_iterations=-1)
         return np.array(partition.membership)
 
     def _calculate_ari_leiden(self) -> float:
@@ -657,32 +656,3 @@ class ClusteringMetricsCalculator:
         for name, func in self.metric_functions.items():
             metrics[name] = func()
         return metrics
-
-    # def _calculate_asw_true_label(self):
-    #     return ASW(adata=self.adata_true_label, label_key=self.label_key, embed=self.emb_key)
-
-    # def _calculate_asw_pred_label(self):
-    #     return ASW(adata=self.adata_pred_label, label_key=self.label_key, embed=self.emb_key)
-
-    # def _calculate_kbet_true_label(self):
-    #     return kBET(adata=self.adata_true_label, batch_key=self.batch_key, label_key=self.label_key, type_="embed", embed=self.emb_key)
-
-    # def _calculate_kbet_pred_label(self):
-    #     return kBET(adata=self.adata_pred_label, batch_key=self.batch_key, label_key=self.label_key, type_="embed", embed=self.emb_key)
-
-    # def make_adata(self, X: np.ndarray, X_emb: np.ndarray, labels: np.ndarray, batches: np.ndarray, batch_key: str = "batch", label_key: str = "label", emb_key: str = "X_emb") -> anndata.AnnData:
-    #     """
-    #     Create an AnnData object from the given embedding, labels, batch key, and label key.
-    #     Args:
-    #         emb (np.ndarray): The embedding data.
-    #         labels (np.ndarray): The cell labels.
-    #         batch_key (str): The key in the AnnData object for the batch information.
-    #         label_key (str): The key in the AnnData object for the cell labels.
-    #     Returns:
-    #         AnnData: The AnnData object.
-    #     """
-    #     adata = anndata.AnnData(X=X)
-    #     adata.obsm[emb_key] = X_emb
-    #     adata.obs[label_key] = labels
-    #     adata.obs[batch_key] = batches
-    #     return adata

@@ -165,23 +165,20 @@ class NMICGraphDataset(GDataset):
             mask = np.isin(avail_feat_indices, specified_feat_indices)
             avail_col_indices = avail_col_indices[mask]
             avail_feat_indices = avail_feat_indices[mask]
-        # print(f"\nAvailable features: {len(avail_feat_indices)}")
 
         # If no features are available?
         if len(avail_col_indices) < 10:
             print("\nNumber of available features is too small.")
 
         # Filter edges based on available nodes
-        edge_mask = np.isin(self.edge_index[0], avail_feat_indices) & np.isin(self.edge_index[1], avail_feat_indices)
+        edge_mask = np.logical_and(np.isin(self.edge_index[0], avail_feat_indices), np.isin(self.edge_index[1], avail_feat_indices))
         edge_indices = self.edge_index[:, edge_mask]
         edge_attrs = self.edge_attr[edge_mask]
-        # print(f"\nNumber of edges after filtering: {len(edge_indices[0])}")
 
         # Filter edges based on edge_attr threshold
         edge_attr_mask = edge_attrs > self.edge_attr_threshold
         edge_indices = edge_indices[:, edge_attr_mask]
         edge_attrs = edge_attrs[edge_attr_mask]
-        # print(f"\nNumber of edges after filtering: {len(edge_indices[0])}")
 
         # Filter nodes based on used edge indices
         if edge_indices.size > 0:
@@ -195,7 +192,6 @@ class NMICGraphDataset(GDataset):
             final_feat_indices = avail_feat_indices[:10]
             if len(final_col_indices) < 1:
                 raise ValueError("No valid features after filtering")
-        # print(f"\nNumber of nodes after filtering: {len(final_col_indices)}")
 
         # Re-generate the feature matrix
         x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)

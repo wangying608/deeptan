@@ -32,4 +32,11 @@ if __name__ == "__main__":
                 continue
 
             print("\nPredicting: ", _ckpt_path, _litdata_dir)
-            predict(model_ckpt_path=_ckpt_path, litdata_dir=_litdata_dir, output_path=_output_path, map_location=None, batch_size=32, save_h5=True)
+            predict(
+                model_ckpt_path=_ckpt_path,
+                litdata_dir=_litdata_dir,
+                output_path=_output_path,
+                map_location=None,
+                batch_size=32,
+                save_h5=True,
+            )
