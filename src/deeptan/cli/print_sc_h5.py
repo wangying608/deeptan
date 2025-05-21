@@ -4,7 +4,7 @@ import sys
 import scanpy as sc
 
 
-def print_h5():
+def print_sc_h5():
     parser = argparse.ArgumentParser(description="Read an H5AD or H5 file and print its contents.")
     parser.add_argument("-p", "--path", type=str, help="Path to the H5AD or H5 file.")
     args = parser.parse_args()

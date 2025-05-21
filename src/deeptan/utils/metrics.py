@@ -62,6 +62,17 @@ def read_batch_from_h5ad(h5ad_path: str) -> pl.DataFrame:
     return result_df
 
 
+def decode_item(item):
+    if isinstance(item, h5py.Dataset):
+        data = item[()]
+        if isinstance(data, bytes):
+            return data.decode("utf-8")  # Handle byte strings
+        return data
+    elif isinstance(item, h5py.Group):
+        return {k: decode_item(v) for k, v in item.items()}
+    return item
+
+
 class MetricsDictMaker:
     r"""
     Make a dictionary of metrics for predictions of **a dataset**.
@@ -149,17 +160,6 @@ class MetricsDictMaker:
     def _get_dict_node_names(self, fname: str) -> Dict[str, int]:
         """Read dict_node_names from the h5 file."""
         path = self.metrics_dict["prediction"][fname]["path"]
-
-        def decode_item(item):
-            if isinstance(item, h5py.Dataset):
-                data = item[()]
-                if isinstance(data, bytes):
-                    return data.decode("utf-8")  # Handle byte strings
-                return data
-            elif isinstance(item, h5py.Group):
-                return {k: decode_item(v) for k, v in item.items()}
-            return item
-
         with h5py.File(path, "r") as f:
             if "dict_node_names" not in f:
                 raise KeyError("dict_node_names not found in the h5 file.")
@@ -273,8 +273,10 @@ class MetricsDictMaker:
             else:
                 batch_info = np.repeat("batch_0", len(self.xxx_data_df[f"seed_{_seed}_{_split}"]))
 
-            g_embedding = self._read_h5_dataset(_fname, "g_embedding")
             y_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"]
+
+            g_embedding = self._read_h5_dataset(_fname, "g_embedding")
+
             _calculator = ClusteringMetricsCalculator(
                 true_labels=y_true,
                 pred_labels=None,
@@ -292,25 +294,27 @@ class MetricsDictMaker:
         _splits = []
         _paths = []
         for _file in os.listdir(self.predictions_dir):
-            if _file.endswith(".h5"):
-                _path = os.path.join(self.predictions_dir, _file)
-                _prop = _file.removesuffix(".h5").split("+")
+            if not _file.endswith(".h5"):
+                continue
+            _path = os.path.join(self.predictions_dir, _file)
+            _prop = _file.removesuffix(".h5").split("+")
 
-                _task = _prop[2]
-                _split = _prop[3]
-                if s_task is not None and _task != s_task:
-                    print(f"Skipping task {_task} as it does not match the specified task {s_task}.")
-                    continue
-                if s_split is not None and _split != s_split:
-                    print(f"Skipping split {_split} as it does not match the specified split {s_split}.")
-                    continue
+            _task = _prop[2]
+            _split = _prop[3]
+            if s_task is not None and _task != s_task:
+                print(f"Skipping task {_task} as it does not match the specified task {s_task}.")
+                continue
+            if s_split is not None and _split != s_split:
+                print(f"Skipping split {_split} as it does not match the specified split {s_split}.")
+                continue
+            print(f"Found file📄 {_file} with task🎯 {_task} and split🍰 {_split}.")
 
-                _seeds.append(_prop[1])
-                _seeds_num.append(int(_prop[1].replace("seed_", "")))
-                _tasks.append(_task)
-                _splits.append(_split)
-                _paths.append(_path)
-                _fnames.append(_file)
+            _seeds.append(_prop[1])
+            _seeds_num.append(int(_prop[1].replace("seed_", "")))
+            _tasks.append(_task)
+            _splits.append(_split)
+            _paths.append(_path)
+            _fnames.append(_file)
         return pl.DataFrame(
             {
                 "fname": _fnames,

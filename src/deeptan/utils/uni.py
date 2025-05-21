@@ -4,6 +4,7 @@ Universal functions.
 
 import concurrent.futures
 import os
+import pickle
 import random
 import string
 import time
@@ -155,48 +156,6 @@ def collect_tensorboard_events(dir_log: str) -> pl.DataFrame:
     return pl.concat(records, how="diagonal", rechunk=True)
 
 
-'''
-def collect_tensorboard_events(dir_log: str):
-    r"""Collect info from tensorboard events."""
-    paths_ckpt = search_ckpt(dir_log)
-
-    # Pick ids of outer and inner folds, val_loss and version from ckpt file paths
-    # records = [tsbevent2df(read_tensorboard_events(os.path.join(os.path.dirname(path_x), "version_0"), False)) for path_x in paths_ckpt]
-    records = []
-    for path_x in paths_ckpt:
-        tsb_dir = os.path.join(os.path.dirname(path_x), "version_0")
-        tsb_event = read_tensorboard_events(tsb_dir, False)
-        assert isinstance(tsb_event, Dict), "tsb_event must be a dictionary."
-        _df = tsbevent2df(tsb_event)
-        if _df.width > 0:
-            path_x_frag = path_x.split(os.sep)
-            if path_x_frag[-2].startswith("trial_"):
-                posmv = 1
-                # _log_name = f"{path_x_frag[-3]}_{path_x_frag[-2]}"
-            else:
-                posmv = 0
-                # _log_name = path_x_frag[-2]
-            _log_name = path_x_frag[-2 - posmv]
-            _task = path_x_frag[-3 - posmv]
-            _seed = path_x_frag[-4 - posmv]
-            _data = path_x_frag[-5 - posmv]
-
-            _info_df = pl.DataFrame({"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]})
-            # print(_info_df)
-            _df = _info_df.hstack(_df)  # Concatenate the info DataFrame with the test records DataFrame
-            records.append(_df)
-        else:
-            print(f"No records found in {tsb_dir}. Skipping...")
-
-    # Convert to DataFrame by Polars
-    if len(records) == 0:
-        raise ValueError("No records found.")
-    df = pl.concat(records, how="diagonal", rechunk=True)
-
-    return df
-'''
-
-
 def search_ckpt(dir_log: str):
     r"""Search checkpoints in the directory and its subdirectories."""
     paths_ckpt = [os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".ckpt")]
@@ -346,3 +305,22 @@ def path_exists_in_hdf5(file_path: str, hdf5_path: str) -> bool:
             return hdf5_path in f
     except (OSError, KeyError):
         return False
+
+
+def convert_pickle_to_h5(input_pkl: str, output_h5: str):
+    """
+    Convert a pickle file to h5 format using the save_to_h5 utility.
+
+    Args:
+        input_pkl: Path to input pickle file
+        output_h5: Path for output h5 file
+    """
+    if not os.path.exists(input_pkl):
+        raise FileNotFoundError(f"Input pickle file not found: {input_pkl}")
+    # Load pickle data
+    with open(input_pkl, "rb") as f:
+        _data = pickle.load(f)
+
+    # Save to h5 format
+    _output_h5 = output_h5 if output_h5.endswith(".h5") else f"{output_h5}.h5"
+    save_to_h5(_data, _output_h5, mode="w", compression=True)
