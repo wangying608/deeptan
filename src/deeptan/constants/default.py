@@ -16,7 +16,7 @@ max_epoch = 50
 dropout = 0.3
 negative_slope = 0.2
 node_emb_dim = 128
-g_emb_dim = 256
+g_emb_dim = 512
 label_pred_hidden_dims = [512, 256, 256]
 fusion_dims_node_emb = [128, 64]
 n_heads_pooling = 8
@@ -37,6 +37,7 @@ matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
 precision = "16-mixed"
+# precision = "32-true"
 
 n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.8)))
 
