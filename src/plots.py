@@ -12,6 +12,7 @@ import umap
 from matplotlib import ticker
 
 import deeptan.constants as const
+from deeptan.utils.data import pp_pacmap, sc_plot
 from deeptan.utils.metrics import MetricsDictMaker, format_ticks
 
 
@@ -312,18 +313,14 @@ def metrics_plot(
     return fig
 
 
-def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: str, seed: Optional[int] = None):
+def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: str, seed: int):
     # Get cell embeddings for each task
-    cell_embs = {}
+    g_embs = {}
     _fnames = []
     for _task in _tasks:
-        # print("tttt2: ", metrics_data.ident.filter((pl.col("task") == _task) & (pl.col("seed_num") == seed) & (pl.col("split") == split))["fname"])
         _fname = metrics_data.ident.filter((pl.col("task") == _task) & (pl.col("seed_num") == seed) & (pl.col("split") == split))["fname"].item()
         _fnames.append(_fname)
-        # cell_embs[_task] = metrics_data._read_h5_dataset(_fname, "g_embedding")
-        cell_embs[_task] = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["X"]
-        cell_embs[_task] = np.log1p(cell_embs[_task])  # Apply log1p transformation to cell embeddings
-        # cell_embs[_task] = sc.read_h5ad(os.path.join("/mnt/hdd2/homext/wuch/xn2p", "data", "raw_df", "snRNA", "ath_snrna_balanced_flower_seedling_rosette_split_full", "origin.h5ad")).X.todense()
+        g_embs[_task] = metrics_data._read_h5_dataset(_fname, "g_embedding")
 
     # Get predicted cell labels for each task
     # 获取所有文件中唯一的细胞类型标签
@@ -334,162 +331,38 @@ def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: s
     ys_pred_numeric = {}
     ys_pred_text = {}
     for _fname in _fnames:
-        # print("tttt1: ", metrics_data.ident.filter(pl.col("fname") == _fname)["task"])
         _task = metrics_data.ident.filter(pl.col("fname") == _fname)["task"].item()
         ys_pred_numeric[_task] = metrics_data._read_h5_dataset(_fname, "labels").argmax(axis=1)
-
         ys_pred_text[_task] = [celltypes_uniq[i] for i in ys_pred_numeric[_task]]
 
-    # Get true cell types
-    y_true_text = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["y_df_flatten"]["ct"].to_list()
+    # Get true
 
-    # =========================== Compute PaCMAP =================================
-    # embedding = pacmap.PaCMAP(n_components=2, n_neighbors=15, MN_ratio=0.3, FP_ratio=3.0)
-    embedding = umap.UMAP(transform_seed=0, min_dist=0.5, random_state=41)
+    true_features = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["X"]
+    # Reverse log1p
+    true_features = np.expm1(true_features)
 
-    # # fit the data (The index of transformed data corresponds to the index of the original data)
-    # X_transformed = embedding.fit_transform(X, init="pca")
+    y_true_text: List[str] = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["y_df_flatten"]["ct"].to_list()
 
-    cell_embs_pacmap = {}
-    for _task in cell_embs.keys():
-        # cell_embs_pacmap[_task] = embedding.fit_transform(cell_embs[_task], init="pca")
-        cell_embs_pacmap[_task] = embedding.fit_transform(cell_embs[_task])
-        print(f"Task {_task}: {cell_embs_pacmap[_task].shape}")
-
-    return cell_embs_pacmap, y_true_text, ys_pred_text
+    return true_features, g_embs, y_true_text, ys_pred_text
 
 
 def pacmap_plot(
-    cell_embs_pacmap: Dict,
-    _tasks_text,
-    y_true_text,
-    ys_pred_text,
-    fig_name: Optional[str] = None,
-    dir4save: Optional[str] = None,
+    true_features: np.ndarray,
+    g_embs: Dict[str, np.ndarray],
+    y_true_text: List[str],
+    ys_pred_text: Dict[str, List[str]],
 ):
-    try:
-        plt.close("all")
-    except:
-        pass
+    adata_true = sc.AnnData(X=true_features, obs={"CellType": y_true_text})
+    adata_true = pp_pacmap(adata_true, _pp=True)
+    # sc_plot(adata_true, _color=["CellType", "Leiden"], _title=["Annotated", "Leiden Clustering"])
 
-    sns.set_theme(style="ticks")
-    sns.set_context("paper", font_scale=1.0)
+    for _task in g_embs.keys():
+        print(f"\nTask: {_task}")
 
-    # 1. 准备统一的颜色映射
-    # 收集所有可能的类别标签
-    all_categories = set(y_true_text)
-    for task in cell_embs_pacmap.keys():
-        all_categories.update(ys_pred_text[task])
-    all_categories = sorted(list(all_categories))
+        _adata_true = adata_true.copy()
+        _adata_true.obs["Predicted CellType"] = ys_pred_text[_task]
+        sc_plot(_adata_true)
 
-    # 创建统一的调色板
-    # palette = sns.color_palette("husl", len(all_categories))
-    palette = sns.color_palette("hls", len(all_categories))
-    color_dict = {cat: palette[i] for i, cat in enumerate(all_categories)}
-
-    # A4纸的宽度约为21厘米（8.27英寸），高度可以根据需要调整
-    # a4_width_cm = 21
-    # cm_to_inches = 0.393701
-    # a4_width_inches = a4_width_cm * cm_to_inches
-    n_cols = 2
-    n_rows = len(cell_embs_pacmap)
-
-    fig_width = 2.6 * n_cols  # 调整图表的整体宽度以适应列数
-    fig_height = 2.4 * n_rows  # 调整图表的整体高度以适应行数
-
-    sns.set_theme(style="ticks")
-    sns.set_context("paper", font_scale=1.0)
-
-    fig, axes = plt.subplots(
-        n_rows,
-        n_cols,
-        figsize=(fig_width, fig_height),
-        sharex=False,
-        sharey=False,
-    )
-    if n_rows == 1:
-        axes = axes.reshape(1, -1)
-
-    # 用于收集图例项的字典
-    legend_dict = {}
-    for i, task in enumerate(cell_embs_pacmap.keys()):
-        # 第一个子图 - 真实标签
-        ax = axes[i, 0]
-        ax.set_ylabel(_tasks_text[i])
-        ax.set_title("Annotated", y=0.95)
-
-        # 绘制散点图
-        scatter = sns.scatterplot(
-            x=cell_embs_pacmap[task][:, 0],
-            y=cell_embs_pacmap[task][:, 1],
-            alpha=0.5,
-            hue=y_true_text,
-            palette=color_dict,
-            s=4,
-            ax=ax,
-        )
-
-        # 收集图例项
-        if scatter.legend_ is not None:
-            handles, labels = ax.get_legend_handles_labels()
-            for _h, _l in zip(handles, labels):
-                if _l not in legend_dict:
-                    legend_dict[_l] = _h
-            scatter.legend_.remove()
-        # 第二个子图 - 预测标签
-        ax = axes[i, 1]
-        ax.set_title("Predicted", y=0.95)
-        scatter = sns.scatterplot(
-            x=cell_embs_pacmap[task][:, 0],
-            y=cell_embs_pacmap[task][:, 1],
-            alpha=0.5,
-            hue=ys_pred_text[task],
-            palette=color_dict,
-            s=4,
-            ax=ax,
-        )
-
-        # 收集图例项
-        if scatter.legend_ is not None:
-            handles, labels = ax.get_legend_handles_labels()
-            for _h, _l in zip(handles, labels):
-                if _l not in legend_dict:
-                    legend_dict[_l] = _h
-            scatter.legend_.remove()
-        # 统一设置子图样式
-        for col in [0, 1]:
-            ax = axes[i, col]
-            # 移除边框
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-            # 移除刻度
-            ax.tick_params(axis="both", which="both", length=0, labelbottom=False, labelleft=False)
-
-    # 添加全局图例
-    if legend_dict:
-        # 按类别名称排序
-        sorted_items = sorted(legend_dict.items(), key=lambda x: x[0])
-        sorted_labels = [item[0] for item in sorted_items]
-        sorted_handles = [item[1] for item in sorted_items]
-
-        fig.legend(
-            sorted_handles,
-            sorted_labels,
-            loc="lower center",
-            bbox_to_anchor=(0.5, -0.05 - 0.02 * n_rows),
-            ncol=min(6, len(sorted_labels)),
-            frameon=False,
-        )
-
-    fig.tight_layout(pad=1.2)
-
-    # 保存图像
-    if fig_name and dir4save:
-        os.makedirs(dir4save, exist_ok=True)
-        save_path = os.path.join(dir4save, fig_name)
-
-        # 确保图例被包含在保存的图像中
-        fig.savefig(f"{save_path}.png", dpi=300, bbox_inches="tight", pad_inches=0.1)
-        fig.savefig(f"{save_path}.pdf", bbox_inches="tight", pad_inches=0.1)
-
-    return fig
+        adata_pred = sc.AnnData(X=g_embs[_task], obs={"CellType": ys_pred_text[_task]})
+        adata_pred = pp_pacmap(adata_pred, _pp=False)
+        sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])

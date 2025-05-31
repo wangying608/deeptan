@@ -122,13 +122,6 @@ class MetricsDictMaker:
         for _fname in self.fnames:
             _path = self.ident.filter(pl.col("fname") == _fname)["path"].item()
             self.metrics_dict["prediction"][_fname] = {"path": _path}
-            # with open(_path, "rb") as f:
-            #     self.metrics_dict["prediction"][_fname] = pickle.load(f)
-            # self.metrics_dict["prediction"][_fname]["X"] = np.squeeze(self.metrics_dict["prediction"][_fname]["node_recon_all"], axis=-1)
-            # self.metrics_dict["prediction"][_fname]["node_recon_all"] = None
-            # self.metrics_dict["prediction"][_fname]["y"] = self.metrics_dict["prediction"][_fname]["labels"]
-            # if self.softmax_pred_labels:
-            #     self.metrics_dict["prediction"][_fname]["y"] = self.softmax(self.metrics_dict["prediction"][_fname]["y"])
 
     def load_true(self):
         """Load true data from parquet files."""

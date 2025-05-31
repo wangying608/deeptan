@@ -7,6 +7,7 @@ from typing import List, Optional, Union
 
 import anndata
 import numpy as np
+import pacmap
 import polars as pl
 import scanpy as sc
 import torch
@@ -993,3 +994,46 @@ def read_nmic_results(npz_path: str):
     print(df, "\n")
     print(df.columns)
     # The first column is obs_names, other columns are features.
+
+
+def pp_pacmap(adata: sc.AnnData, _pp: bool = True, basis="pacmap", key_leiden="Leiden", target_sum: float = 1e4, n_top_genes: int = 2000, max_value: float = 10, n_comps: int = 50, n_pcs: int = 50, resolution=0.8, n_neighbors: int = 10, MN_ratio=0.3, FP_ratio=3.0):
+    """
+    Args:
+        adata: AnnData object
+        _pp: Whether to preprocess the data. Default is ``True``.
+        basis: The basis to use for plotting. Default is ``"pacmap"``.
+    """
+    _adata = adata.copy()
+    if _pp:
+        sc.pp.normalize_total(_adata, target_sum=target_sum)
+        sc.pp.log1p(_adata)
+        sc.pp.highly_variable_genes(_adata, n_top_genes=n_top_genes)
+        _adata = _adata[:, _adata.var.highly_variable]
+        sc.pp.scale(_adata, max_value=max_value)
+
+    sc.tl.pca(_adata, n_comps=n_comps)
+    sc.pp.neighbors(_adata, n_neighbors=n_neighbors, n_pcs=n_pcs, metric="cosine")
+    sc.tl.leiden(_adata, resolution=resolution, key_added=key_leiden)
+
+    embedding = pacmap.PaCMAP(n_components=2, n_neighbors=n_neighbors, MN_ratio=MN_ratio, FP_ratio=FP_ratio)
+    X_transformed = embedding.fit_transform(_adata.X, init="random")
+    _adata.obsm[f"X_{basis}"] = X_transformed
+
+    return _adata
+
+
+def sc_plot(_adata: sc.AnnData, _basis: str = "pacmap", _color: Optional[List[str]] = None, _title: Optional[List[str]] = None):
+    """
+    Args:
+        _adata: AnnData object
+        _basis: Basis for plotting. Default is ``"pacmap"``.
+        _color: List of color names for plotting. Default is ``["CellType", "Predicted CellType", "Leiden"]``.
+        _title: List of titles for each plot. Default is ``["Annotated", "Predicted", "Leiden Clustering"]``.
+    Returns:
+        None
+    """
+    if _color is None:
+        _color = ["CellType", "Predicted CellType", "Leiden"]
+    if _title is None:
+        _title = ["Annotated", "Predicted", "Leiden Clustering"]
+    sc.pl.embedding(_adata, basis=_basis, color=_color, wspace=0.4, title=_title)

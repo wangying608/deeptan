@@ -37,7 +37,6 @@ matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
 precision = "16-mixed"
-# precision = "32-true"
 
 n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.8)))
 
