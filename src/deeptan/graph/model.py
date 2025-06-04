@@ -251,6 +251,7 @@ class DeepTAN(ltn.LightningModule):
             "label_pred": pred_labels,
             "node_recon_for_loss": predicted_value_for_loss_nonzero,
             "node_recon_for_loss_zeros": predicted_value_for_loss_zero,
+            "obs_name": batch.obs_name,
         }
 
     def training_step(self, batch: GData, batch_idx: int):
@@ -611,7 +612,7 @@ def train_model(
         callbacks=[callback_es, callback_ckpt, lr_monitor],
         num_sanity_val_steps=0,
         default_root_dir=log_dir,
-        gradient_clip_val=3.0,
+        gradient_clip_val=const.default.gradient_clip_val,
         gradient_clip_algorithm="norm",
     )
 

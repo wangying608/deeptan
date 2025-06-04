@@ -18,13 +18,13 @@ import polars as pl
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch import cuda
-from torch_geometric.data import Batch
+from torch_geometric.data import Batch as GBatch
 
 import deeptan.constants as const
 
 
 def collate_fn(data_list):
-    batch = Batch.from_data_list(data_list)
+    batch = GBatch.from_data_list(data_list)
     return batch
 
 

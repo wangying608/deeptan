@@ -7,7 +7,6 @@ from typing import List, Optional, Union
 
 import anndata
 import numpy as np
-import pacmap
 import polars as pl
 import scanpy as sc
 import torch
@@ -18,6 +17,7 @@ from torch_geometric.data import Dataset as GDataset
 from torch_geometric.loader import DataLoader as GDataLoader
 from torch_geometric.utils import erdos_renyi_graph
 
+import deeptan.constants as const
 from deeptan.utils.uni import collate_fn, get_avail_cpu_count
 
 
@@ -212,10 +212,12 @@ class NMICGraphDataset(GDataset):
         # Reorder node names based on final column indices
         node_names = [self.node_names[i] for i in final_col_indices]
 
+        obs_name = self.obs_names[idx]
+
         # Create the graph data object
         _y = None
         if self.labels is not None:
-            _y = torch.tensor(self.pick_label(self.obs_names[idx]), dtype=torch.float16)
+            _y = torch.tensor(self.pick_label(obs_name), dtype=torch.float16)
 
         return GData(
             x=x,
@@ -223,6 +225,7 @@ class NMICGraphDataset(GDataset):
             edge_index=edge_index,
             edge_attr=edge_attrs,
             node_names=node_names,
+            obs_name=obs_name,
         )
 
     def pick_label(self, obs_name: str):
@@ -307,10 +310,12 @@ class NMICGraphDatasetRely(GDataset):
         # Reorder node names based on final column indices
         node_names = [self.depGDataset.node_names[i] for i in final_col_indices]
 
+        obs_name = self.obs_names[idx]
+
         # Create the graph data object
         _y = None
         if self.depGDataset.labels is not None:
-            _y = torch.tensor(self.depGDataset.pick_label(self.obs_names[idx]), dtype=torch.float16)
+            _y = torch.tensor(self.depGDataset.pick_label(obs_name), dtype=torch.float16)
 
         return GData(
             x=x,
@@ -318,6 +323,7 @@ class NMICGraphDatasetRely(GDataset):
             edge_index=edge_index,
             edge_attr=edge_attrs,
             node_names=node_names,
+            obs_name=obs_name,
         )
 
 
@@ -402,7 +408,7 @@ class DeepTANDataModuleLit(LightningDataModule):
 
     def setup(self, stage=None):
         self.dataloder_trn = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "trn"), max_cache_size="10GB"),
+            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_train), max_cache_size=const.default.lit_max_cache_size),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -413,7 +419,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             drop_last=True,
         )
         self.dataloader_val = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "val"), max_cache_size="10GB"),
+            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_val), max_cache_size=const.default.lit_max_cache_size),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -422,7 +428,7 @@ class DeepTANDataModuleLit(LightningDataModule):
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, "tst"), max_cache_size="10GB"),
+            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_test), max_cache_size=const.default.lit_max_cache_size),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -580,18 +586,6 @@ def read_h5ad(h5ad_file: str) -> anndata.AnnData:
     return adata
 
 
-# def read_h5mu(h5mu_file: str):
-#     r"""Read h5mu file and return AnnData object.
-#     Args:
-#         h5mu_file (str): Path to h5mu file.
-#     Returns:
-#         anndata.AnnData: AnnData object.
-#     """
-#     adata = mudata.read_h5mu(Path(h5mu_file))
-#     print(adata)
-#     return adata
-
-
 def adata_to_parquet(
     adata: anndata.AnnData,
     output_dir: str,
@@ -672,30 +666,6 @@ def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True
         adata.obs_names_make_unique(join="_")
 
     adata_to_parquet(adata, os.path.dirname(output_parquet), os.path.basename(output_parquet))
-
-
-# def h5mu_to_parquet(h5mu_file: str, output_parquet: str):
-#     r"""Read single-cell multi-modal data from an H5MU file and save it to a Parquet file.
-#     Args:
-#         h5mu_file (str): Path to the H5MU file.
-#         output_parquet (str): Path to the output Parquet file.
-#     """
-#     # Read the H5MU file using mudata
-#     mdata = mudata.read_h5mu(Path(h5mu_file))
-
-#     adata_rna = mdata.mod["rna"]
-#     adata_atac = mdata.mod["atac"]
-#     # Concatenate RNA and ATAC data into a single AnnData object
-#     adata_combined = anndata.concat([adata_rna, adata_atac], axis=1, join="outer")
-
-#     adata_combined.obs_names_make_unique(join="_")
-#     adata_combined.var_names_make_unique(join="_")
-
-#     adata_to_parquet(
-#         adata_combined,
-#         os.path.dirname(output_parquet),
-#         os.path.basename(output_parquet),
-#     )
 
 
 def split_parquet(parquet_file: str, output_dir: str, ratio: List[float], seeds: List[int]):
@@ -994,46 +964,3 @@ def read_nmic_results(npz_path: str):
     print(df, "\n")
     print(df.columns)
     # The first column is obs_names, other columns are features.
-
-
-def pp_pacmap(adata: sc.AnnData, _pp: bool = True, basis="pacmap", key_leiden="Leiden", target_sum: float = 1e4, n_top_genes: int = 2000, max_value: float = 10, n_comps: int = 50, n_pcs: int = 50, resolution=0.8, n_neighbors: int = 10, MN_ratio=0.3, FP_ratio=3.0):
-    """
-    Args:
-        adata: AnnData object
-        _pp: Whether to preprocess the data. Default is ``True``.
-        basis: The basis to use for plotting. Default is ``"pacmap"``.
-    """
-    _adata = adata.copy()
-    if _pp:
-        sc.pp.normalize_total(_adata, target_sum=target_sum)
-        sc.pp.log1p(_adata)
-        sc.pp.highly_variable_genes(_adata, n_top_genes=n_top_genes)
-        _adata = _adata[:, _adata.var.highly_variable]
-        sc.pp.scale(_adata, max_value=max_value)
-
-    sc.tl.pca(_adata, n_comps=n_comps)
-    sc.pp.neighbors(_adata, n_neighbors=n_neighbors, n_pcs=n_pcs, metric="cosine")
-    sc.tl.leiden(_adata, resolution=resolution, key_added=key_leiden)
-
-    embedding = pacmap.PaCMAP(n_components=2, n_neighbors=n_neighbors, MN_ratio=MN_ratio, FP_ratio=FP_ratio)
-    X_transformed = embedding.fit_transform(_adata.X, init="random")
-    _adata.obsm[f"X_{basis}"] = X_transformed
-
-    return _adata
-
-
-def sc_plot(_adata: sc.AnnData, _basis: str = "pacmap", _color: Optional[List[str]] = None, _title: Optional[List[str]] = None):
-    """
-    Args:
-        _adata: AnnData object
-        _basis: Basis for plotting. Default is ``"pacmap"``.
-        _color: List of color names for plotting. Default is ``["CellType", "Predicted CellType", "Leiden"]``.
-        _title: List of titles for each plot. Default is ``["Annotated", "Predicted", "Leiden Clustering"]``.
-    Returns:
-        None
-    """
-    if _color is None:
-        _color = ["CellType", "Predicted CellType", "Leiden"]
-    if _title is None:
-        _title = ["Annotated", "Predicted", "Leiden Clustering"]
-    sc.pl.embedding(_adata, basis=_basis, color=_color, wspace=0.4, title=_title)

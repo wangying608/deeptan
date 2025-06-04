@@ -19,44 +19,60 @@ def predict(
     output_path: str,
     map_location: Optional[str] = None,
     batch_size: int = 8,
-    save_h5: bool = True,
 ):
+    # 1. Directory and path handling
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    # Load a DeepTAN model
-    path_hparams = os.path.join(os.path.dirname(model_ckpt_path), "version_0", "hparams.yaml")
-    if os.path.exists(path_hparams):
-        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location), hparams_file=path_hparams)
-    else:
-        model = DeepTAN.load_from_checkpoint(model_ckpt_path, map_location=get_map_location(map_location))
+    model_dir = os.path.dirname(model_ckpt_path)
+    litdata_parent = os.path.dirname(litdata_dir)
 
-    # Freeze the model
-    model.eval()
-    model.freeze()
+    # 2. Model loading with more robust path handling
+    hparams_path = os.path.join(model_dir, "version_0", "hparams.yaml")
+    load_kwargs = {
+        "map_location": get_map_location(map_location),
+        "hparams_file": hparams_path if os.path.exists(hparams_path) else None,
+    }
+    model = DeepTAN.load_from_checkpoint(model_ckpt_path, **load_kwargs)
+    model.eval().freeze()
 
-    # Load the LitData dataset
-    dataloader = StreamingDataLoader(StreamingDataset(litdata_dir, max_cache_size="10GB"), batch_size=batch_size, collate_fn=collate_fn)
-
-    # Predict
-    trainer = Trainer(logger=False, devices=1)
-    results = trainer.predict(model=model, dataloaders=dataloader)
-
-    assert results is not None, "No results returned from prediction"
+    # 3. Data loading with resource management
+    dataset = StreamingDataset(litdata_dir, max_cache_size="26GB")
+    dataloader = StreamingDataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
 
     # Read feature names and label names
-    with open(os.path.join(os.path.dirname(litdata_dir), const.fname.litdata_others2save_pkl), "rb") as f:
+    with open(os.path.join(litdata_parent, const.fname.litdata_others2save_pkl), "rb") as f:
         feature_dict_and_label_dim: dict = pickle.load(f)
-    label_names = pl.read_parquet(os.path.join(os.path.dirname(litdata_dir), const.fname.label_class_onehot)).columns
+    label_names = pl.read_parquet(os.path.join(litdata_parent, const.fname.label_class_onehot)).columns
     feature_dict_and_label_dim.update({"label_names": label_names})
     # The dict contains:
     # dict_node_names (Dict[str, int])
     # output_g_label_dim (int)
     # label_names (List[str])
+    save_to_h5(feature_dict_and_label_dim, output_path, mode="w", compression=True, group_path="/metadata")
 
-    process_results(results, output_path, feature_dict_and_label_dim, save_h5, False)
+    # Predict
+    trainer = Trainer(logger=False, devices=1)
+    results = trainer.predict(model=model, dataloaders=dataloader)
+
+    for i_batch, result in tqdm(enumerate(results), desc="Saving predictions...", total=len(results), unit="batch"):
+        if not isinstance(result, dict):
+            raise ValueError("The result should be a dict.")
+        batch_data = {
+            "g_embedding": result.get("embedding").detach().cpu(),
+            "node_recon": result.get("node_recon").detach().cpu(),
+            "node_recon_all": result.get("node_recon_for_loss_all").detach().cpu(),
+            "labels": result.get("label_pred").detach().cpu(),
+            "obs_name": result.get("obs_name"),
+        }
+        batch_data = {k: v for k, v in batch_data.items() if v is not None}
+
+        # Save each batch's results incrementally
+        save_to_h5(batch_data, output_path, mode="a", compression=True, group_path=f"/batch_{i_batch}")
+
     return None
 
 
-def process_results(pickle_file: str | Any, output_path: str, others2save: Optional[dict] = None, save_h5: bool = True, only_return: bool = False):
+'''
+def process_results(pickle_file: str | Any, output_path: str, others2save: Optional[dict] = None, only_return: bool = False):
     r"""
     Process the results of DeepTAN from the pickle file and save them to a numpy pickle file.
     """
@@ -69,14 +85,14 @@ def process_results(pickle_file: str | Any, output_path: str, others2save: Optio
 
     g_embedding = []
     node_recon = []
-    node_recon_for_loss = []
+    # node_recon_for_loss = []
     node_recon_all = []
     labels = []
 
     for i_batch in range(len(results)):
         g_embedding.append(results[i_batch]["embedding"])
         node_recon.append(results[i_batch]["node_recon"])
-        node_recon_for_loss.append(results[i_batch]["node_recon_for_loss"])
+        # node_recon_for_loss.append(results[i_batch]["node_recon_for_loss"])
         node_recon_all.append(results[i_batch]["node_recon_for_loss_all"])
         labels.append(results[i_batch]["label_pred"])
 
@@ -116,19 +132,14 @@ def process_results(pickle_file: str | Any, output_path: str, others2save: Optio
         return results_dict
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    if save_h5:
-        _output_path = output_path
-        if not output_path.endswith(".h5"):
-            _output_path = output_path.replace(".pkl", ".h5") if output_path.endswith(".pkl") else output_path + ".h5"
-        print(f"\nSaving results to {_output_path}")
-        save_to_h5(results_dict, _output_path, mode="w", compression=True)
-        print(f"Results have been saved to {_output_path}.\n")
-    else:
-        _output_path = output_path if output_path.endswith(".pkl") else output_path + ".pkl"
-        print(f"Saving results to {_output_path}")
-        with open(_output_path, "wb") as f:
-            pickle.dump(results_dict, f)
-        print(f"Results have been saved to {_output_path}.\n")
+
+    _output_path = output_path
+    if not output_path.endswith(".h5"):
+        _output_path = output_path.replace(".pkl", ".h5") if output_path.endswith(".pkl") else output_path + ".h5"
+    print(f"\nSaving results to {_output_path}")
+    save_to_h5(results_dict, _output_path, mode="w", compression=True)
+    print(f"Results have been saved to {_output_path}.\n")
+'''
 
 
 class FeaturePerturbationStreamingDataset(StreamingDataset):

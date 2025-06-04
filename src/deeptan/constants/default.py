@@ -37,12 +37,14 @@ matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
 precision = "16-mixed"
+gradient_clip_val = 3.0
 
-n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.8)))
+n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.9)))
 
 time_format = "%Y%m%d%H%M%S"
 time_delay = 11.7
-ckpt_fname_format = "best-model-{epoch:04d}-{val_loss:.4f}"
+# ckpt_fname_format = "best-model-{epoch:04d}-{val/loss:.4f}"
+ckpt_fname_format = "best-model-{epoch:04d}"
 optuna_db = "sqlite:///optuna.db"
 n_jobs = 1
 n_trials = 30
@@ -50,6 +52,7 @@ n_workers = 1
 
 lit_chunk_bytes = "256MB"
 lit_compression = "zstd"
+lit_max_cache_size = "26GB"
 
 model_config = {
     "guide_gat": True,

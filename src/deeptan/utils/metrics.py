@@ -6,7 +6,9 @@ import h5py
 import igraph as ig
 import leidenalg
 import numpy as np
+import pacmap
 import polars as pl
+import scanpy as sc
 from scib_metrics import kbet, silhouette_label
 from scib_metrics.nearest_neighbors import jax_approx_min_k
 from scipy.sparse import csr_matrix
@@ -152,26 +154,58 @@ class MetricsDictMaker:
 
     def _get_dict_node_names(self, fname: str) -> Dict[str, int]:
         """Read dict_node_names from the h5 file."""
-        path = self.metrics_dict["prediction"][fname]["path"]
-        with h5py.File(path, "r") as f:
-            if "dict_node_names" not in f:
-                raise KeyError("dict_node_names not found in the h5 file.")
-            return {k: decode_item(v) for k, v in f["dict_node_names"].items()}
+        filepath = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(filepath, "r") as f:
+            if "dict_node_names" in f:
+                return {k: decode_item(v) for k, v in f["dict_node_names"].items()}
+            elif "metadata" in f and "dict_node_names" in f["metadata"]:
+                return {k: decode_item(v) for k, v in f["metadata"]["dict_node_names"].items()}
+            else:
+                raise KeyError("dict_node_names not found.")
 
     def _get_label_names(self, fname: str) -> list:
         """Read label_names from the h5 file."""
-        path = self.metrics_dict["prediction"][fname]["path"]
-        with h5py.File(path, "r") as f:
+        filepath = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(filepath, "r") as f:
             if "label_names" in f:
                 return [n.decode("utf-8") if isinstance(n, bytes) else n for n in f["label_names"][()]]
-        return []
+            elif "metadata" in f and "label_names" in f["metadata"]:
+                return [n.decode("utf-8") if isinstance(n, bytes) else n for n in f["metadata"]["label_names"][()]]
+            else:
+                raise KeyError("label_names not found.")
 
-    def _read_h5_dataset(self, fname: str, dataset_name: str) -> np.ndarray:
+    def _read_h5_dataset(self, fname: str, dataset_name: str, path_in_h5: Optional[str] = None) -> np.ndarray:
         """Lazily read a specific dataset from an h5 file."""
-        path = self.metrics_dict["prediction"][fname]["path"]
-        with h5py.File(path, "r") as f:
-            if dataset_name in f:
-                return f[dataset_name][()]
+        filepath = self.metrics_dict["prediction"][fname]["path"]
+
+        if path_in_h5 is None:
+            with h5py.File(filepath, "r") as f:
+                if dataset_name in f:
+                    return f[dataset_name][()]
+                else:
+                    raise KeyError(f"Dataset '{dataset_name}' not found in the h5 file.")
+        else:
+            with h5py.File(filepath, "r") as f:
+                current_group = f
+                folders = path_in_h5.split("/")
+
+                # Traverse through the group hierarchy
+                for folder in folders:
+                    if folder:  # skip empty strings from leading/trailing slashes
+                        if folder in current_group:
+                            current_group = current_group[folder]
+                        else:
+                            raise KeyError(f"Path component '{folder}' not found in h5 file")
+
+                # Check for dataset in the final group
+                if dataset_name in current_group.keys():
+                    return current_group[dataset_name][()]
+                else:
+                    raise KeyError(f"Dataset '{dataset_name}' not found in path '{path_in_h5}' of the h5 file")
+
+    def _read_batch_in_h5(self, fname: str, dataset_name: str):  # -> np.ndarray:
+        r"""Read predictions in batches from an h5 file."""
+        pass
 
     def make_metrics_summary(self):
         # For recon
@@ -653,3 +687,99 @@ class ClusteringMetricsCalculator:
         for name, func in self.metric_functions.items():
             metrics[name] = func()
         return metrics
+
+
+def pp_pacmap(adata: sc.AnnData, _pp: bool = True, basis="pacmap", key_leiden="Leiden", target_sum: float = 1e4, n_top_genes: int = 2000, max_value: float = 10, n_comps: int = 50, n_pcs: int = 50, resolution=0.8, n_neighbors: int = 10, MN_ratio=0.3, FP_ratio=3.0):
+    """
+    Args:
+        adata: AnnData object
+        _pp: Whether to preprocess the data. Default is ``True``.
+        basis: The basis to use for plotting. Default is ``"pacmap"``.
+    """
+    _adata = adata.copy()
+    if _pp:
+        sc.pp.normalize_total(_adata, target_sum=target_sum)
+        sc.pp.log1p(_adata)
+        sc.pp.highly_variable_genes(_adata, n_top_genes=n_top_genes)
+        _adata = _adata[:, _adata.var.highly_variable]
+        sc.pp.scale(_adata, max_value=max_value)
+
+    sc.tl.pca(_adata, n_comps=n_comps)
+    sc.pp.neighbors(_adata, n_neighbors=n_neighbors, n_pcs=n_pcs, metric="cosine")
+    sc.tl.leiden(_adata, resolution=resolution, key_added=key_leiden)
+
+    embedding = pacmap.PaCMAP(n_components=2, n_neighbors=n_neighbors, MN_ratio=MN_ratio, FP_ratio=FP_ratio)
+    X_transformed = embedding.fit_transform(_adata.X, init="random")
+    _adata.obsm[f"X_{basis}"] = X_transformed
+
+    return _adata
+
+
+def sc_plot(_adata: sc.AnnData, _basis: str = "pacmap", _color: Optional[List[str]] = None, _title: Optional[List[str]] = None):
+    """
+    Args:
+        _adata: AnnData object
+        _basis: Basis for plotting. Default is ``"pacmap"``.
+        _color: List of color names for plotting. Default is ``["CellType", "Predicted CellType", "Leiden"]``.
+        _title: List of titles for each plot. Default is ``["Annotated", "Predicted", "Leiden Clustering"]``.
+    Returns:
+        None
+    """
+    if _color is None:
+        _color = ["CellType", "Predicted CellType", "Leiden"]
+    if _title is None:
+        _title = ["Annotated", "Predicted", "Leiden Clustering"]
+    sc.pl.embedding(_adata, basis=_basis, color=_color, wspace=0.4, title=_title)
+
+
+def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: str, seed: int):
+    # Get cell embeddings for each task
+    g_embs = {}
+    _fnames = []
+    for _task in _tasks:
+        _fname = metrics_data.ident.filter((pl.col("task") == _task) & (pl.col("seed_num") == seed) & (pl.col("split") == split))["fname"].item()
+        _fnames.append(_fname)
+        g_embs[_task] = metrics_data._read_h5_dataset(_fname, "g_embedding")
+
+    # Get predicted cell labels for each task
+    celltypes_uniq = metrics_data._get_label_names(_fnames[0])[1:]
+    celltypes_uniq = [i.replace("ct_", "") for i in celltypes_uniq]
+    print("Unique cell types: ", celltypes_uniq)
+
+    ys_pred_numeric = {}
+    ys_pred_text = {}
+    for _fname in _fnames:
+        _task = metrics_data.ident.filter(pl.col("fname") == _fname)["task"].item()
+        ys_pred_numeric[_task] = metrics_data._read_h5_dataset(_fname, "labels").argmax(axis=1)
+        ys_pred_text[_task] = [celltypes_uniq[i] for i in ys_pred_numeric[_task]]
+
+    # Get true
+
+    true_features = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["X"]
+    # Reverse log1p
+    true_features = np.expm1(true_features)
+
+    y_true_text: List[str] = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["y_df_flatten"]["ct"].to_list()
+
+    return true_features, g_embs, y_true_text, ys_pred_text
+
+
+def pacmap_plot(
+    true_features: np.ndarray,
+    g_embs: Dict[str, np.ndarray],
+    y_true_text: List[str],
+    ys_pred_text: Dict[str, List[str]],
+):
+    adata_true = sc.AnnData(X=true_features, obs={"CellType": y_true_text})
+    adata_true = pp_pacmap(adata_true, _pp=True)
+
+    for _task in g_embs.keys():
+        print(f"\nTask: {_task}")
+
+        _adata_true = adata_true.copy()
+        _adata_true.obs["Predicted CellType"] = ys_pred_text[_task]
+        sc_plot(_adata_true)
+
+        adata_pred = sc.AnnData(X=g_embs[_task], obs={"CellType": ys_pred_text[_task]})
+        adata_pred = pp_pacmap(adata_pred, _pp=False)
+        sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])

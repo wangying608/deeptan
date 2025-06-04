@@ -106,7 +106,6 @@ class AMSGP(torch.nn.Module):
 
             # Skip empty graphs
             if node_indices.numel() == 0:
-                # print("Warning: Empty graph detected")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
@@ -138,31 +137,29 @@ class AMSGP(torch.nn.Module):
 
     def _calculate_dynamic_centrality(self, h, edge_index):
         chunk_size = self.adap_chunk_size_dyn_cent.calc(h.size(), 0)
-        with torch.no_grad():
-            row, col = edge_index
-            num_edges = edge_index.size(1)
-            sim_ = []
 
-            # Calculate similarity for each edge in batches to reduce peak memory usage.
-            for i in range(0, num_edges, chunk_size):
-                idx = slice(i, min(i + chunk_size, num_edges))
-                h_i = h[row[idx]]
-                h_j = h[col[idx]]
+        row, col = edge_index
+        num_edges = edge_index.size(1)
+        sim_ = []
 
-                sim_.append((h_i * h_j).sum(dim=1).abs())
+        # Calculate similarity for each edge in batches to reduce peak memory usage.
+        for i in range(0, num_edges, chunk_size):
+            idx = slice(i, min(i + chunk_size, num_edges))
+            h_i = h[row[idx]]
+            h_j = h[col[idx]]
 
-            sim_ = torch.cat(sim_, dim=0)
+            sim_.append((h_i * h_j).sum(dim=1).abs())
 
-            min_sim_ = sim_.min()
-            max_sim_ = sim_.max()
-            sim_ = (sim_ - min_sim_) / (max_sim_ - min_sim_) if max_sim_ - min_sim_ != 0 else sim_
-            # sim_ = sim_.clamp(0, 1)
+        sim_ = torch.cat(sim_, dim=0)
 
-            # Filter edges
-            mask = sim_ > self.thre_edge_exist
+        min_sim_ = sim_.min()
+        max_sim_ = sim_.max()
+        sim_ = (sim_ - min_sim_) / (max_sim_ - min_sim_) if max_sim_ - min_sim_ != 0 else sim_
+
+        # Filter edges
+        mask = sim_ > self.thre_edge_exist
 
         filtered_edge = edge_index[:, mask]
-        # filtered_weight = edge_weight[mask]
         filtered_weight = sim_[mask]
 
         # Compute node centrality
@@ -195,14 +192,17 @@ class AMSGP(torch.nn.Module):
         """
         device = h.device
         num_nodes = h.size(0)
+
+        # Step 1: Compute FD bins
         _, edges = self.hist_fd(centrality)
         num_bins = len(edges) - 1
         covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
 
-        # Use tensor-based storage for subgraphs
-        subgraph_masks = torch.zeros((0, num_nodes), dtype=torch.bool, device=device)
-        subgraph_centers = torch.zeros(0, dtype=torch.long, device=device)
+        # Step 2: Initialize subgraph pool
+        subgraph_masks = []
+        subgraph_centers = []
 
+        # Step 3: Process each bin in descending order of centrality
         for bin_idx in reversed(range(num_bins)):
             bin_mask = self._generate_bin_mask(centrality, edges, bin_idx)
             current_nodes = torch.where(bin_mask)[0]
@@ -211,66 +211,59 @@ class AMSGP(torch.nn.Module):
 
             chunk_size = self.adap_chunk_size_mul_subg.calc((current_nodes.shape[0], edge_index.shape[1], h.shape[1]), 0)
 
-            # Batch process nodes in chunks
-            for nodes in current_nodes.split(min(chunk_size, current_nodes.numel())):
-                subsets, subg_edge_indices = self._batch_k_hop_subgraph(nodes, self.n_hop, edge_index, num_nodes)
+            # Step 4: Batch process nodes
+            for chunk in current_nodes.split(min(chunk_size, current_nodes.numel())):
+                # Get k-hop subgraphs for this batch of nodes
+                subsets, subg_edge_indices = self._batch_k_hop_subgraph(chunk, self.n_hop, edge_index, num_nodes)
 
-                for subset, subg_edge_idx, center_node in zip(subsets, subg_edge_indices, nodes.tolist()):
-                    if subset.numel() < 2 or subg_edge_idx.shape[1] == 0:
+                for subset, center_node in zip(subsets, chunk.tolist()):
+                    if subset.numel() < 2:
                         continue
 
-                    # Create new subgraph mask
                     new_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
                     new_mask[subset] = True
 
-                    # Vectorized overlap check
-                    if subgraph_masks.shape[0] > 0:
-                        intersections = (subgraph_masks & new_mask).sum(dim=1)
-                        min_sizes = torch.minimum(subgraph_masks.sum(dim=1), new_mask.sum())
-                        overlaps = intersections / (min_sizes + 1e-8)
-                        overlapping_chunks = overlaps > self.thre_sg_overlap
+                    # Step 5: Vectorized overlap detection
+                    overlaps = [((existing_mask & new_mask).sum()) / (min(existing_mask.sum(), new_mask.sum()) + 1e-8) for existing_mask in subgraph_masks]
+                    overlapping_indices = [i for i, o in enumerate(overlaps) if o > self.thre_sg_overlap]
 
-                        del intersections, min_sizes, overlaps
+                    # Step 6: Merge or add
+                    if overlapping_indices:
+                        merged_mask = new_mask.clone()
+                        for idx in sorted(overlapping_indices, reverse=True):
+                            merged_mask |= subgraph_masks[idx]
+                            del subgraph_masks[idx], subgraph_centers[idx]
+                        subgraph_masks.append(merged_mask)
+                        subgraph_centers.append(center_node)
                     else:
-                        overlapping_chunks = torch.zeros(0, dtype=torch.bool, device=device)
+                        subgraph_masks.append(new_mask)
+                        subgraph_centers.append(center_node)
 
-                    # Merge overlapping subgraphs
-                    if overlapping_chunks.any():
-                        merged_mask = subgraph_masks[overlapping_chunks].any(dim=0) | new_mask
-                        subgraph_masks = torch.cat([subgraph_masks[~overlapping_chunks], merged_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers[~overlapping_chunks], torch.tensor([center_node], device=device)])
-                    else:
-                        # Add new subgraph
-                        subgraph_masks = torch.cat([subgraph_masks, new_mask.unsqueeze(0)], dim=0)
-                        subgraph_centers = torch.cat([subgraph_centers, torch.tensor([center_node], device=device)])
-
-                    # Update coverage tracking
+                    # Step 7: Update coverage
                     covered_nodes |= new_mask
-
-                    del new_mask
 
                     if covered_nodes.all():
                         break
+                if covered_nodes.all():
+                    break
+            if covered_nodes.all():
+                break
 
-        # print(f"Percent of nodes covered: {covered_nodes.float().mean():.2%} ({covered_nodes.sum()}/{num_nodes})")
-
-        # Convert tensor masks back to GData objects
-        subgraphs = []
-        for mask, center in zip(subgraph_masks, subgraph_centers):
-            node_idx = torch.where(mask)[0]
-
-            # Create subgraph data object
-            subgraphs.append(
-                GData(
-                    x=h[node_idx],
-                    edge_index=self._fast_edge_index(edge_index, mask),
-                    center_node=center,
-                    node_idx=node_idx,
-                    mask=mask,
-                )
+        # Step 8: Convert to GData objects
+        subgraphs = [
+            GData(
+                x=h[mask],
+                edge_index=self._fast_edge_index(edge_index, mask),
+                center_node=center,
+                node_idx=torch.where(mask)[0],
+                mask=mask,
             )
+            for mask, center in zip(subgraph_masks, subgraph_centers)
+        ]
 
-        subgraphs = sorted(subgraphs, key=lambda x: -x.num_nodes)
+        # Step 9: Sort by number of nodes
+        subgraphs.sort(key=lambda g: -g.num_nodes)
+
         return subgraphs
 
     @staticmethod
@@ -323,8 +316,8 @@ class AMSGP(torch.nn.Module):
         edges = edges_cpu.to(device=tensor.device)
 
         # Calculate histogram on GPU
-        hist = torch.histc(tensor, bins=num_bins, min=min_val, max=max_val)
-        return hist, edges
+        hist = torch.histc(tensor.cpu(), bins=num_bins, min=min_cpu, max=max_cpu)
+        return hist.to(tensor.device), edges
 
     def _create_graph_embeddings(self, subgraphs):
         num_subgraphs = len(subgraphs)
@@ -389,7 +382,7 @@ class NodeEmbedding(nn.Module):
             SelfAtt_(self.embedding_dim + self.x_increased_dim, dropout),
             nn.Linear(self.embedding_dim + self.x_increased_dim, embedding_dim),
             nn.LayerNorm(embedding_dim),
-            # nn.GELU(),
+            nn.SiLU(),
         )
 
         # WGAT layers with skip connections
@@ -492,8 +485,8 @@ class WGATLayer_chunked(MessagePassing):
         self.adap_chunk_size = GetAdaptiveChunkSize()
 
     def reset_parameters(self):
-        nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("relu"))
-        nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("relu"))
+        nn.init.xavier_uniform_(self.W_i.weight, gain=nn.init.calculate_gain("leaky_relu", 0.2))
+        nn.init.xavier_uniform_(self.W_j.weight, gain=nn.init.calculate_gain("leaky_relu", 0.2))
         nn.init.normal_(self.attn, mean=0, std=0.1)
 
     def forward(self, x, edge_index, edge_attr=None):
@@ -569,7 +562,7 @@ class GE_Decoder(nn.Module):
         # Feature fusion layer
         self.fusion = nn.Sequential(
             nn.Linear(z_dim + h_dim, h_dim),
-            nn.GELU(),
+            nn.SiLU(),
             nn.LayerNorm(h_dim),
             nn.Dropout(dropout),
         )
@@ -579,7 +572,7 @@ class GE_Decoder(nn.Module):
             [
                 nn.Sequential(
                     nn.Linear(h_dim, 2 * h_dim),
-                    nn.GELU(),
+                    nn.SiLU(),
                     nn.Linear(2 * h_dim, h_dim),
                     nn.LayerNorm(h_dim),
                     nn.Dropout(dropout),
@@ -591,7 +584,7 @@ class GE_Decoder(nn.Module):
         # Final projection
         self.ffn_q = nn.Sequential(
             nn.Linear(h_dim, hidden_dim),
-            nn.GELU(),
+            nn.SiLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, output_dim),
         )
@@ -647,6 +640,36 @@ class GE_Decoder(nn.Module):
         return attn_out, h_
 
 
+# class GLabelPredictor(nn.Module):
+#     r"""
+#     A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
+#     """
+
+#     def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float, n_heads: int):
+#         super().__init__()
+
+#         _in_dim = input_dim
+#         layers = []
+#         for _dim in hidden_dims:
+#             layers += [
+#                 nn.Linear(_in_dim, _dim),
+#                 nn.SiLU(),
+#                 nn.BatchNorm1d(_dim),
+#                 nn.Dropout(dropout),
+#             ]
+#             _in_dim = _dim
+#         layers.append(nn.LayerNorm(_in_dim))
+#         layers.append(nn.Linear(_in_dim, output_dim))
+#         self.net = nn.Sequential(*layers)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         if x.ndim == 1:
+#             x = x.unsqueeze(0)
+#         elif x.ndim == 3:
+#             x = x.squeeze(2)
+#         return self.net(x)
+
+
 class GLabelPredictor(nn.Module):
     r"""
     A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
@@ -655,28 +678,64 @@ class GLabelPredictor(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float, n_heads: int):
         super().__init__()
 
-        # layers = [
-        #     SelfAtt_(input_dim, dropout),
-        #     nn.LayerNorm(input_dim),
-        # ]
-        _in_dim = input_dim
-        layers = []
-        for _dim in hidden_dims:
-            layers += [
-                nn.Linear(_in_dim, _dim),
-                nn.GELU(),
-            ]
-            _in_dim = _dim
-        layers.append(nn.LayerNorm(_in_dim))
-        layers.append(nn.Linear(_in_dim, output_dim))
-        self.net = nn.Sequential(*layers)
+        self.blocks = nn.ModuleList()
+        in_dim = input_dim
+        residual_projs = []  # Store residual projections separately
+
+        for i, out_dim in enumerate(hidden_dims):
+            # Create linear layer for residual connection if dimensions don't match
+            proj = nn.Identity()
+            if in_dim != out_dim and i > 0:
+                proj = nn.Linear(in_dim, out_dim)
+            residual_projs.append(proj)
+
+            # Create main block components
+            attn_layer = MultiHeadSelfAttention(out_dim, n_heads)
+            layer = nn.Sequential(nn.Linear(in_dim, out_dim), nn.SiLU(), nn.BatchNorm1d(out_dim), nn.Dropout(dropout), attn_layer)
+            self.blocks.append(layer)
+            in_dim = out_dim
+
+        # Save residual projections as parameters
+        self.residual_projs = nn.ModuleList(residual_projs)
+        self.layer_norm = nn.LayerNorm(in_dim)
+        self.output_layer = nn.Linear(in_dim, output_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.ndim == 1:
             x = x.unsqueeze(0)
         elif x.ndim == 3:
             x = x.squeeze(2)
-        return self.net(x)
+
+        for i, layer in enumerate(self.blocks):
+            res = x
+            x = layer(x)
+            # Handle dimension mismatch through projection
+            if i > 0:
+                proj = self.residual_projs[i]
+                res = proj(res)  # Project residue if dimensions don't match
+                # Only add residual connection when projected shape matches
+                if res.shape == x.shape:
+                    x = x + res
+
+        x = self.layer_norm(x)
+        return self.output_layer(x)
+
+
+class MultiHeadSelfAttention(nn.Module):
+    def __init__(self, embed_dim: int, num_heads: int):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dim, num_heads)
+        self.norm = nn.LayerNorm(embed_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Handle 2D input by adding sequence dimension
+        if x.dim() == 2:
+            x_3d = x.unsqueeze(0)
+            attn_out, _ = self.attn(x_3d, x_3d, x_3d)
+            return self.norm(x + attn_out.squeeze(0))
+        else:
+            attn_out, _ = self.attn(x, x, x)
+            return self.norm(x + attn_out)
 
 
 class SelfAtt_(nn.Module):

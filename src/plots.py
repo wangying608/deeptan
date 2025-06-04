@@ -4,15 +4,11 @@ from typing import Dict, List, Optional
 import matplotlib.gridspec as gridspec
 import matplotlib.pyplot as plt
 import numpy as np
-import pacmap
 import polars as pl
-import scanpy as sc
 import seaborn as sns
-import umap
 from matplotlib import ticker
 
 import deeptan.constants as const
-from deeptan.utils.data import pp_pacmap, sc_plot
 from deeptan.utils.metrics import MetricsDictMaker, format_ticks
 
 
@@ -311,58 +307,3 @@ def metrics_plot(
         fig.savefig(os.path.join(dir4save, f"{fig_name}.pdf"), bbox_extra_artists=[_legend], bbox_inches="tight", pad_inches=0.1)
 
     return fig
-
-
-def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: str, seed: int):
-    # Get cell embeddings for each task
-    g_embs = {}
-    _fnames = []
-    for _task in _tasks:
-        _fname = metrics_data.ident.filter((pl.col("task") == _task) & (pl.col("seed_num") == seed) & (pl.col("split") == split))["fname"].item()
-        _fnames.append(_fname)
-        g_embs[_task] = metrics_data._read_h5_dataset(_fname, "g_embedding")
-
-    # Get predicted cell labels for each task
-    # 获取所有文件中唯一的细胞类型标签
-    celltypes_uniq = metrics_data._get_label_names(_fnames[0])[1:]
-    celltypes_uniq = [i.replace("ct_", "") for i in celltypes_uniq]
-    print("Unique cell types: ", celltypes_uniq)
-
-    ys_pred_numeric = {}
-    ys_pred_text = {}
-    for _fname in _fnames:
-        _task = metrics_data.ident.filter(pl.col("fname") == _fname)["task"].item()
-        ys_pred_numeric[_task] = metrics_data._read_h5_dataset(_fname, "labels").argmax(axis=1)
-        ys_pred_text[_task] = [celltypes_uniq[i] for i in ys_pred_numeric[_task]]
-
-    # Get true
-
-    true_features = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["X"]
-    # Reverse log1p
-    true_features = np.expm1(true_features)
-
-    y_true_text: List[str] = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["y_df_flatten"]["ct"].to_list()
-
-    return true_features, g_embs, y_true_text, ys_pred_text
-
-
-def pacmap_plot(
-    true_features: np.ndarray,
-    g_embs: Dict[str, np.ndarray],
-    y_true_text: List[str],
-    ys_pred_text: Dict[str, List[str]],
-):
-    adata_true = sc.AnnData(X=true_features, obs={"CellType": y_true_text})
-    adata_true = pp_pacmap(adata_true, _pp=True)
-    # sc_plot(adata_true, _color=["CellType", "Leiden"], _title=["Annotated", "Leiden Clustering"])
-
-    for _task in g_embs.keys():
-        print(f"\nTask: {_task}")
-
-        _adata_true = adata_true.copy()
-        _adata_true.obs["Predicted CellType"] = ys_pred_text[_task]
-        sc_plot(_adata_true)
-
-        adata_pred = sc.AnnData(X=g_embs[_task], obs={"CellType": ys_pred_text[_task]})
-        adata_pred = pp_pacmap(adata_pred, _pp=False)
-        sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])

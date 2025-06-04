@@ -3,6 +3,6 @@ DeepTAN: A novel graph-based multi-task framework designed to infer large-scale 
 """
 
 name = "deeptan"
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "Chenhua Wu"
 __credits__ = "Northwest A&F University"
