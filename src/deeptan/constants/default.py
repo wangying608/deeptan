@@ -10,7 +10,7 @@ from numpy import ceil
 bs = 16
 accumulate_grad_batches = 2
 lr = 0.0002
-es = 5
+es = 3
 min_epoch = 3
 max_epoch = 50
 dropout = 0.3

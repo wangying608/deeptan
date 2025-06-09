@@ -1,4 +1,5 @@
 import argparse
+import ast
 
 import deeptan.constants as const
 from deeptan.graph.model import DeepTANTune
@@ -31,6 +32,13 @@ def deeptan_fit_tune():
     else:
         guide_gat = True
 
+    _dev = args.devices
+    if args.devices.startswith("["):
+        if not args.devices.endswith("]"):
+            raise ValueError("Devices argument must be a valid list or a single device string.")
+        # Convert string representation of list to actual list
+        _dev = ast.literal_eval(args.devices)
+
     _config = const.default.model_config.copy()
     _config.update(
         {
@@ -44,7 +52,7 @@ def deeptan_fit_tune():
             "chunk_size": args.chunk_size,
             "is_regression": args.is_regression,
             "accelerator": args.accelerator,
-            "devices": args.devices,
+            "devices": _dev,
             "input_node_emb_dim": args.input_node_emb_dim,
             "acc_grad_batch": args.acc_grad_batch,
             "guide_gat": guide_gat,

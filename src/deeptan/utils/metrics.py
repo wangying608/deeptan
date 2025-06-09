@@ -137,7 +137,7 @@ class MetricsDictMaker:
                 feature_names_seed_xx = ["obs_names"] + list(self._get_dict_node_names(_fname).keys())
 
                 _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
-                self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx)
+                self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx).sort("obs_names")
                 xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)
 
@@ -145,11 +145,11 @@ class MetricsDictMaker:
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["feature_names"] = feature_names_seed_xx[1:]
 
                 # Load true labels
-                _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet")).rename({"bc": "obs_names"})
+                _labels_df = pl.read_parquet(os.path.join(self.true_data_dir, "celltypes_onehot.parquet")).rename({"bc": "obs_names"}).sort("obs_names")
                 _labels_all = transform_ct_df(_labels_df)
 
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"])
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df_flatten"] = _labels_all.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").select(["obs_names", "ct"]).sort("obs_names")
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"] = _labels_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").sort("obs_names")
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"] = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y_df"].drop("obs_names").to_numpy()
 
     def _get_dict_node_names(self, fname: str) -> Dict[str, int]:
@@ -205,7 +205,22 @@ class MetricsDictMaker:
 
     def _read_batch_in_h5(self, fname: str, dataset_name: str):  # -> np.ndarray:
         r"""Read predictions in batches from an h5 file."""
-        pass
+        filepath = self.metrics_dict["prediction"][fname]["path"]
+        with h5py.File(filepath, "r") as f:
+            # Check if "group      /batch_xxx" exists and how many batches there are
+            batch_groups = [k for k in f.keys() if k.startswith("batch_")]
+            if not batch_groups:
+                raise KeyError(f"No batch groups found in {filepath}")
+        # Convert batch names to integers and sort them
+        batch_groups = sorted(batch_groups, key=lambda x: int(x.split("_")[1]))
+        # Read all batches and concatenate them
+        results = []
+        for batch_name in sorted(batch_groups):
+            # Read by _read_h5_dataset
+            batch_data = self._read_h5_dataset(fname, dataset_name, f"/{batch_name}")
+            results.append(batch_data)
+
+        return np.concatenate(results, axis=0)
 
     def make_metrics_summary(self):
         # For recon
@@ -260,7 +275,9 @@ class MetricsDictMaker:
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
             X_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"]
-            X_pred = np.squeeze(self._read_h5_dataset(_fname, "node_recon_all"), axis=-1)
+            X_pred_unsorted = np.squeeze(self._read_batch_in_h5(_fname, "node_recon_all"), axis=-1)
+            sorted_indices = self._sort_ind_pred_obs_name(_fname)
+            X_pred = X_pred_unsorted[sorted_indices]
 
             _calculator = RegressionMetricsCalculator(X_true, X_pred)
             self.metrics_dict["metrics"]["recon"][_fname] = _calculator.calculate_all_metrics()
@@ -272,7 +289,10 @@ class MetricsDictMaker:
             _split = self.ident.filter(pl.col("fname") == _fname)["split"].item()
 
             y_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"]
-            y_pred = self._read_h5_dataset(_fname, "labels")
+            y_pred_unsorted = self._read_batch_in_h5(_fname, "labels")
+            sorted_indices = self._sort_ind_pred_obs_name(_fname)
+            y_pred = y_pred_unsorted[sorted_indices]
+
             label_names = self._get_label_names(_fname)
 
             if len(y_pred) == 0:
@@ -302,7 +322,9 @@ class MetricsDictMaker:
 
             y_true = self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["y"]
 
-            g_embedding = self._read_h5_dataset(_fname, "g_embedding")
+            g_embedding = self._read_batch_in_h5(_fname, "g_embedding")
+            sorted_indices = self._sort_ind_pred_obs_name(_fname)
+            g_embedding = g_embedding[sorted_indices]
 
             _calculator = ClusteringMetricsCalculator(
                 true_labels=y_true,
@@ -322,6 +344,8 @@ class MetricsDictMaker:
         _paths = []
         for _file in os.listdir(self.predictions_dir):
             if not _file.endswith(".h5"):
+                continue
+            if _file.startswith("."):
                 continue
             _path = os.path.join(self.predictions_dir, _file)
             _prop = _file.removesuffix(".h5").split("+")
@@ -358,11 +382,17 @@ class MetricsDictMaker:
         Read batch info from an h5ad file.
         """
         result_df = read_batch_from_h5ad(h5ad_path)
-        return result_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right")
+        return result_df.join(self.xxx_data_df[f"seed_{_seed}_{_split}"].select(["obs_names"]), on="obs_names", how="right").sort("obs_names")
 
     def softmax(self, x, axis=-1):
         e_x = np.exp(x - np.max(a=x, axis=axis, keepdims=True))
         return e_x / e_x.sum(axis=axis, keepdims=True)
+
+    def _sort_ind_pred_obs_name(self, fname: str):
+        obs_names_pred = self._read_batch_in_h5(fname, "obs_name")
+        obs_names_pred_str = [i.decode("utf-8") for i in obs_names_pred]
+        sorted_indices = [idx for idx, name in sorted(enumerate(obs_names_pred_str), key=lambda x: x[1])]
+        return sorted_indices
 
 
 class RegressionMetricsCalculator:
@@ -579,7 +609,6 @@ class MulticlassMetricsCalculator:
         for name, func in self.metric_functions.items():
             metrics[name] = func()
         return metrics, self._confusion_matrix()
-        # return metrics
 
 
 class ClusteringMetricsCalculator:
@@ -689,19 +718,35 @@ class ClusteringMetricsCalculator:
         return metrics
 
 
-def pp_pacmap(adata: sc.AnnData, _pp: bool = True, basis="pacmap", key_leiden="Leiden", target_sum: float = 1e4, n_top_genes: int = 2000, max_value: float = 10, n_comps: int = 50, n_pcs: int = 50, resolution=0.8, n_neighbors: int = 10, MN_ratio=0.3, FP_ratio=3.0):
+def pp_pacmap(
+    adata: sc.AnnData,
+    _pp: bool = True,
+    basis="pacmap",
+    key_leiden="Leiden",
+    target_sum: float = 1e4,
+    n_top_genes: int = 2000,
+    max_value: float = 10,
+    n_comps: int = 50,
+    n_pcs: int = 50,
+    resolution=0.8,
+    n_neighbors: int = 10,
+    MN_ratio=0.3,
+    FP_ratio=3.0,
+):
     """
     Args:
         adata: AnnData object
         _pp: Whether to preprocess the data. Default is ``True``.
         basis: The basis to use for plotting. Default is ``"pacmap"``.
+
     """
     _adata = adata.copy()
     if _pp:
+        sc.pp.filter_genes(adata, min_counts=1)
+        sc.pp.filter_genes(adata, min_cells=5)
+        sc.pp.highly_variable_genes(_adata, n_top_genes=n_top_genes, flavor="seurat_v3", span=0.3)
         sc.pp.normalize_total(_adata, target_sum=target_sum)
         sc.pp.log1p(_adata)
-        sc.pp.highly_variable_genes(_adata, n_top_genes=n_top_genes)
-        _adata = _adata[:, _adata.var.highly_variable]
         sc.pp.scale(_adata, max_value=max_value)
 
     sc.tl.pca(_adata, n_comps=n_comps)
@@ -739,7 +784,11 @@ def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: s
     for _task in _tasks:
         _fname = metrics_data.ident.filter((pl.col("task") == _task) & (pl.col("seed_num") == seed) & (pl.col("split") == split))["fname"].item()
         _fnames.append(_fname)
-        g_embs[_task] = metrics_data._read_h5_dataset(_fname, "g_embedding")
+        g_embs[_task] = metrics_data._read_batch_in_h5(_fname, "g_embedding")
+        # Sort the embeddings based on the obs_name
+        sorted_indices = metrics_data._sort_ind_pred_obs_name(_fname)
+        #
+        g_embs[_task] = g_embs[_task][sorted_indices]
 
     # Get predicted cell labels for each task
     celltypes_uniq = metrics_data._get_label_names(_fnames[0])[1:]
@@ -748,10 +797,21 @@ def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: s
 
     ys_pred_numeric = {}
     ys_pred_text = {}
+    pred_features = {}
     for _fname in _fnames:
         _task = metrics_data.ident.filter(pl.col("fname") == _fname)["task"].item()
-        ys_pred_numeric[_task] = metrics_data._read_h5_dataset(_fname, "labels").argmax(axis=1)
+
+        # Get predicted labels and sort them
+        ys_pred_numeric[_task] = metrics_data._read_batch_in_h5(_fname, "labels").argmax(axis=1)
+        # Sort the predictions based on the obs_name
+        sorted_indices = metrics_data._sort_ind_pred_obs_name(_fname)
+        #
+        ys_pred_numeric[_task] = ys_pred_numeric[_task][sorted_indices]
         ys_pred_text[_task] = [celltypes_uniq[i] for i in ys_pred_numeric[_task]]
+
+        # Get predicted feature values
+        X_pred_unsorted = np.squeeze(metrics_data._read_batch_in_h5(_fname, "node_recon_all"), axis=-1)
+        pred_features[_task] = np.expm1(X_pred_unsorted[sorted_indices])
 
     # Get true
 
@@ -761,11 +821,12 @@ def pacmap_plot_data(metrics_data: MetricsDictMaker, _tasks: List[str], split: s
 
     y_true_text: List[str] = metrics_data.metrics_dict["true"][f"seed_{seed}_{split}"]["y_df_flatten"]["ct"].to_list()
 
-    return true_features, g_embs, y_true_text, ys_pred_text
+    return true_features, pred_features, g_embs, y_true_text, ys_pred_text
 
 
 def pacmap_plot(
     true_features: np.ndarray,
+    pred_features: Dict[str, np.ndarray],
     g_embs: Dict[str, np.ndarray],
     y_true_text: List[str],
     ys_pred_text: Dict[str, List[str]],
@@ -779,6 +840,10 @@ def pacmap_plot(
         _adata_true = adata_true.copy()
         _adata_true.obs["Predicted CellType"] = ys_pred_text[_task]
         sc_plot(_adata_true)
+
+        # adata_pred = sc.AnnData(X=pred_features[_task], obs={"CellType": ys_pred_text[_task]})
+        # adata_pred = pp_pacmap(adata_pred, _pp=True)
+        # sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])
 
         adata_pred = sc.AnnData(X=g_embs[_task], obs={"CellType": ys_pred_text[_task]})
         adata_pred = pp_pacmap(adata_pred, _pp=False)

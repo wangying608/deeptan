@@ -206,13 +206,14 @@ class AMSGP(torch.nn.Module):
         for bin_idx in reversed(range(num_bins)):
             bin_mask = self._generate_bin_mask(centrality, edges, bin_idx)
             current_nodes = torch.where(bin_mask)[0]
-            if current_nodes.numel() == 0:
+            n_current = current_nodes.numel()
+            if n_current == 0:
                 continue
 
-            chunk_size = self.adap_chunk_size_mul_subg.calc((current_nodes.shape[0], edge_index.shape[1], h.shape[1]), 0)
+            chunk_size = self.adap_chunk_size_mul_subg.calc((n_current, edge_index.shape[1], h.shape[1]), 0)
 
             # Step 4: Batch process nodes
-            for chunk in current_nodes.split(min(chunk_size, current_nodes.numel())):
+            for chunk in current_nodes.split(chunk_size):
                 # Get k-hop subgraphs for this batch of nodes
                 subsets, subg_edge_indices = self._batch_k_hop_subgraph(chunk, self.n_hop, edge_index, num_nodes)
 
@@ -224,11 +225,16 @@ class AMSGP(torch.nn.Module):
                     new_mask[subset] = True
 
                     # Step 5: Vectorized overlap detection
-                    overlaps = [((existing_mask & new_mask).sum()) / (min(existing_mask.sum(), new_mask.sum()) + 1e-8) for existing_mask in subgraph_masks]
-                    overlapping_indices = [i for i, o in enumerate(overlaps) if o > self.thre_sg_overlap]
+                    overlapping_indices = []
+                    if subgraph_masks:
+                        existing_masks = torch.stack(subgraph_masks)
+                        intersections = (existing_masks & new_mask).sum(dim=1)
+                        min_sizes = torch.min(existing_masks.sum(dim=1), torch.full_like(intersections, new_mask.sum()))
+                        overlaps = intersections / (min_sizes + 1e-8)
+                        overlapping_indices = (overlaps > self.thre_sg_overlap).nonzero().squeeze(1).tolist()
 
                     # Step 6: Merge or add
-                    if overlapping_indices:
+                    if overlapping_indices.__len__() > 0:
                         merged_mask = new_mask.clone()
                         for idx in sorted(overlapping_indices, reverse=True):
                             merged_mask |= subgraph_masks[idx]
@@ -250,6 +256,15 @@ class AMSGP(torch.nn.Module):
                 break
 
         # Step 8: Convert to GData objects
+        subgraph_data = []
+        for mask, center in zip(subgraph_masks, subgraph_centers):
+            node_count = mask.sum().item()
+            subgraph_data.append((node_count, mask, center))
+
+        # Sort by node count descending
+        subgraph_data.sort(key=lambda x: x[0], reverse=True)
+
+        # Step 9: Create GData objects in sorted order
         subgraphs = [
             GData(
                 x=h[mask],
@@ -258,11 +273,8 @@ class AMSGP(torch.nn.Module):
                 node_idx=torch.where(mask)[0],
                 mask=mask,
             )
-            for mask, center in zip(subgraph_masks, subgraph_centers)
+            for _, mask, center in subgraph_data
         ]
-
-        # Step 9: Sort by number of nodes
-        subgraphs.sort(key=lambda g: -g.num_nodes)
 
         return subgraphs
 

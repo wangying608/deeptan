@@ -53,7 +53,7 @@ def read_h5ad_celltypes2onehot(h5ad_path, celltype_key="Celltype"):
     celltypes_onehot = celltypes_onehot.sort("bc")
 
     # Save the one-hot encoded DataFrame
-    celltypes_onehot.write_parquet(h5ad_path.replace(".h5ad", "_celltypes_onehot.parquet"))
+    celltypes_onehot.write_parquet(h5ad_path.replace(".h5ad", ".celltypes_onehot.parquet"))
 
 
 def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:

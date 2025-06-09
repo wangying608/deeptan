@@ -9,21 +9,22 @@ description = "DeepTAN: A multi-task framework designed to infer multi-omics tra
 authors = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 maintainers = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 readme = "README.md"
-requires-python = ">=3.10, <3.11"
+requires-python = ">=3.10, <3.13"
 dependencies = [
     "leidenalg>=0.10.2",
     "lightning>=2.5.1.post0",
-    "litdata>=0.2.48",
-    "mosaicml-streaming>=0.11.0",
+    "litdata>=0.2.49",
+    "mosaicml-streaming>=0.12.0",
     "numpy>=2.1.2",
-    "optuna>=4.2.0",
-    "optuna-dashboard>=0.17.0",
+    "optuna>=4.3.0",
+    "optuna-dashboard>=0.18.0",
     "pacmap>=0.8.0",
-    "polars>=1.26.0",
+    "polars>=1.30.0",
     "pyarrow>=19.0.0",
-    "scanpy>=1.10.4",
-    "scib-metrics>=0.5.3",
+    "scanpy>=1.11.2",
+    "scib-metrics>=0.5.4",
     "scikit-learn>=1.6.1",
+    "scikit-misc>=0.5.1",
     "scipy>=1.15.1",
     "tensorboard>=2.18.0",
     "torch==2.7.0",
@@ -36,11 +37,11 @@ dependencies = [
     "torch_cluster",
     "torch_spline_conv",
     "torchmetrics>=1.7.1",
-    "zstd>=1.5.6.2",
-    "setuptools",
-    "jupyterlab",
-    "jupyterlab-lsp",
-    "tqdm",
+    "zstd>=1.5.7.0",
+    "setuptools>=78.1.1",
+    "jupyterlab>=4.4.3",
+    "jupyterlab-lsp>=5.1.1",
+    "tqdm>=4.67.1",
 ]
 license = { file = "LICENSE" }
 keywords = ["bioinformatics", "deep learning", "pytorch"]
@@ -53,6 +54,8 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.10",
     "Operating System :: POSIX :: Linux",
 ]
