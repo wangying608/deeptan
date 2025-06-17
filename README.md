@@ -13,7 +13,7 @@ A novel graph-based multi-task framework designed to infer large-scale multi-omi
 ## Quick start
 
 ```bash
-conda create -n deeptan python=3.12 -y
+conda create -n deeptan python=3.13 -y
 conda activate deeptan
 
 pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 --index-url https://download.pytorch.org/whl/cu128

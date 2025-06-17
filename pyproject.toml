@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "deeptan"
-version = "0.1.5"
+version = "0.1.6"
 description = "DeepTAN: A multi-task framework designed to infer multi-omics trait-associated networks and reconstruct phenotype-specific omics states from mosaic data input."
 authors = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 maintainers = [{ name = "Chenhua Wu", email = "chanhuawu@outlook.com" }]
 readme = "README.md"
-requires-python = ">=3.10, <3.13"
+requires-python = ">=3.10, <3.14"
 dependencies = [
     "leidenalg>=0.10.2",
     "lightning>=2.5.1.post0",
@@ -42,6 +42,7 @@ dependencies = [
     "jupyterlab>=4.4.3",
     "jupyterlab-lsp>=5.1.1",
     "tqdm>=4.67.1",
+    "standard-imghdr",
 ]
 license = { file = "LICENSE" }
 keywords = ["bioinformatics", "deep learning", "pytorch"]
@@ -54,6 +55,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Bio-Informatics",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.10",

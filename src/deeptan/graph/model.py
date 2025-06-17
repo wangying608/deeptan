@@ -81,7 +81,7 @@ class FocalLoss(torch.nn.Module):
             weight=None,
             reduction="none",
         )
-        pt = torch.exp(-ce_loss)  # p = exp(-CE)
+        pt = torch.exp(-ce_loss)
         loss = (1 - pt) ** self.gamma * ce_loss
 
         if self.alpha is not None:
@@ -170,6 +170,8 @@ class DeepTAN(ltn.LightningModule):
         if focal_alpha is None:
             if class_weights is not None:
                 self.focal_alpha = torch.tensor(class_weights)
+                # Smooth the class weights by adding average class weights and dividing by 2
+                self.focal_alpha = (self.focal_alpha + self.focal_alpha.mean()) / 2.0
             else:
                 self.focal_alpha = torch.tensor([1.0] * self.output_dim)
         else:
@@ -674,10 +676,10 @@ class DeepTANTune:
         self._init_data_module()
 
         # Initialize class weights
-        if not self.is_regression:
-            self.class_weight = self._init_class_weights()
-        else:
+        if self.is_regression:
             self.class_weight = None
+        else:
+            self.class_weight = self._init_class_weights()
 
     def _init_data_module(self):
         """Initialize data module based on input parameters."""

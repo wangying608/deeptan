@@ -9,6 +9,7 @@ import numpy as np
 import pacmap
 import polars as pl
 import scanpy as sc
+import scipy
 from scib_metrics import kbet, silhouette_label
 from scib_metrics.nearest_neighbors import jax_approx_min_k
 from scipy.sparse import csr_matrix
@@ -728,10 +729,10 @@ def pp_pacmap(
     max_value: float = 10,
     n_comps: int = 50,
     n_pcs: int = 50,
-    resolution=0.8,
+    resolution: float = 0.8,
     n_neighbors: int = 10,
-    MN_ratio=0.3,
-    FP_ratio=3.0,
+    MN_ratio: float = 0.3,
+    FP_ratio: float = 2.0,
 ):
     """
     Args:
@@ -765,15 +766,17 @@ def sc_plot(_adata: sc.AnnData, _basis: str = "pacmap", _color: Optional[List[st
     Args:
         _adata: AnnData object
         _basis: Basis for plotting. Default is ``"pacmap"``.
-        _color: List of color names for plotting. Default is ``["CellType", "Predicted CellType", "Leiden"]``.
-        _title: List of titles for each plot. Default is ``["Annotated", "Predicted", "Leiden Clustering"]``.
+        _color: List of color names for plotting. Default is ``["CellType", "Predicted CellType"]``.
+        _title: List of titles for each plot. Default is ``["Annotated", "Predicted"]``.
     Returns:
         None
     """
     if _color is None:
-        _color = ["CellType", "Predicted CellType", "Leiden"]
+        # _color = ["CellType", "Predicted CellType", "Leiden"]
+        _color = ["CellType", "Predicted CellType"]
     if _title is None:
-        _title = ["Annotated", "Predicted", "Leiden Clustering"]
+        # _title = ["Annotated", "Predicted", "Leiden Clustering"]
+        _title = ["Annotated", "Predicted"]
     sc.pl.embedding(_adata, basis=_basis, color=_color, wspace=0.4, title=_title)
 
 
@@ -841,10 +844,24 @@ def pacmap_plot(
         _adata_true.obs["Predicted CellType"] = ys_pred_text[_task]
         sc_plot(_adata_true)
 
-        # adata_pred = sc.AnnData(X=pred_features[_task], obs={"CellType": ys_pred_text[_task]})
-        # adata_pred = pp_pacmap(adata_pred, _pp=True)
-        # sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])
+        try:
+            pred_data = pred_features[_task]
+            if np.any(pred_data <= 0) or np.any(np.isnan(pred_data)):
+                # raise Warning("Input data contains invalid values (<= 0 or NaN).")
+                print("Input data contains invalid values (<= 0 or NaN).")
+                # Fill invalid values with a small positive number
+                pred_data = np.nan_to_num(pred_data, nan=1e-10)
+                pred_data[pred_data <= 0] = 1e-10
+            adata_pred = sc.AnnData(X=pred_data, obs={"Predicted CellType": ys_pred_text[_task], "CellType": y_true_text})
+            if scipy.sparse.issparse(adata_pred.X):
+                adata_pred.X = adata_pred.X.tolil()
+            adata_pred = pp_pacmap(adata_pred.copy(), _pp=True)
+            sc_plot(adata_pred)
+        except ValueError as ve:
+            print(f"ValueError: {ve}")
+        except Exception as e:
+            print(f"Unexpected Error: {e}")
 
-        adata_pred = sc.AnnData(X=g_embs[_task], obs={"CellType": ys_pred_text[_task]})
+        adata_pred = sc.AnnData(X=g_embs[_task], obs={"Predicted CellType": ys_pred_text[_task], "CellType": y_true_text})
         adata_pred = pp_pacmap(adata_pred, _pp=False)
-        sc_plot(adata_pred, _color=["CellType", "Leiden"], _title=["Predicted", "Leiden Clustering"])
+        sc_plot(adata_pred)
