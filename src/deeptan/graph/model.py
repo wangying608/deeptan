@@ -118,7 +118,7 @@ class DeepTAN(ltn.LightningModule):
         lr: float,
         chunk_size: int,
         focus_task: Optional[str] = None,
-        guide_gat: bool = True,
+        guide_gat: bool = False,
     ):
         r"""
         Initialize the DeepTAN model.
@@ -129,7 +129,6 @@ class DeepTAN(ltn.LightningModule):
             output_g_label_dim (Optional[int]): The dimension of the output graph label. If None, it defaults to 2.
             is_regression (bool): Whether the task is a regression task.
             class_weights (Optional[List[float]]): A list of label class weights for the loss function.
-            focal_alpha (Optional[List[float]]): A list of alpha values for the focal loss.
             node_emb_dim (int): The dimension of the node embeddings.
             fusion_dims_node_emb (List[int]): A list of dimensions for the fusion layers of node embeddings.
             output_dim_g_emb (int): The dimension of the output graph embeddings.
@@ -144,7 +143,7 @@ class DeepTAN(ltn.LightningModule):
             lr (float): The learning rate.
             chunk_size (int): The chunk size for processing large matrices.
             focus_task (Optional[str]): Focus of the task (choose from `None`, `'recon'`, `'label'`).
-            guide_gat: (Optional[bool]): Whether to apply edge weights of guidance graphs to graph attentions.
+            guide_gat: (bool): Whether to apply edge weights of guidance graphs to graph attentions.
         """
         super().__init__()
         self.save_hyperparameters()
@@ -206,7 +205,7 @@ class DeepTAN(ltn.LightningModule):
             dropout=dropout,
             chunk_size=self.chunk_size,
             n_heads=n_heads_ge_decoder,
-            n_res_blocks=3,
+            n_res_blocks=8,
         )
 
         # Graph-level label predictor

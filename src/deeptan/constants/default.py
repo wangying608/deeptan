@@ -10,18 +10,18 @@ from numpy import ceil
 bs = 16
 accumulate_grad_batches = 2
 lr = 0.0002
-es = 3
+es = 5
 min_epoch = 3
 max_epoch = 50
-dropout = 0.3
+dropout = 0.2
 negative_slope = 0.2
-node_emb_dim = 128
+node_emb_dim = 256
 g_emb_dim = 512
-label_pred_hidden_dims = [512, 256, 256]
-fusion_dims_node_emb = [128, 64]
+label_pred_hidden_dims = [1024, 512, 256]
+fusion_dims_node_emb = [256, 128]
 n_heads_pooling = 8
 n_heads_node_emb = 8
-n_heads_ge_decoder = 8
+n_heads_ge_decoder = 16
 n_heads_label_pred = 8
 n_hop = 1
 
@@ -29,9 +29,9 @@ chunk_size = 2048
 mem_safety_factor = 0.85
 operation_overhead = 3.3
 
-threshold_nmic = 0.3
+threshold_nmic = 0.1
 threshold_subg_overlap = 0.95
-threshold_edge_exist = 0.2
+threshold_edge_exist = 0.05
 
 matmul_precision = "high"
 accelerator = "auto"

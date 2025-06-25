@@ -84,27 +84,32 @@ class AMSGP(torch.nn.Module):
     def _init_pooling_layers(self, input_dim, output_dim, heads):
         # Local subgraph pooling
         self.xgat_pool = WGATLayer_chunked(input_dim, output_dim, heads, self.dropout, self.chunk_size)
+        self.xgat_pool2 = WGATLayer_chunked(input_dim, output_dim, heads * 4, self.dropout * 0.5, self.chunk_size)
+        self.xgat_pool3 = WGATLayer_chunked(input_dim, output_dim, heads * 8, self.dropout * 0.5, self.chunk_size)
         self.att_pool = SelfAtt_(output_dim, self.dropout, True)
+        self.att_pool2 = SelfAtt_(output_dim, self.dropout, True)
+        self.att_pool3 = SelfAtt_(output_dim, self.dropout, True)
 
         # Global graph pooling
         self.global_xgat_pool = WGATLayer_chunked(output_dim, output_dim, heads, self.dropout, self.chunk_size)
+        self.global_xgat_pool2 = WGATLayer_chunked(output_dim, output_dim, heads * 4, self.dropout * 0.5, self.chunk_size)
+        self.global_xgat_pool3 = WGATLayer_chunked(output_dim, output_dim, heads * 8, self.dropout * 0.5, self.chunk_size)
         self.global_att_pool = SelfAtt_(output_dim, self.dropout, True)
+        self.global_att_pool2 = SelfAtt_(output_dim, self.dropout, True)
+        self.global_att_pool3 = SelfAtt_(output_dim, self.dropout, True)
 
     def forward(self, node_names, x, edge_attr, edge_index, batch):
         # Node embedding with layer norm
         h, E_all, ids = self.node_embedding_layers(node_names, x, edge_attr, edge_index)
 
         # Graph embedding
-        unique_batches = torch.unique(batch)
+        unique_batches, inverse, counts = torch.unique(batch, return_inverse=True, return_counts=True)
+        # Split nodes into subgraphs based on batch indices
+        node_indices_list = torch.split(torch.arange(batch.size(0), device=batch.device), counts.tolist())
         graph_embs = []
         self._device = x.device
 
-        for graph_id in unique_batches:
-            # Extract node mask for the current graph
-            mask = batch == graph_id
-            node_indices = torch.where(mask)[0]
-
-            # Skip empty graphs
+        for node_indices in node_indices_list:
             if node_indices.numel() == 0:
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
@@ -113,12 +118,12 @@ class AMSGP(torch.nn.Module):
 
             # Validate subgraph edge indices
             if sub_edge_index.numel() == 0:
-                print("Warning: Empty subgraph detected")
+                # print("Warning: Empty subgraph detected")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
             # Compute dynamic centrality
-            h_masked = h[mask]
+            h_masked = h[node_indices]
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(h_masked, sub_edge_index)
 
             # Generate multiscale subgraphs
@@ -136,37 +141,24 @@ class AMSGP(torch.nn.Module):
         return torch.stack(graph_embs), E_all, ids
 
     def _calculate_dynamic_centrality(self, h, edge_index):
-        chunk_size = self.adap_chunk_size_dyn_cent.calc(h.size(), 0)
-
         row, col = edge_index
-        num_edges = edge_index.size(1)
-        sim_ = []
-
-        # Calculate similarity for each edge in batches to reduce peak memory usage.
-        for i in range(0, num_edges, chunk_size):
-            idx = slice(i, min(i + chunk_size, num_edges))
-            h_i = h[row[idx]]
-            h_j = h[col[idx]]
-
-            sim_.append((h_i * h_j).sum(dim=1).abs())
-
-        sim_ = torch.cat(sim_, dim=0)
+        h_row = h[row]
+        h_col = h[col]
+        sim_ = (h_row * h_col).sum(dim=1).abs()
 
         min_sim_ = sim_.min()
         max_sim_ = sim_.max()
-        sim_ = (sim_ - min_sim_) / (max_sim_ - min_sim_) if max_sim_ - min_sim_ != 0 else sim_
-
-        # Filter edges
+        if max_sim_ - min_sim_ > 1e-6:
+            sim_.sub_(min_sim_).div_(max_sim_ - min_sim_)
+        else:
+            sim_.clamp_(min=0, max=1)
         mask = sim_ > self.thre_edge_exist
-
         filtered_edge = edge_index[:, mask]
         filtered_weight = sim_[mask]
 
-        # Compute node centrality
         centrality = torch.zeros(h.size(0), device=h.device)
         centrality.scatter_add_(0, filtered_edge[0], filtered_weight)
         centrality.scatter_add_(0, filtered_edge[1], filtered_weight)
-
         return filtered_edge, centrality
 
     def _generate_multiscale_subgraphs(self, edge_index, centrality, h) -> List[GData]:
@@ -230,7 +222,7 @@ class AMSGP(torch.nn.Module):
                         existing_masks = torch.stack(subgraph_masks)
                         intersections = (existing_masks & new_mask).sum(dim=1)
                         min_sizes = torch.min(existing_masks.sum(dim=1), torch.full_like(intersections, new_mask.sum()))
-                        overlaps = intersections / (min_sizes + 1e-8)
+                        overlaps = intersections / (min_sizes + 1e-6)
                         overlapping_indices = (overlaps > self.thre_sg_overlap).nonzero().squeeze(1).tolist()
 
                     # Step 6: Merge or add
@@ -345,11 +337,22 @@ class AMSGP(torch.nn.Module):
 
         # Global pooling with chunked edge processing
         global_emb = self.global_xgat_pool(super_nodes.x, super_nodes.edge_index)
-        return self.global_att_pool(global_emb)
+        global_emb = global_emb + self.global_xgat_pool2(super_nodes.x, super_nodes.edge_index)
+        global_emb = global_emb + self.global_xgat_pool3(super_nodes.x, super_nodes.edge_index)
+        global_emb_ = self.global_att_pool(global_emb)
+        global_emb_ = global_emb_ + self.global_att_pool2(global_emb)
+        global_emb_ = global_emb_ + self.global_att_pool3(global_emb)
+        return global_emb_
 
     def _process_subgraph(self, subgraph):
         h = self.xgat_pool(subgraph.x, subgraph.edge_index)
-        return self.att_pool(h.unsqueeze(0))
+        h = h + self.xgat_pool2(subgraph.x, subgraph.edge_index)
+        h = h + self.xgat_pool3(subgraph.x, subgraph.edge_index)
+        h = h.unsqueeze(0)
+        h_ = self.att_pool(h)
+        h_ = h_ + self.att_pool2(h)
+        h_ = h_ + self.att_pool3(h)
+        return h_
 
 
 class NodeEmbedding(nn.Module):
@@ -441,16 +444,15 @@ class NodeEmbedding(nn.Module):
         emb = emb + E_i
 
         # Multi-scale processing
-        skips = []
         if self.skips:
+            skip_sum = torch.zeros_like(emb)
+
             for i, layer in enumerate(self.layers):
                 emb = layer(emb, edge_index, edge_attr)
                 if i < len(self.skips):
-                    skips.append(self.skips[i](emb))
+                    skip_sum += self.skips[i](emb)
 
-            # Skip fusion
-            emb = emb + torch.stack(skips).mean(dim=0)
-
+            emb = emb + skip_sum / len(self.skips)
             emb = self.norm(emb)
 
         return emb, E_all, ids
@@ -507,7 +509,7 @@ class WGATLayer_chunked(MessagePassing):
     def message(self, x_i, x_j, edge_attr):
         num_edges = x_i.size(0)
         if num_edges == 0:
-            print("Empty edge index, returning zeros.")
+            # print("Empty edge index, returning zeros.")
             return torch.zeros_like(x_i)
 
         chunk_size = min(
@@ -558,7 +560,7 @@ class GE_Decoder(nn.Module):
         dropout: float = const.default.dropout,
         chunk_size: int = const.default.chunk_size,
         n_heads: int = const.default.n_heads_ge_decoder,
-        n_res_blocks: int = 3,
+        n_res_blocks: int = 16,
     ):
         super().__init__()
         self.z_dim = z_dim
@@ -583,9 +585,9 @@ class GE_Decoder(nn.Module):
         self.res_blocks = nn.ModuleList(
             [
                 nn.Sequential(
-                    nn.Linear(h_dim, 2 * h_dim),
+                    nn.Linear(h_dim, 8 * h_dim),
                     nn.SiLU(),
-                    nn.Linear(2 * h_dim, h_dim),
+                    nn.Linear(8 * h_dim, h_dim),
                     nn.LayerNorm(h_dim),
                     nn.Dropout(dropout),
                 )
@@ -596,6 +598,9 @@ class GE_Decoder(nn.Module):
         # Final projection
         self.ffn_q = nn.Sequential(
             nn.Linear(h_dim, hidden_dim),
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Dropout(p=dropout),
             nn.Linear(hidden_dim, output_dim),
@@ -650,36 +655,6 @@ class GE_Decoder(nn.Module):
         h_ = self.ffn_q(attn_out)
 
         return attn_out, h_
-
-
-# class GLabelPredictor(nn.Module):
-#     r"""
-#     A graph-level label predictor that predicts the label of graphs based on the graph embeddings.
-#     """
-
-#     def __init__(self, input_dim: int, output_dim: int, hidden_dims: List[int], dropout: float, n_heads: int):
-#         super().__init__()
-
-#         _in_dim = input_dim
-#         layers = []
-#         for _dim in hidden_dims:
-#             layers += [
-#                 nn.Linear(_in_dim, _dim),
-#                 nn.SiLU(),
-#                 nn.BatchNorm1d(_dim),
-#                 nn.Dropout(dropout),
-#             ]
-#             _in_dim = _dim
-#         layers.append(nn.LayerNorm(_in_dim))
-#         layers.append(nn.Linear(_in_dim, output_dim))
-#         self.net = nn.Sequential(*layers)
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         if x.ndim == 1:
-#             x = x.unsqueeze(0)
-#         elif x.ndim == 3:
-#             x = x.squeeze(2)
-#         return self.net(x)
 
 
 class GLabelPredictor(nn.Module):
@@ -763,7 +738,8 @@ class SelfAtt_(nn.Module):
     ):
         super().__init__()
         self.qkv = nn.Linear(dim, 3 * dim)
-        self.proj = nn.Linear(dim, dim)
+        proj_in_dim = 4 * dim if pool else dim
+        self.proj = nn.Linear(proj_in_dim, dim)
         self.scale = dim**-0.5
         self.dropout = nn.Dropout(dropout)
         self.pool = pool
@@ -772,6 +748,13 @@ class SelfAtt_(nn.Module):
         q, k, v = self.qkv(x).chunk(3, dim=-1)
         x = F.scaled_dot_product_attention(q, k, v, dropout_p=self.dropout.p if self.dropout else 0.0, scale=self.scale)
         if self.pool:
-            x = x.mean(dim=0)
+            # Compute multiple pooling statistics
+            _mean = x.mean(dim=0)
+            # Use unbiased=False to avoid NaN when seq_len=1
+            _std = x.std(dim=0, unbiased=False)
+            _max = x.max(dim=0).values
+            _min = x.min(dim=0).values
+            # Concatenate all features along feature dimension
+            x = torch.cat([_mean, _std, _max, _min], dim=-1)
         x = self.proj(x)
         return x
