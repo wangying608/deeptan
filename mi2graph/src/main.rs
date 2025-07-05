@@ -11,6 +11,9 @@ fn main() {
         .get_one::<String>("out")
         .map(|s| s.as_str())
         .unwrap();
+    let n_features_to_select: usize = *matches
+        .get_one("nfeat")
+        .expect("Error in reading number of features to select");
     let thre_cv: f64 = *matches
         .get_one("thre_cv")
         .expect("Error in reading threshold of coefficient of variation");
@@ -57,6 +60,7 @@ fn main() {
         &obs_names,
         &var_names,
         check_sim,
+        n_features_to_select,
         thre_cv,
         thre_pcc,
         thre_mi,
@@ -88,6 +92,12 @@ fn cli() -> Command {
                 .help("Output path")
                 .required(true)
                 .action(ArgAction::Set),
+            Arg::new("nfeat")
+                .value_parser(clap::value_parser!(usize))
+                .short('n')
+                .long("nfeat")
+                .help("Number of top-CV features to retain (0 = use thre_cv instead)")
+                .default_value("5000"),
             Arg::new("thre_cv")
                 .value_parser(clap::value_parser!(f64))
                 .long("threcv")

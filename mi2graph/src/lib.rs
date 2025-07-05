@@ -18,14 +18,14 @@ use processing::{remove_feat_similar, rm_feat_low_cv};
 use slidingwindow::init_windows_from_ratio;
 use sortf64::get_sort_indices_vecf64;
 
-/// Generate MIC relations between features with dynamic feature filtering for the next graph initialization.
+/// Generate NMIC relations between features with dynamic feature filtering for the next graph initialization.
 ///
 /// **Steps**:
 /// 1. Remove features with low coefficients of variation (using dynamic sliding windows).
 /// 2. Detect similar features pairs [Optional] (using dynamic 2D sliding windows for maxmizing PCC(`abs=true`)) then remove redundant features.
-/// 3. Compute MIC for each feature pair (using dynamic sliding windows).
-/// 4. Filter out weak MIC values and corresponding feature pairs.
-/// 5. Save sorted MIC values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
+/// 3. Compute NMIC for each feature pair (using dynamic sliding windows).
+/// 4. Filter out weak NMIC values and corresponding feature pairs.
+/// 5. Save sorted NMIC values, feature pairs, processed input data, feature indices, similar feature pairs and input arguments.
 ///
 /// **Input**:
 /// + `path_output`: path to save the result files
@@ -59,6 +59,7 @@ pub fn mic_mat_with_data_filter(
     obs_names: &DataFrame,
     var_names: &Vec<String>,
     check_sim: bool,
+    n_features_to_select: usize,
     thre_cv: f64,
     thre_pcc: f64,
     thre_mi: f64,
@@ -80,7 +81,7 @@ pub fn mic_mat_with_data_filter(
         .num_threads(num_threads)
         .build_global()
         .unwrap();
-    println!("\n⚡️  Using {} threads.\n", num_threads);
+    println!("\n⚡️  Using {} threads", num_threads);
 
     // Initialize various sliding windows
     let sliding_windows = init_windows_from_ratio(
@@ -99,14 +100,19 @@ pub fn mic_mat_with_data_filter(
         .collect();
 
     // Print start time
-    println!("\nStart time: {:?}\n", Local::now());
+    println!("\nStart feature selection at: {:?}\n", Local::now());
 
     // 1. Remove low-CV features
-    let (mut data_0, feat_indices_0, tmp_features_sort_indices) =
-        rm_feat_low_cv(data, thre_cv, &sliding_windows, &features_sort_indices);
+    let (mut data_0, feat_indices_0, tmp_features_sort_indices) = rm_feat_low_cv(
+        data,
+        thre_cv,
+        n_features_to_select,
+        &sliding_windows,
+        &features_sort_indices,
+    );
     features_sort_indices = tmp_features_sort_indices;
     println!(
-        "Shape of data after removing features with low CV (coefficient of variation) values: {:?} (n_feat x n_obs)",
+        "✅ Shape of data after removing features with low CV (coefficient of variation) values: {:?} (n_feat x n_obs)",
         data_0.shape()
     );
 
@@ -123,34 +129,41 @@ pub fn mic_mat_with_data_filter(
             features_sort_indices,
         ) = remove_feat_similar(&data_0, thre_pcc, &sliding_windows, &features_sort_indices);
         println!(
-            "Shape of data after removing similar features: {:?}",
+            "✅ Shape of data after removing similar features: {:?}",
             data_0.shape()
         );
     } else {
-        println!("\nSkip removing similar features.");
+        println!("\n✅ Skip removing similar features.");
     }
 
     // Print time
     let time_start = Local::now();
-    println!("\nStart computing MIC relations: {:?}", time_start);
+    println!("\nStart computing NMIC relations: {:?}", time_start);
 
-    // 3. Compute MIC for each feature pair
+    // 3. Compute NMIC for each feature pair
     let (mi_values, feat_pairs) =
         iter_feat_pairs_mi(&data_0, &sliding_windows, &features_sort_indices, true);
 
     // Print end time
     let time_end = Local::now();
     println!("End time:   {:?}", time_end);
-    println!("Time cost:  {:?}\n", time_end - time_start);
+    // Print time cost in seconds and hours
+    let time_cost = time_end - time_start;
+    let time_cost_seconds = time_cost.num_seconds();
+    let time_cost_hours = time_cost_seconds as f64 / 3600.0;
+    println!(
+        "⏱️ Elapsed time:  {} seconds, or {:.2} hours\n",
+        time_cost_seconds, time_cost_hours
+    );
 
-    // 4. Remove low-MIC feature pairs.
+    // 4. Remove low-NMIC feature pairs.
     // mi_values and feat_pairs have been sorted. We check elements from the end.
     let last2keep = check_sorted_vals(&mi_values, thre_mi);
     // Keep pairs that idx >= last2keep
     let mi_values_o: Array1<f64> = mi_values.slice(s![..last2keep]).to_owned();
     let mut feat_pairs_o: Array2<i64> = feat_pairs.slice(s![..last2keep, ..]).to_owned();
     println!(
-        "Number of feature pairs after removing weak MIC values: {}",
+        "Number of feature pairs after removing weak NMIC values: {}",
         last2keep + 1
     );
 
@@ -173,7 +186,7 @@ pub fn mic_mat_with_data_filter(
     // Remove features of data_1 that are not in sorted_uniq_features
     data_0 = data_0.select(Axis(0), &sorted_uniq_features);
 
-    // Convert features indices after MIC filtering
+    // Convert features indices after NMIC filtering
     sorted_uniq_features.par_iter_mut().for_each(|i| {
         *i = *map_1.get(&(*i)).unwrap();
     });
@@ -201,6 +214,8 @@ pub fn mic_mat_with_data_filter(
             row[1] = *map_new2orig.get(&(row[1] as usize)).unwrap() as i64;
         });
     }
+
+    println!("Number of features: {}", sorted_uniq_features.len());
 
     let data_1_feat_indices_o: Array1<i64> =
         Array1::from_vec(sorted_uniq_features.par_iter().map(|&i| i as i64).collect());
@@ -347,7 +362,7 @@ fn save_parquet(
     ParquetWriter::new(&mut file).finish(&mut df1)?;
 
     println!(
-        "Processed matrix has been saved as a dataframe with obs names and feature names: \"{}\"",
+        "Processed matrix has been saved as a polars dataframe containing observation names and feature names: \"{}\"",
         path_parquet_c
     );
     Ok(())

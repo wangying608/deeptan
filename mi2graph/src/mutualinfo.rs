@@ -1,4 +1,5 @@
 use crate::sortf64::{get_sort_indices_vecf64, get_sort_indices_vecf64_slice, sort_vec_f64};
+use indicatif::{ParallelProgressIterator, ProgressBar, ProgressStyle};
 use ndarray::prelude::*;
 use rayon::prelude::*;
 use std::error::Error;
@@ -16,66 +17,52 @@ pub fn iter_feat_pairs_mi(
     features_sort_indices: &Vec<Vec<usize>>,
     sort_results: bool,
 ) -> (Array1<f64>, Array2<i64>) {
-    let n_feat = data.nrows();
-
     // Calculate the number of feature pairs.
+    let n_feat = data.nrows();
     let n_pairs = n_feat * (n_feat - 1) / 2;
-    // Initialize a vector to store mutual information values. (size = n_pairs)
-    let mut mi_vec: Vec<f64> = vec![0.0; n_pairs];
 
-    // Initialize a 2D array to store feature pairs.
-    let mut feat_pairs = Array2::zeros((n_pairs, 2));
-    let mut pos_v: usize = 0;
-    for i in 0..n_feat {
-        for j in i + 1..n_feat {
-            feat_pairs[[pos_v, 0]] = i as i64;
-            feat_pairs[[pos_v, 1]] = j as i64;
-            pos_v += 1;
-        }
+    // Create a progress bar
+    let pb = ProgressBar::new(n_pairs as u64);
+    pb.set_style(
+        ProgressStyle::default_bar()
+            .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
+            .unwrap(), // .progress_chars("##-"),
+    );
+    pb.set_message("Computing NMIC for all feature pairs");
+
+    // Generate all unique feature pairs.
+    let feat_pairs: Vec<(usize, usize)> = (0..n_feat)
+        .flat_map(|i| (i + 1..n_feat).map(move |j| (i, j)))
+        .collect();
+
+    // Iterate over all feature pairs in parallel and compute mutual information.
+    let mi_values: Vec<f64> = feat_pairs
+        .par_iter()
+        .progress_with(pb) // This is the key part for the progress bar
+        .map(|&(i, j)| {
+            mi_optimal(
+                data.row(i).as_slice().unwrap(),
+                data.row(j).as_slice().unwrap(),
+                sliding_windows,
+                &features_sort_indices[i],
+                &features_sort_indices[j],
+            )
+        })
+        .collect();
+
+    let mut feat_pairs_array = Array2::zeros((n_pairs, 2));
+    for (idx, &(i, j)) in feat_pairs.iter().enumerate() {
+        feat_pairs_array[[idx, 0]] = i as i64;
+        feat_pairs_array[[idx, 1]] = j as i64;
     }
-    assert_eq!(pos_v, n_pairs);
-
-    // Iterate over all feature pairs.
-    // mi_vec.par_iter_mut().enumerate().for_each(|(i, mi)| {
-    //     // Extract feature values.
-    //     let feat_1 = &features[feat_pairs[[i, 0]] as usize];
-    //     let feat_2 = &features[feat_pairs[[i, 1]] as usize];
-    //     // Calculate mutual information.
-    //     *mi = mi_optimal(feat_1, feat_2, &sld_windows);
-    // });
-
-    // Split the mi_vec into chunks for parallel processing.
-    let chunk_size = (n_pairs + rayon::current_num_threads() - 1) / rayon::current_num_threads();
-    let chunks: Vec<&mut [f64]> = mi_vec.chunks_mut(chunk_size).collect();
-    // Iterate over all feature pairs in parallel.
-    chunks
-        .into_par_iter()
-        .enumerate()
-        .for_each(|(chunk_index, chunk)| {
-            let start_index = chunk_index * chunk_size;
-            let end_index = std::cmp::min(start_index + chunk_size, n_pairs);
-            for i in start_index..end_index {
-                let tmp_ind_f1 = feat_pairs[[i, 0]] as usize;
-                let tmp_ind_f2 = feat_pairs[[i, 1]] as usize;
-                chunk[i - start_index] = mi_optimal(
-                    data.row(tmp_ind_f1).as_slice().unwrap(),
-                    data.row(tmp_ind_f2).as_slice().unwrap(),
-                    sliding_windows,
-                    &features_sort_indices[tmp_ind_f1],
-                    &features_sort_indices[tmp_ind_f2],
-                );
-            }
-        });
 
     // Sort the vector of mutual information values in descending order. feat_pairs are also sorted.
     if sort_results {
-        let (mi_vec_sorted, feat_pairs_sorted) = sort_mi_results(&mi_vec, &feat_pairs);
-        mi_vec = mi_vec_sorted;
-        feat_pairs = feat_pairs_sorted;
+        let (mi_vec_sorted, feat_pairs_sorted) = sort_mi_results(&mi_values, &feat_pairs_array);
+        (Array1::from(mi_vec_sorted), feat_pairs_sorted)
+    } else {
+        (Array1::from(mi_values), feat_pairs_array)
     }
-
-    // Return the vector of mutual information values.
-    (Array1::from(mi_vec), feat_pairs)
 }
 
 /// Sort mutual information values in descending order.

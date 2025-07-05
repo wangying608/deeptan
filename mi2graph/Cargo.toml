@@ -8,6 +8,7 @@ license = "MIT"
 [dependencies]
 chrono = "0.4.38"
 clap = "4.5.7"
+indicatif = { version = "0.17.11", features = ["unicode-width", "futures", "improved_unicode", "in_memory", "rayon", "tokio", "unicode-segmentation", "vt100"] }
 ndarray = "0.15.6"
 ndarray-npy = "0.8.1"
 ndarray-rand = "0.14.0"

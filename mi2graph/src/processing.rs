@@ -54,28 +54,73 @@ fn cv_array2d(
     cv_opt
 }
 
+/// Filters features based on coefficient of variation (CV) criteria.
+///
+/// Args:
+///     array_2d: 2D array of feature data (features × samples)
+///     cv_threshold: Minimum CV value to retain features (ignored if n_features_to_select > 0)
+///     n_features_to_select: Number of top-CV features to retain (0 = use cv_threshold instead)
+///     sliding_windows: Window indices for CV calculation
+///     feat_sort_indices: Precomputed sorted feature indices for each window
+///
+/// Returns:
+///     Tuple of (filtered_data, kept_feat_indices, filtered_feat_sort_indices) where:
+///     - filtered_data: Subset of input array with selected features
+///     - kept_feat_indices: Original indices of retained features
+///     - filtered_feat_sort_indices: Subset of feat_sort_indices for retained features
 pub fn rm_feat_low_cv(
     array_2d: &Array2<f64>,
-    thre_cv: f64,
+    cv_threshold: f64,
+    n_features_to_select: usize,
     sliding_windows: &Vec<Vec<usize>>,
     feat_sort_indices: &Vec<Vec<usize>>,
 ) -> (Array2<f64>, Vec<usize>, Vec<Vec<usize>>) {
+    debug_assert_eq!(
+        array_2d.len_of(Axis(0)),
+        feat_sort_indices.len(),
+        "Input dimension mismatch: number of features in array_2d and feat_sort_indices must be equal."
+    );
+
     // Calculate coefficient of variation for each feature
     let cv_vals = cv_array2d(array_2d, sliding_windows, feat_sort_indices);
 
-    // Filter features with low CV
-    let mut feat_idxs_saved: Vec<usize> = Vec::new();
-    for (i, cv) in cv_vals.iter().enumerate() {
-        if *cv >= thre_cv {
-            feat_idxs_saved.push(i);
-        }
-    }
-    let data_ = array_2d.select(Axis(0), &feat_idxs_saved);
-    let feat_sort_indices_: Vec<Vec<usize>> = feat_idxs_saved
+    debug_assert_eq!(
+        array_2d.len_of(Axis(0)),
+        cv_vals.len(),
+        "CV calculation returned a vector of unexpected length."
+    );
+
+    // Filter features
+    let kept_feat_indices: Vec<usize> = if n_features_to_select > 0 {
+        let mut cv_with_indices: Vec<(usize, &f64)> = cv_vals.iter().enumerate().collect();
+
+        // Sort by CV in descending order
+        cv_with_indices.sort_unstable_by(|a, b| b.1.partial_cmp(a.1).unwrap());
+
+        let mut indices: Vec<usize> = cv_with_indices
+            .into_iter()
+            .take(n_features_to_select)
+            .map(|(i, _)| i)
+            .collect();
+        // Sort indices for predictable selection order
+        indices.sort_unstable();
+        indices
+    } else {
+        // Original behavior: filter features with low CV
+        cv_vals
+            .iter()
+            .enumerate()
+            .filter(|(_i, &cv)| cv >= cv_threshold)
+            .map(|(i, _cv)| i)
+            .collect()
+    };
+
+    let filtered_data = array_2d.select(Axis(0), &kept_feat_indices);
+    let filtered_feat_sort_indices: Vec<Vec<usize>> = kept_feat_indices
         .iter()
         .map(|&i| feat_sort_indices[i].clone())
         .collect();
-    (data_, feat_idxs_saved, feat_sort_indices_)
+    (filtered_data, kept_feat_indices, filtered_feat_sort_indices)
 }
 
 /// Check the similarity of two features (using dynamic 2D sliding windows for optimal PCC calculation).

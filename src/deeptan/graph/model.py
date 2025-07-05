@@ -22,6 +22,7 @@ from lightning.pytorch.callbacks import (
     ModelCheckpoint,
 )
 from lightning.pytorch.loggers import TensorBoardLogger
+from loguru import logger
 
 # from lightning.pytorch.profilers import AdvancedProfiler
 from torch.optim.adamw import AdamW
@@ -51,7 +52,7 @@ from deeptan.utils.data import (
 )
 from deeptan.utils.uni import get_map_location, random_string, time_string
 
-print(ascii_art)
+logger.info(ascii_art)
 torch.set_float32_matmul_precision(const.default.matmul_precision)
 # torch._dynamo.config.suppress_errors = True
 # torch._dynamo.config.capture_scalar_outputs = True
@@ -626,8 +627,8 @@ def train_model(
 
     trainer.test(ckpt_path=callback_ckpt.best_model_path, dataloaders=datamodule)
 
-    print(f"\nBest validation score: {best_score}")
-    print(f"Best model path: {callback_ckpt.best_model_path}\n")
+    logger.success(f"\nBest validation score: {best_score}")
+    logger.success(f"Best model path: {callback_ckpt.best_model_path}\n")
 
     return best_score
 
@@ -719,9 +720,9 @@ class DeepTANTune:
     def _init_class_weights(self):
         """Initialize class weights if provided."""
         if self.path_label_onehot is not None:
-            print("\nPre-defined label onehot file found. Computing class weights...\n")
+            logger.info("\nPre-defined label onehot file found. Computing class weights...\n")
             return celltypes_class_weights(pl.read_parquet(self.path_label_onehot))
-        print(f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n")
+        logger.info(f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n")
         return None
 
     def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
@@ -854,13 +855,13 @@ class DeepTANTune:
 
         dict_node_names_former = _model_amsgp.node_embedding_layers.dict_node_names
         if set(dict_node_names_new.keys()) != set(dict_node_names_former.keys()):
-            print("\nUpdating dict_node_names in NodeEmbedding")
+            logger.info("\nUpdating dict_node_names in NodeEmbedding")
             new_nodes_to_append = set(dict_node_names_new.keys()) - set(dict_node_names_former.keys())
             n_node_former = len(dict_node_names_former)
             n_node_add = len(new_nodes_to_append)
             new_node_num = n_node_former + n_node_add
             dict_to_add = {node: n_node_former + i for i, node in enumerate(new_nodes_to_append)}
-            print(f"The feature embedding module is extended from {n_node_former} to {new_node_num} with {n_node_add} new features.\n")
+            logger.info(f"The feature embedding module is extended from {n_node_former} to {new_node_num} with {n_node_add} new features.\n")
 
             # Update dict_node_names in NodeEmbedding
             dict_node_names_former.update(dict_to_add)
@@ -877,7 +878,7 @@ class DeepTANTune:
             _model_amsgp.node_embedding_layers.embed = new_embed
 
         else:
-            print("\ndict_node_names in NodeEmbedding is the same")
+            logger.info("\ndict_node_names in NodeEmbedding is the same")
 
         return _model_amsgp, _model_ge_decoder
 
@@ -901,9 +902,9 @@ class DeepTANTune:
         """Optuna objective function for hyperparameter optimization."""
 
         time_delay = const.default.time_delay * random.uniform(0.3, 1.1)
-        print(f"\nWaiting for {time_delay} seconds...\n")
+        logger.info(f"\nWaiting for {time_delay} seconds...\n")
         time.sleep(time_delay)
-        print(f"Starting trial number: {trial.number}\n")
+        logger.info(f"Starting trial number: {trial.number}\n")
 
         try:
             fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32]]
@@ -940,16 +941,16 @@ class DeepTANTune:
             )
 
             if val_loss is None:
-                print(f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n")
+                logger.warning(f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n")
                 raise optuna.TrialPruned()
 
             return val_loss
 
         except torch.cuda.OutOfMemoryError:
-            print("\n\nOut of memory error, skipping trial\n")
+            logger.warning("\n\nOut of memory error, skipping trial\n")
             raise optuna.TrialPruned()
         except Exception as e:
-            print(f"\n\nAn error occurred in trial {trial.number}: {e}\n")
+            logger.error(f"\n\nAn error occurred in trial {trial.number}: {e}\n")
             raise optuna.TrialPruned()
 
     def optimize(self, n_trials: int = 100, n_jobs: int = 1):

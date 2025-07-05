@@ -7,6 +7,7 @@ from typing import Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from loguru import logger
 from torch_geometric.data import Data as GData
 from torch_geometric.nn import MessagePassing
 from torch_geometric.utils import k_hop_subgraph, subgraph, to_undirected
@@ -111,6 +112,7 @@ class AMSGP(torch.nn.Module):
 
         for node_indices in node_indices_list:
             if node_indices.numel() == 0:
+                logger.warning("⚠️ Warning: Empty batch detected!")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
@@ -118,7 +120,7 @@ class AMSGP(torch.nn.Module):
 
             # Validate subgraph edge indices
             if sub_edge_index.numel() == 0:
-                # print("Warning: Empty subgraph detected")
+                logger.warning("Warning: Empty subgraph detected")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
@@ -509,7 +511,7 @@ class WGATLayer_chunked(MessagePassing):
     def message(self, x_i, x_j, edge_attr):
         num_edges = x_i.size(0)
         if num_edges == 0:
-            # print("Empty edge index, returning zeros.")
+            logger.warning("Empty edge index, returning zeros.")
             return torch.zeros_like(x_i)
 
         chunk_size = min(

@@ -12,10 +12,11 @@ import scanpy as sc
 import torch
 from lightning import LightningDataModule
 from litdata import StreamingDataLoader, StreamingDataset
+from loguru import logger
 from torch_geometric.data import Data as GData
 from torch_geometric.data import Dataset as GDataset
 from torch_geometric.loader import DataLoader as GDataLoader
-from torch_geometric.utils import erdos_renyi_graph
+from torch_geometric.utils import erdos_renyi_graph, subgraph
 
 import deeptan.constants as const
 from deeptan.utils.uni import collate_fn, get_avail_cpu_count
@@ -77,7 +78,10 @@ def read_nmic_npz(npz_path: str):
     """
     # Load the NMIC results
     results = np.load(npz_path)
-    df = pl.read_parquet(npz_path.replace(".npz", ".parquet"))
+    parquet_path = npz_path.replace(".npz", ".parquet")
+    if not os.path.exists(parquet_path):
+        raise FileNotFoundError(f"Corresponding parquet file not found at: {parquet_path}")
+    df = pl.read_parquet(parquet_path)
 
     # Extract relevant data
     edge_attr: np.ndarray = results["mi_values"]
@@ -92,14 +96,38 @@ def read_nmic_npz(npz_path: str):
     return edge_attr, edge_index, mat, mat_feat_indices, obs_names, node_names
 
 
+def compute_feature_statistics(_mat: np.ndarray, axis: int = 0) -> dict[str, np.ndarray]:
+    r"""
+    Compute basic statistics for the features in the matrix.
+
+    Args:
+        _mat: The matrix for which to compute statistics.
+        axis: The axis along which to compute the statistics. Default is 0 (column-wise).
+    """
+    _mean = np.mean(_mat, axis=axis)
+    _std = np.std(_mat, axis=axis)
+    _cv = np.divide(_std, _mean, out=np.zeros_like(_std), where=_mean > 1e-8)
+    _cv = np.nan_to_num(_cv, nan=0.0, posinf=np.inf, neginf=-np.inf)
+    _stats = {
+        "mean": _mean,
+        "variance": np.var(_mat, axis=axis),
+        "std": _std,
+        "cv": _cv,
+        "nonzero_count": np.count_nonzero(_mat, axis=axis),
+        "nonzero_ratio": np.mean(_mat > 0, axis=axis),
+    }
+    return _stats
+
+
 class NMICGraphDataset(GDataset):
     def __init__(
         self,
         npz_path: str,
-        labels: str | None,
-        edge_attr_threshold: float = 0.1,
+        labels: Optional[str],
+        edge_attr_threshold: float = 0.0,
         specify_features: Optional[List[str]] = None,
         if_log1p: bool = True,
+        min_features: int = 50,
     ):
         """
         Initialize the NMIC graph dataset.
@@ -110,26 +138,78 @@ class NMICGraphDataset(GDataset):
             edge_attr_threshold: Threshold for edge attributes.
             specify_features: List of features to specify. If None, all features are used.
             if_log1p: Whether to apply log1p transformation to the data.
+            min_features: Minimum number of features required.
         """
         super().__init__()
+
+        # Read guide graph
         (
-            self.edge_attr,
-            self.edge_index,
-            self.mat,
-            self.mat_feat_indices,
-            self.obs_names,
-            self.node_names,
+            g_edge_attr,
+            g_edge_index,
+            g_mat,
+            g_mat_feat_indices,
+            g_obs_names,
+            g_node_names,
         ) = read_nmic_npz(npz_path)
 
         # Check if obs_names and node_names are unique
-        if len(set(self.obs_names)) != len(self.obs_names):
-            raise ValueError("obs_names must be unique")
-        if len(set(self.node_names)) != len(self.node_names):
-            raise ValueError("node_names must be unique")
+        if len(set(g_obs_names)) != len(g_obs_names):
+            raise ValueError("Observation names must be unique.")
+        if len(set(g_node_names)) != len(g_node_names):
+            raise ValueError("Feature names must be unique.")
 
+        # Sort everything by node_names to simplify operations
+        feat_sort_indices = np.argsort(g_node_names)
+        self.node_names = [g_node_names[i] for i in feat_sort_indices]
+        self.mat_feat_indices = g_mat_feat_indices[feat_sort_indices]
+        self.mat = g_mat[:, feat_sort_indices]
+
+        selected_node_indices = self._setup_feature_filter(specify_features)
+        self.mat_feat_indices = self.mat_feat_indices[selected_node_indices]
+        self.mat = self.mat[:, selected_node_indices]
+
+        # Create mapping from original node index to new sorted index
+        feat_index_map = {old_idx: new_pos for new_pos, old_idx in enumerate(self.mat_feat_indices)}
+        # Remap edge indices
+        edge_index_flat = g_edge_index.ravel()
+        new_edge_index = np.array([feat_index_map.get(idx, -1) for idx in edge_index_flat])
+        new_edge_index = new_edge_index.reshape(g_edge_index.shape)
+        # Filter out edges that reference nodes not in our sorted list
+        valid_edges = (new_edge_index[0] != -1) & (new_edge_index[1] != -1)
+        self.edge_index = new_edge_index[:, valid_edges]
+        self.edge_attr = g_edge_attr[valid_edges]
+
+        # Load additional attributes and preprocess data
+        self.edge_attr_threshold = edge_attr_threshold
+        self.obs_names = g_obs_names
+        self._load_labels(labels)
         if if_log1p:
             self.mat = np.log1p(self.mat)
 
+        # Prepare top features based on coefficient of variation for further processing
+        self.min_features = min(min_features, self.mat.shape[1])
+        self.mat_stat = compute_feature_statistics(self.mat, axis=0)
+        self.top_cv_indices = np.argsort(self.mat_stat["cv"])[-self.min_features :]
+
+    def _setup_feature_filter(self, specify_features: Optional[List[str]]):
+        """
+        Setup feature filter based on specified features. If no features are specified, use all features.
+        """
+        if specify_features is not None:
+            specify_set = set(specify_features)
+            selected_node_indices = np.where(np.array([name in specify_set for name in self.node_names]))[0]
+            _node_names = [_name for _name in self.node_names if _name in specify_set]
+            self.node_names = _node_names
+            logger.info(f"Using {len(self.node_names)} specified features")
+        else:
+            selected_node_indices = np.arange(len(self.node_names))
+            logger.info(f"Using all {len(self.node_names)} features")
+        return selected_node_indices
+
+    def _load_labels(self, labels: Optional[str]):
+        """
+        Load labels from a file.
+        """
         if labels is None:
             self.labels = None
             self.label_dim = None
@@ -139,100 +219,74 @@ class NMICGraphDataset(GDataset):
                 self.labels = self.labels.rename({"obs_names": "bc"})
             self.label_dim = self.labels.shape[1] - 1
 
-        self.edge_attr_threshold = edge_attr_threshold
-        self.specify_features = specify_features
-
-        if self.specify_features is not None:
-            # Interact with self.node_names using set
-            self.node_names_for_dict = list(set(self.node_names).intersection(set(self.specify_features)))
-            print(f"\nNumber of node names for dictionary after intersection: {len(self.node_names_for_dict)}")
-        else:
-            self.node_names_for_dict = self.node_names
-            print(f"\nNumber of node names for dictionary: {len(self.node_names_for_dict)}")
-
-    def len(self):
+    def len(self) -> int:
         return len(self.obs_names)
 
-    def get(self, idx):
+    def get(self, idx: int) -> GData | None:
         values = self.mat[idx]
-        avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
-        avail_feat_indices = self.mat_feat_indices[avail_col_indices]
+        avail_indices = np.where(np.abs(values) > 1e-6)[0]
 
-        # Apply specify_features filter if provided
-        if self.specify_features is not None:
-            # Find indices of specified features
-            specified_feat_indices = [self.mat_feat_indices[i] for i, _name in enumerate(self.node_names) if _name in self.node_names_for_dict]
-            # Filter avail_feat_indices to only include specified features
-            mask = np.isin(avail_feat_indices, specified_feat_indices)
-            avail_col_indices = avail_col_indices[mask]
-            avail_feat_indices = avail_feat_indices[mask]
+        if len(avail_indices) < 1:
+            logger.warning(f"No non-zero features for observation {idx}")
+            return None
 
-        # If no features are available?
-        if len(avail_col_indices) < 10:
-            print("\nNumber of available features is too small.")
+        if len(avail_indices) < self.min_features:
+            logger.warning(f"Less than {self.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}")
 
-        # Filter edges based on available nodes
-        edge_mask = np.logical_and(np.isin(self.edge_index[0], avail_feat_indices), np.isin(self.edge_index[1], avail_feat_indices))
-        edge_indices = self.edge_index[:, edge_mask]
-        edge_attrs = self.edge_attr[edge_mask]
+        # Filter edges based on available indices and edge attribute threshold
+        edge_mask = (self.edge_attr > self.edge_attr_threshold) & np.isin(self.edge_index[0], avail_indices) & np.isin(self.edge_index[1], avail_indices)
+        filtered_edge_index = self.edge_index[:, edge_mask]
+        # filtered_edge_attr = self.edge_attr[edge_mask]
 
-        # Filter edges based on edge_attr threshold
-        edge_attr_mask = edge_attrs > self.edge_attr_threshold
-        edge_indices = edge_indices[:, edge_attr_mask]
-        edge_attrs = edge_attrs[edge_attr_mask]
+        final_indices = np.unique(np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.top_cv_indices))))
+        if len(final_indices) < 1:
+            logger.warning(f"No non-zero features for observation {idx} after filtering edges")
+            return None
 
-        # Filter nodes based on used edge indices
-        if edge_indices.size > 0:
-            used_feat_indices = np.unique(edge_indices.flatten())
-            final_node_mask = np.isin(avail_feat_indices, used_feat_indices)
-            final_col_indices = avail_col_indices[final_node_mask]
-            final_feat_indices = avail_feat_indices[final_node_mask]
-        else:
-            # Handle no edge case: retain the first 10 features or raise an exception
-            final_col_indices = avail_col_indices[:10]
-            final_feat_indices = avail_feat_indices[:10]
-            if len(final_col_indices) < 1:
-                raise ValueError("No valid features after filtering")
+        if len(final_indices) < self.min_features and len(avail_indices) >= self.min_features:
+            remaining = np.setdiff1d(avail_indices, final_indices)
+            if len(remaining) > 0:
+                remaining_cv_scores = self.mat_stat["cv"][remaining]
+                remaining_sorted_by_cv = remaining[np.argsort(remaining_cv_scores)[::-1]]
+                additional = remaining_sorted_by_cv[: self.min_features - len(final_indices)]
+                final_indices = np.sort(np.concatenate([final_indices, additional]))
 
-        # Re-generate the feature matrix
-        x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)
+        x_idx = torch.tensor(values[final_indices], dtype=torch.float32).unsqueeze(1)
 
-        # Map edge indices to current feature indices
-        # Create a mapping from original feature indices to current indices
-        feat_mapping = {feat: idx for idx, feat in enumerate(final_feat_indices)}
-        if edge_indices.size > 0:
-            mapped_edges = np.vectorize(lambda x: feat_mapping.get(x, -1))(edge_indices)
-            valid_mask = (mapped_edges[0] != -1) & (mapped_edges[1] != -1)
-            edge_index = torch.tensor(mapped_edges[:, valid_mask], dtype=torch.long)
-            edge_attrs = torch.tensor(edge_attrs[valid_mask], dtype=torch.float16).unsqueeze(1)
-        else:
-            edge_index = torch.empty((2, 0), dtype=torch.long)
-            edge_attrs = torch.tensor([], dtype=torch.float16).unsqueeze(1)
+        # Remap edge indices and attributes
+        remapped_edge_index, remapped_edge_attr = subgraph(
+            torch.tensor(final_indices),
+            torch.tensor(self.edge_index),
+            torch.tensor(self.edge_attr),
+            relabel_nodes=True,
+        )
 
-        # Reorder node names based on final column indices
-        node_names = [self.node_names[i] for i in final_col_indices]
-
+        # Get corresponding node names
+        node_names = [self.node_names[i] for i in final_indices]
         obs_name = self.obs_names[idx]
 
-        # Create the graph data object
         _y = None
         if self.labels is not None:
-            _y = torch.tensor(self.pick_label(obs_name), dtype=torch.float16)
+            label_data = self.pick_label(obs_name)
+            if label_data is not None:
+                _y = torch.tensor(label_data, dtype=torch.float32)
 
         return GData(
-            x=x,
+            x=x_idx,
             y=_y,
-            edge_index=edge_index,
-            edge_attr=edge_attrs,
+            edge_index=remapped_edge_index,
+            edge_attr=remapped_edge_attr,
             node_names=node_names,
             obs_name=obs_name,
         )
 
-    def pick_label(self, obs_name: str):
+    def pick_label(self, obs_name: str) -> np.ndarray | None:
         if self.labels is None:
             return None
         else:
-            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy().astype(np.float16)
+            _label = self.labels.filter(pl.col("bc") == obs_name).drop("bc").to_numpy().astype(np.float32)
+            if _label.shape[0] == 0:
+                return None
             return _label
 
 
@@ -255,73 +309,60 @@ class NMICGraphDatasetRely(GDataset):
     def len(self):
         return self.selected_mat.shape[0]
 
-    def get(self, idx):
+    def get(self, idx) -> GData | None:
         values = self.selected_mat[idx]
-        avail_col_indices = np.where(np.abs(values) > 1e-6)[0]
-        avail_feat_indices = self.depGDataset.mat_feat_indices[avail_col_indices]
+        avail_indices = np.where(np.abs(values) > 1e-6)[0]
 
-        # Apply specify_features filter if provided
-        if self.depGDataset.specify_features is not None:
-            # Find indices of specified features
-            specified_feat_indices = [self.depGDataset.mat_feat_indices[i] for i, _name in enumerate(self.depGDataset.node_names) if _name in self.depGDataset.node_names_for_dict]
-            # Filter avail_feat_indices to only include specified features
-            mask = np.isin(avail_feat_indices, specified_feat_indices)
-            avail_col_indices = avail_col_indices[mask]
-            avail_feat_indices = avail_feat_indices[mask]
+        if len(avail_indices) < 1:
+            logger.warning(f"No non-zero features for observation {idx}")
+            return None
 
-        # Filter edges based on available nodes
-        edge_mask = np.isin(self.depGDataset.edge_index[0], avail_feat_indices) & np.isin(self.depGDataset.edge_index[1], avail_feat_indices)
-        edge_indices = self.depGDataset.edge_index[:, edge_mask]
-        edge_attrs = self.depGDataset.edge_attr[edge_mask]
+        if len(avail_indices) < self.depGDataset.min_features:
+            logger.warning(f"Less than {self.depGDataset.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}")
 
-        # Filter edges based on edge_attr threshold
-        edge_attr_mask = edge_attrs > self.depGDataset.edge_attr_threshold
-        edge_indices = edge_indices[:, edge_attr_mask]
-        edge_attrs = edge_attrs[edge_attr_mask]
+        # Filter edges based on available indices and edge attribute threshold
+        edge_mask = (self.depGDataset.edge_attr > self.depGDataset.edge_attr_threshold) & np.isin(self.depGDataset.edge_index[0], avail_indices) & np.isin(self.depGDataset.edge_index[1], avail_indices)
+        filtered_edge_index = self.depGDataset.edge_index[:, edge_mask]
 
-        # Filter nodes based on used edge indices
-        if edge_indices.size > 0:
-            used_feat_indices = np.unique(edge_indices.flatten())
-            final_node_mask = np.isin(avail_feat_indices, used_feat_indices)
-            final_col_indices = avail_col_indices[final_node_mask]
-            final_feat_indices = avail_feat_indices[final_node_mask]
-        else:
-            # Handle no edge case: retain the first 10 features or raise an exception
-            final_col_indices = avail_col_indices[:10]
-            final_feat_indices = avail_feat_indices[:10]
-            if len(final_col_indices) < 1:
-                raise ValueError("No valid features after filtering")
+        final_indices = np.unique(np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.depGDataset.top_cv_indices))))
+        if len(final_indices) < 1:
+            logger.warning(f"No non-zero features for observation {idx} after filtering edges")
+            return None
+
+        if len(final_indices) < self.depGDataset.min_features and len(avail_indices) >= self.depGDataset.min_features:
+            remaining = np.setdiff1d(avail_indices, final_indices)
+            if len(remaining) > 0:
+                remaining_cv_scores = self.depGDataset.mat_stat["cv"][remaining]
+                remaining_sorted_by_cv = remaining[np.argsort(remaining_cv_scores)[::-1]]
+                additional = remaining_sorted_by_cv[: self.depGDataset.min_features - len(final_indices)]
+                final_indices = np.sort(np.concatenate([final_indices, additional]))
 
         # Re-generate the feature matrix
-        x = torch.tensor(values[final_col_indices], dtype=torch.float16).unsqueeze(1)
+        x_idx = torch.tensor(values[final_indices], dtype=torch.float32).unsqueeze(1)
 
-        # Map edge indices to current feature indices
-        # Create a mapping from original feature indices to current indices
-        feat_mapping = {feat: idx for idx, feat in enumerate(final_feat_indices)}
-        if edge_indices.size > 0:
-            mapped_edges = np.vectorize(lambda x: feat_mapping.get(x, -1))(edge_indices)
-            valid_mask = (mapped_edges[0] != -1) & (mapped_edges[1] != -1)
-            edge_index = torch.tensor(mapped_edges[:, valid_mask], dtype=torch.long)
-            edge_attrs = torch.tensor(edge_attrs[valid_mask], dtype=torch.float16).unsqueeze(1)
-        else:
-            edge_index = torch.empty((2, 0), dtype=torch.long)
-            edge_attrs = torch.tensor([], dtype=torch.float16).unsqueeze(1)
+        # Remap edge indices and attributes
+        remapped_edge_index, remapped_edge_attr = subgraph(
+            torch.tensor(final_indices),
+            torch.tensor(self.depGDataset.edge_index),
+            torch.tensor(self.depGDataset.edge_attr),
+            relabel_nodes=True,
+        )
 
         # Reorder node names based on final column indices
-        node_names = [self.depGDataset.node_names[i] for i in final_col_indices]
-
+        node_names = [self.depGDataset.node_names[i] for i in final_indices]
         obs_name = self.obs_names[idx]
 
-        # Create the graph data object
         _y = None
         if self.depGDataset.labels is not None:
-            _y = torch.tensor(self.depGDataset.pick_label(obs_name), dtype=torch.float16)
+            label_data = self.depGDataset.pick_label(obs_name)
+            if label_data is not None:
+                _y = torch.tensor(label_data, dtype=torch.float32)
 
         return GData(
-            x=x,
+            x=x_idx,
             y=_y,
-            edge_index=edge_index,
-            edge_attr=edge_attrs,
+            edge_index=remapped_edge_index,
+            edge_attr=remapped_edge_attr,
             node_names=node_names,
             obs_name=obs_name,
         )
@@ -333,9 +374,10 @@ class DeepTANDataModule(LightningDataModule):
         files: dict[str, str],
         labels: str | None,
         batch_size: int = 1,
-        edge_attr_threshold: float = 0.1,
+        edge_attr_threshold: float = 0.0,
         specify_features: Union[None, str, List[str]] = None,
         if_log1p: bool = True,
+        min_features: int = 50,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:
@@ -347,6 +389,7 @@ class DeepTANDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.edge_attr_threshold = edge_attr_threshold
         self.if_log1p = if_log1p
+        self.min_features = min_features
 
         if isinstance(specify_features, str):
             if not specify_features.endswith(".csv"):
@@ -356,11 +399,10 @@ class DeepTANDataModule(LightningDataModule):
             self.specify_features = specify_features
 
     def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold, self.specify_features, self.if_log1p)
+        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold, self.specify_features, self.if_log1p, self.min_features)
         self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.if_log1p)
         self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.if_log1p)
-        dict_node_names_values = [i for i in range(len(self.train.node_names_for_dict))]
-        self.dict_node_names = dict(zip(self.train.node_names_for_dict, dict_node_names_values))
+        self.dict_node_names = {name: idx for idx, name in enumerate(self.train.node_names)}
         self.label_dim = self.train.label_dim
 
     def train_dataloader(self):
@@ -601,7 +643,7 @@ def adata_to_parquet(
     X = adata.X.toarray()
     if not isinstance(X, np.ndarray):
         raise ValueError("X must be a numpy array.")
-    print(f"X shape: {X.shape}")
+    logger.info(f"X shape: {X.shape}")
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -613,11 +655,11 @@ def adata_to_parquet(
         var_names = [var_names[i] for i in rands.tolist()]
         X = X[:, rands]
     df = pl.DataFrame({"obs_names": obs_names}).hstack(pl.DataFrame(X, schema=var_names))
-    print(f"DataFrame shape: {df.shape}")
-    print(f"Head of DataFrame:\n{df.head()}\n")
+    logger.info(f"DataFrame shape: {df.shape}")
+    logger.info(f"Head of DataFrame:\n{df.head()}\n")
 
     # Check number of None values
-    print(f"Number of None values:\n{df.null_count().sum_horizontal()}\n")
+    logger.info(f"Number of None values:\n{df.null_count().sum_horizontal()}\n")
     if output_prefix.endswith(".parquet"):
         df.write_parquet(os.path.join(output_dir, output_prefix))
     else:
@@ -643,8 +685,8 @@ def h5_to_parquet(h5_file: str, output_parquet: str):
         output_parquet (str): Path to the output Parquet file.
     """
     adata = sc.read_10x_h5(h5_file)
-    print(f"Read {h5_file} with {adata.shape[0]} cells and {adata.shape[1]} features.")
-    print(f"Saving to {output_parquet}...")
+    logger.info(f"Read {h5_file} with {adata.shape[0]} cells and {adata.shape[1]} features.")
+    logger.info(f"Saving to {output_parquet}...")
 
     adata.var_names_make_unique(join="_")
     adata.obs_names_make_unique(join="_")
@@ -658,8 +700,8 @@ def h5ad_to_parquet(h5ad_file: str, output_parquet: str, uniq_names: bool = True
         output_parquet (str): Path to the output Parquet file.
     """
     adata = read_h5ad(h5ad_file)
-    print(f"Read {h5ad_file} with {adata.shape[0]} cells and {adata.shape[1]} features.")
-    print(f"Saving to {output_parquet}...")
+    logger.info(f"Read {h5ad_file} with {adata.shape[0]} cells and {adata.shape[1]} features.")
+    logger.info(f"Saving to {output_parquet}...")
 
     if uniq_names:
         adata.var_names_make_unique(join="_")
@@ -687,10 +729,10 @@ def split_parquet(parquet_file: str, output_dir: str, ratio: List[float], seeds:
         df_i = df[shuffled_indices]
         for i, (start, end) in enumerate(zip([0] + split_indices, split_indices)):
             split_df = df_i[start:end]
-            print(f"Split {i} with seed {seed} has {len(split_df)} rows")
+            logger.info(f"Split {i} with seed {seed} has {len(split_df)} rows")
             output_file = os.path.join(output_dir, f"split_{seed}_{i}.parquet")
             split_df.write_parquet(output_file)
-            print(f"Saved split {i} with seed {seed} to {output_file}")
+            logger.success(f"Saved split {i} with seed {seed} to {output_file}")
 
 
 def split_parquet_with_celltypes(
@@ -737,10 +779,10 @@ def split_parquet_with_celltypes(
         # Create the splits based on the final split indices
         for i, indices in enumerate(split_indices):
             split_df = df[indices]
-            print(f"Split {i} with seed {seed} has {len(split_df)} rows")
+            logger.info(f"Split {i} with seed {seed} has {len(split_df)} rows")
             output_file = os.path.join(output_dir, f"split_{seed}_{i}.parquet")
             split_df.write_parquet(output_file)
-            print(f"Saved split {i} with seed {seed} to {output_file}")
+            logger.success(f"Saved split {i} with seed {seed} to {output_file}")
 
 
 class JointStratifiedSplitter:
@@ -935,16 +977,16 @@ class JointStratifiedSplitter:
             output_path = os.path.join(self.output_dir, f"split_{seed}_{split_idx}.parquet")
             try:
                 self.df[indices].write_parquet(output_path)
-                print(f"Created split {split_idx} (seed {seed}) with {len(indices)} samples")
+                logger.success(f"Created split {split_idx} (seed {seed}) with {len(indices)} samples")
             except Exception as e:
-                print(f"Failed to write split {split_idx} (seed {seed}): {e}")
+                logger.error(f"Failed to write split {split_idx} (seed {seed}): {e}")
 
 
 def read_nmic_results(npz_path: str):
     data = np.load(npz_path)
 
     # Print keys
-    print("\nKeys in the npz file:", data.files)
+    logger.info("\nKeys in the npz file:", data.files)
     # Keys in the npz file:
     # ['mi_values', 'feat_pairs', 'processed_mat', 'mat_feat_indices', 'mat_simi_feat_pairs', 'thre_cv', 'thre_pcc', 'thre_mi', 'ratio_max_window', 'ratio_min_window', 'ratio_step_window', 'ratio_step_sliding']
 

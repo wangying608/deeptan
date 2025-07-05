@@ -29,7 +29,7 @@ chunk_size = 2048
 mem_safety_factor = 0.85
 operation_overhead = 3.3
 
-threshold_nmic = 0.1
+threshold_nmic = 0.0
 threshold_subg_overlap = 0.95
 threshold_edge_exist = 0.05
 
