@@ -15,6 +15,7 @@ import h5py
 import numpy as np
 import optuna
 import polars as pl
+import torch
 from lightning.fabric.accelerators.cuda import find_usable_cuda_devices
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 from torch import cuda
@@ -67,15 +68,25 @@ class GetAdaptiveChunkSize:
 
         # print(f"Total VRAM: {self.total_mem / (1024 * 1024 * 1024):.2f} GB")
 
-    def calc(self, tensor_shape: Tuple[int, ...], dim: int = 0, use_total_as_avail: bool = True) -> int:
-        required_mem = self.estimate_tensor_memory(tensor_shape)
+    def calc(
+        self,
+        tensor_shape: Tuple[int, ...],
+        dim: int = 0,
+        dtype: torch.dtype = torch.float32,
+        use_total_as_avail: bool = True,
+    ) -> int:
+        required_mem = self.estimate_tensor_memory(tensor_shape, dtype)
         if required_mem == 0 or self.total_mem == 0:
             return const.default.chunk_size
 
         if use_total_as_avail:
             max_allowed_mem = self.total_mem * self.mem_safety_factor / self.operation_overhead
         else:
-            max_allowed_mem = sum(cuda.mem_get_info(device=i)[0] for i in range(cuda.device_count())) * self.mem_safety_factor / self.operation_overhead
+            max_allowed_mem = (
+                sum(cuda.mem_get_info(device=i)[0] for i in range(cuda.device_count()))
+                * self.mem_safety_factor
+                / self.operation_overhead
+            )
 
         if required_mem > max_allowed_mem:
             n_chunks = np.ceil(required_mem / max_allowed_mem)
@@ -85,9 +96,9 @@ class GetAdaptiveChunkSize:
         # print(f"Chunk size {chunk_size} for tensor shape {tensor_shape}, Required memory: {required_mem / (1024**3)} GB, Max allowed memory: {max_allowed_mem / (1024**3)} GB, Total memory: {self.total_mem / (1024**3)} GB.")
         return chunk_size
 
-    def estimate_tensor_memory(self, tensor_shape: Tuple[int, ...], dtype_size: int = 4) -> int:
+    def estimate_tensor_memory(self, tensor_shape: Tuple[int, ...], dtype: torch.dtype = torch.float32) -> int:
         """Estimate memory (bytes) required for a tensor given its shape."""
-        return int(np.prod(tensor_shape) * dtype_size)
+        return int(np.prod(tensor_shape) * dtype.itemsize)
 
 
 def get_map_location(map_loc: Optional[str] = None):
@@ -132,7 +143,9 @@ def process_ckpt_path(path_x: str) -> pl.DataFrame | None:
         _seed = path_x_frag[-4 - posmv]
         _data = path_x_frag[-5 - posmv]
 
-        _info_df = pl.DataFrame({"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]})
+        _info_df = pl.DataFrame(
+            {"ckpt_path": [path_x], "log_name": [_log_name], "task": [_task], "seed": [_seed], "data": [_data]}
+        )
         return _info_df.hstack(_df)
     else:
         print(f"No records found in {tsb_dir}. Skipping...")
@@ -158,7 +171,9 @@ def collect_tensorboard_events(dir_log: str) -> pl.DataFrame:
 
 def search_ckpt(dir_log: str):
     r"""Search checkpoints in the directory and its subdirectories."""
-    paths_ckpt = [os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".ckpt")]
+    paths_ckpt = [
+        os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".ckpt")
+    ]
     if len(paths_ckpt) == 0:
         raise FileNotFoundError("No checkpoint files found.")
     paths_ckpt.sort()
@@ -205,7 +220,9 @@ def collect_optuna_db(dir_log: str):
     This function will find all optuna db files in the directory `dir_log` and its subdirectories,
     and read the info of each optuna db file into a dataframe.
     """
-    paths_optuna_db = [os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".db")]
+    paths_optuna_db = [
+        os.path.join(dirpath, f) for dirpath, dirnames, files in os.walk(dir_log) for f in files if f.endswith(".db")
+    ]
     if len(paths_optuna_db) == 0:
         raise FileNotFoundError("No optuna db files found.")
     paths_optuna_db.sort()

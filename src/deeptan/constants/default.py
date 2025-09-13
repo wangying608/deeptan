@@ -7,44 +7,48 @@ from os import getenv
 
 from numpy import ceil
 
-bs = 16
-accumulate_grad_batches = 2
+bs = 8
+accumulate_grad_batches = 4
 lr = 0.0002
 es = 5
 min_epoch = 3
 max_epoch = 50
 dropout = 0.2
 negative_slope = 0.2
-node_emb_dim = 256
-g_emb_dim = 512
-label_pred_hidden_dims = [1024, 512, 256]
+# Further reduced model dimensions for memory efficiency
+node_emb_dim = 96
+g_emb_dim = 192
+label_pred_hidden_dims = [1024, 256]
 fusion_dims_node_emb = [256, 128]
-n_heads_pooling = 8
-n_heads_node_emb = 8
-n_heads_ge_decoder = 16
-n_heads_label_pred = 8
+n_heads_pooling = 4
+n_heads_node_emb = 4
+n_heads_ge_decoder = 4
+n_heads_label_pred = 4
 n_hop = 1
 
-chunk_size = 2048
-mem_safety_factor = 0.85
-operation_overhead = 3.3
+chunk_size = 256
+mem_safety_factor = 0.6
+operation_overhead = 2.5
 
-threshold_nmic = 0.0
-threshold_subg_overlap = 0.95
-threshold_edge_exist = 0.05
+threshold_nmic = 0.01
+threshold_subg_overlap = 0.85
+threshold_edge_exist = 0.03
 
 matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
-precision = "16-mixed"
-gradient_clip_val = 3.0
+precision = "32-true"
+# precision = "16-mixed"
+# Enable gradient checkpointing to trade compute for memory
+gradient_clip_val = 1.0
 
 n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.9)))
 
 time_format = "%Y%m%d%H%M%S"
 time_delay = 11.7
 # ckpt_fname_format = "best-model-{epoch:04d}-{val/loss:.4f}"
-ckpt_fname_format = "best-model-{epoch:04d}"
+# ckpt_fname_format = "best-model-{epoch:04d}"
+ckpt_fname_format = "best_model"
 optuna_db = "sqlite:///optuna.db"
 n_jobs = 1
 n_trials = 30

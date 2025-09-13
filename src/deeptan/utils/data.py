@@ -231,14 +231,22 @@ class NMICGraphDataset(GDataset):
             return None
 
         if len(avail_indices) < self.min_features:
-            logger.warning(f"Less than {self.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}")
+            logger.warning(
+                f"Less than {self.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}"
+            )
 
         # Filter edges based on available indices and edge attribute threshold
-        edge_mask = (self.edge_attr > self.edge_attr_threshold) & np.isin(self.edge_index[0], avail_indices) & np.isin(self.edge_index[1], avail_indices)
+        edge_mask = (
+            (self.edge_attr > self.edge_attr_threshold)
+            & np.isin(self.edge_index[0], avail_indices)
+            & np.isin(self.edge_index[1], avail_indices)
+        )
         filtered_edge_index = self.edge_index[:, edge_mask]
         # filtered_edge_attr = self.edge_attr[edge_mask]
 
-        final_indices = np.unique(np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.top_cv_indices))))
+        final_indices = np.unique(
+            np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.top_cv_indices)))
+        )
         if len(final_indices) < 1:
             logger.warning(f"No non-zero features for observation {idx} after filtering edges")
             return None
@@ -318,13 +326,21 @@ class NMICGraphDatasetRely(GDataset):
             return None
 
         if len(avail_indices) < self.depGDataset.min_features:
-            logger.warning(f"Less than {self.depGDataset.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}")
+            logger.warning(
+                f"Less than {self.depGDataset.min_features} ({len(avail_indices)}) non-zero features for the observation {idx}"
+            )
 
         # Filter edges based on available indices and edge attribute threshold
-        edge_mask = (self.depGDataset.edge_attr > self.depGDataset.edge_attr_threshold) & np.isin(self.depGDataset.edge_index[0], avail_indices) & np.isin(self.depGDataset.edge_index[1], avail_indices)
+        edge_mask = (
+            (self.depGDataset.edge_attr > self.depGDataset.edge_attr_threshold)
+            & np.isin(self.depGDataset.edge_index[0], avail_indices)
+            & np.isin(self.depGDataset.edge_index[1], avail_indices)
+        )
         filtered_edge_index = self.depGDataset.edge_index[:, edge_mask]
 
-        final_indices = np.unique(np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.depGDataset.top_cv_indices))))
+        final_indices = np.unique(
+            np.concatenate((filtered_edge_index.flatten(), np.intersect1d(avail_indices, self.depGDataset.top_cv_indices)))
+        )
         if len(final_indices) < 1:
             logger.warning(f"No non-zero features for observation {idx} after filtering edges")
             return None
@@ -399,7 +415,14 @@ class DeepTANDataModule(LightningDataModule):
             self.specify_features = specify_features
 
     def setup(self, stage=None):
-        self.train = NMICGraphDataset(self.files["trn"], self.labels, self.edge_attr_threshold, self.specify_features, self.if_log1p, self.min_features)
+        self.train = NMICGraphDataset(
+            self.files["trn"],
+            self.labels,
+            self.edge_attr_threshold,
+            self.specify_features,
+            self.if_log1p,
+            self.min_features,
+        )
         self.val = NMICGraphDatasetRely(self.files["val"], self.train, self.if_log1p)
         self.test = NMICGraphDatasetRely(self.files["tst"], self.train, self.if_log1p)
         self.dict_node_names = {name: idx for idx, name in enumerate(self.train.node_names)}
@@ -450,7 +473,10 @@ class DeepTANDataModuleLit(LightningDataModule):
 
     def setup(self, stage=None):
         self.dataloder_trn = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_train), max_cache_size=const.default.lit_max_cache_size),
+            StreamingDataset(
+                os.path.join(self.litdata_dir, const.dkey.abbr_train),
+                max_cache_size=const.default.lit_max_cache_size,
+            ),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -461,7 +487,10 @@ class DeepTANDataModuleLit(LightningDataModule):
             drop_last=True,
         )
         self.dataloader_val = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_val), max_cache_size=const.default.lit_max_cache_size),
+            StreamingDataset(
+                os.path.join(self.litdata_dir, const.dkey.abbr_val),
+                max_cache_size=const.default.lit_max_cache_size,
+            ),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -470,7 +499,10 @@ class DeepTANDataModuleLit(LightningDataModule):
             collate_fn=collate_fn,
         )
         self.dataloader_test = StreamingDataLoader(
-            StreamingDataset(os.path.join(self.litdata_dir, const.dkey.abbr_test), max_cache_size=const.default.lit_max_cache_size),
+            StreamingDataset(
+                os.path.join(self.litdata_dir, const.dkey.abbr_test),
+                max_cache_size=const.default.lit_max_cache_size,
+            ),
             batch_size=self.batch_size,
             num_workers=self.n_workers,
             persistent_workers=True,
@@ -487,132 +519,6 @@ class DeepTANDataModuleLit(LightningDataModule):
 
     def test_dataloader(self):
         return self.dataloader_test
-
-
-def generate_random_graph(num_nodes: int, num_features: int, num_classes: int | None, is_regression: bool) -> GData:
-    """
-    Generate a random graph data object with graph-level labels.
-
-    Args:
-        num_nodes (int): Number of nodes in the graph.
-        num_features (int): Feature dimension of each node.
-        num_classes (int): Number of classes (for classification) or output dimension (for regression).
-        is_regression (bool): Whether the task is regression.
-
-    Returns:
-        Data: Randomly generated graph data object.
-    """
-    # Randomly generate node features
-    x = torch.randn(num_nodes, num_features)  # Node feature matrix (num_nodes, num_features)
-
-    # Randomly generate edge indices (using Erdős-Rényi model to generate a random graph)
-    edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.2)  # Edge indices (2, num_edges)
-
-    # Randomly generate edge attributes
-    edge_attr = torch.rand(edge_index.size(1), 1)  # Edge attribute matrix (num_edges, 1)
-
-    # Randomly generate node names (assuming node names are strings)
-    node_names = [f"node_{i}" for i in range(num_nodes)]
-
-    # Remove edges with weights less than the threshold 0.2
-    mask = edge_attr.squeeze() > 0.2
-    edge_index = edge_index[:, mask]
-    edge_attr = edge_attr[mask]  # Filtered edge attribute matrix (num_filtered_edges, 1)
-
-    if num_classes is None:
-        # Create the graph data object
-        graph_data = GData(
-            x=x,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            node_names=node_names,
-        )
-    else:
-        # Randomly generate graph-level labels
-        if is_regression:
-            y = torch.rand(1, num_classes)  # Regression task labels (1, output_dim), representing the entire graph
-        else:
-            y = torch.randint(0, num_classes, (1,))  # Classification task labels (1,), representing the entire graph
-
-        # Create the graph data object
-        graph_data = GData(
-            x=x,
-            edge_index=edge_index,
-            edge_attr=edge_attr,
-            y=y,
-            node_names=node_names,
-        )
-
-    return graph_data
-
-
-class RandomGraphDataset(GDataset):
-    def __init__(
-        self,
-        num_graphs: int = 100,
-        num_nodes_max: int = 100,
-        node_dim: int = 16,
-        num_label_classes: int | None = 10,
-        is_regression: bool = False,
-    ):
-        self.num_graphs = num_graphs
-        self.num_nodes_max = num_nodes_max
-        self.node_dim = node_dim
-        self.num_label_classes = num_label_classes
-        self.is_regression = is_regression
-        super().__init__()
-
-    def len(self):
-        return self.num_graphs
-
-    def get(self, idx):
-        return generate_random_graph(
-            self.num_nodes_max,
-            self.node_dim,
-            self.num_label_classes,
-            self.is_regression,
-        )
-
-
-class GraphDataModule(LightningDataModule):
-    def __init__(
-        self,
-        train_dataset: GDataset,
-        val_dataset: GDataset,
-        test_dataset: GDataset,
-        batch_size: int = 4,
-    ):
-        super().__init__()
-        self.train_dataset = train_dataset
-        self.val_dataset = val_dataset
-        self.test_dataset = test_dataset
-        self.batch_size = batch_size
-
-    def train_dataloader(self):
-        return GDataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
-
-    def val_dataloader(self):
-        return GDataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
-
-    def test_dataloader(self):
-        return GDataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
-
-
-def random_g_datamodule(
-    num_graphs: int,
-    node_dim: int,
-    num_nodes_max: int = 1000,
-    num_label_classes: int | None = 10,
-    is_regression: bool = False,
-    batch_size: int = 4,
-):
-    train_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
-    val_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
-    test_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
-    # pred_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
-
-    ltn_dm = GraphDataModule(train_dataset, val_dataset, test_dataset, batch_size)
-    return ltn_dm
 
 
 def read_h5ad(h5ad_file: str) -> anndata.AnnData:
@@ -1006,3 +912,131 @@ def read_nmic_results(npz_path: str):
     print(df, "\n")
     print(df.columns)
     # The first column is obs_names, other columns are features.
+
+
+'''
+def generate_random_graph(num_nodes: int, num_features: int, num_classes: int | None, is_regression: bool) -> GData:
+    """
+    Generate a random graph data object with graph-level labels.
+
+    Args:
+        num_nodes (int): Number of nodes in the graph.
+        num_features (int): Feature dimension of each node.
+        num_classes (int): Number of classes (for classification) or output dimension (for regression).
+        is_regression (bool): Whether the task is regression.
+
+    Returns:
+        Data: Randomly generated graph data object.
+    """
+    # Randomly generate node features
+    x = torch.randn(num_nodes, num_features)  # Node feature matrix (num_nodes, num_features)
+
+    # Randomly generate edge indices (using Erdős-Rényi model to generate a random graph)
+    edge_index = erdos_renyi_graph(num_nodes, edge_prob=0.2)  # Edge indices (2, num_edges)
+
+    # Randomly generate edge attributes
+    edge_attr = torch.rand(edge_index.size(1), 1)  # Edge attribute matrix (num_edges, 1)
+
+    # Randomly generate node names (assuming node names are strings)
+    node_names = [f"node_{i}" for i in range(num_nodes)]
+
+    # Remove edges with weights less than the threshold 0.2
+    mask = edge_attr.squeeze() > 0.2
+    edge_index = edge_index[:, mask]
+    edge_attr = edge_attr[mask]  # Filtered edge attribute matrix (num_filtered_edges, 1)
+
+    if num_classes is None:
+        # Create the graph data object
+        graph_data = GData(
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            node_names=node_names,
+        )
+    else:
+        # Randomly generate graph-level labels
+        if is_regression:
+            y = torch.rand(1, num_classes)  # Regression task labels (1, output_dim), representing the entire graph
+        else:
+            y = torch.randint(0, num_classes, (1,))  # Classification task labels (1,), representing the entire graph
+
+        # Create the graph data object
+        graph_data = GData(
+            x=x,
+            edge_index=edge_index,
+            edge_attr=edge_attr,
+            y=y,
+            node_names=node_names,
+        )
+
+    return graph_data
+
+
+class RandomGraphDataset(GDataset):
+    def __init__(
+        self,
+        num_graphs: int = 100,
+        num_nodes_max: int = 100,
+        node_dim: int = 16,
+        num_label_classes: int | None = 10,
+        is_regression: bool = False,
+    ):
+        self.num_graphs = num_graphs
+        self.num_nodes_max = num_nodes_max
+        self.node_dim = node_dim
+        self.num_label_classes = num_label_classes
+        self.is_regression = is_regression
+        super().__init__()
+
+    def len(self):
+        return self.num_graphs
+
+    def get(self, idx):
+        return generate_random_graph(
+            self.num_nodes_max,
+            self.node_dim,
+            self.num_label_classes,
+            self.is_regression,
+        )
+
+
+class GraphDataModule(LightningDataModule):
+    def __init__(
+        self,
+        train_dataset: GDataset,
+        val_dataset: GDataset,
+        test_dataset: GDataset,
+        batch_size: int = 4,
+    ):
+        super().__init__()
+        self.train_dataset = train_dataset
+        self.val_dataset = val_dataset
+        self.test_dataset = test_dataset
+        self.batch_size = batch_size
+
+    def train_dataloader(self):
+        return GDataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True)
+
+    def val_dataloader(self):
+        return GDataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False)
+
+    def test_dataloader(self):
+        return GDataLoader(self.test_dataset, batch_size=self.batch_size, shuffle=False)
+
+
+def random_g_datamodule(
+    num_graphs: int,
+    node_dim: int,
+    num_nodes_max: int = 1000,
+    num_label_classes: int | None = 10,
+    is_regression: bool = False,
+    batch_size: int = 4,
+):
+    train_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+    val_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+    test_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+    # pred_dataset = RandomGraphDataset(num_graphs, num_nodes_max, node_dim, num_label_classes, is_regression)
+
+    ltn_dm = GraphDataModule(train_dataset, val_dataset, test_dataset, batch_size)
+    return ltn_dm
+'''

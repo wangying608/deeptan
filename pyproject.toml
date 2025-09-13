@@ -12,8 +12,8 @@ readme = "README.md"
 requires-python = ">=3.10, <3.14"
 dependencies = [
     "leidenalg>=0.10.2",
-    "lightning>=2.5.1.post0",
-    "litdata>=0.2.49",
+    "lightning>=2.5.2",
+    "litdata>=0.2.51",
     "loguru>=0.7.3",
     "mosaicml-streaming>=0.12.0",
     "numpy>=2.1.2",
@@ -37,7 +37,7 @@ dependencies = [
     "torch_sparse",
     "torch_cluster",
     "torch_spline_conv",
-    "torchmetrics>=1.7.1",
+    "torchmetrics>=1.8.0",
     "zstd>=1.5.7.0",
     "setuptools>=78.1.1",
     "jupyterlab>=4.4.3",
@@ -120,4 +120,4 @@ torch_spline_conv = [
 ]
 
 [tool.ruff]
-line-length = 288
+line-length = 124

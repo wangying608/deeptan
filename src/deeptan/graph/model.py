@@ -23,8 +23,6 @@ from lightning.pytorch.callbacks import (
 )
 from lightning.pytorch.loggers import TensorBoardLogger
 from loguru import logger
-
-# from lightning.pytorch.profilers import AdvancedProfiler
 from torch.optim.adamw import AdamW
 from torch_geometric.data import Data as GData
 from torchmetrics import MetricCollection
@@ -44,7 +42,7 @@ from torchmetrics.regression import (
 
 import deeptan.constants as const
 from deeptan.constants.art import ascii_art
-from deeptan.graph.modules import AMSGP, GE_Decoder, GLabelPredictor
+from deeptan.graph.modules import AMSGP, FocalLoss, GE_Decoder, GLabelPredictor
 from deeptan.utils.data import (
     DeepTANDataModule,
     DeepTANDataModuleLit,
@@ -57,40 +55,6 @@ torch.set_float32_matmul_precision(const.default.matmul_precision)
 # torch._dynamo.config.suppress_errors = True
 # torch._dynamo.config.capture_scalar_outputs = True
 # torch._dynamo.config.capture_dynamic_output_shape_ops = True
-
-
-class FocalLoss(torch.nn.Module):
-    r"""Multi-class Focal Loss
-    Formula: loss = -alpha * (1-p)^gamma * log(p)
-    """
-
-    def __init__(
-        self,
-        gamma: float = 0.0,
-        alpha: Optional[torch.Tensor] = None,
-        reduction: str = "mean",
-    ):
-        super().__init__()
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-
-    def forward(self, inputs, targets):
-        ce_loss = F.cross_entropy(
-            inputs,
-            targets,
-            weight=None,
-            reduction="none",
-        )
-        pt = torch.exp(-ce_loss)
-        loss = (1 - pt) ** self.gamma * ce_loss
-
-        if self.alpha is not None:
-            alpha = self.alpha.to(inputs.device)
-            alpha_weight = alpha[targets]
-            loss = alpha_weight * loss
-
-        return loss.mean() if self.reduction == "mean" else loss
 
 
 class DeepTAN(ltn.LightningModule):
@@ -156,7 +120,6 @@ class DeepTAN(ltn.LightningModule):
         self.focus_task = focus_task
         self.guide_gat = guide_gat
 
-        self.chunk_size = chunk_size
         self.input_dim = input_dim
         self.is_regression = is_regression
         self.lr = lr
@@ -194,7 +157,6 @@ class DeepTAN(ltn.LightningModule):
             threshold_edge_exist=threshold_edge_exist,
             threshold_subgraph_overlap=threshold_subgraph_overlap,
             dropout=dropout,
-            chunk_size=self.chunk_size,
         )
 
         # Multi-task decoders
@@ -204,9 +166,8 @@ class DeepTAN(ltn.LightningModule):
             output_dim=input_dim,
             hidden_dim=node_emb_dim,
             dropout=dropout,
-            chunk_size=self.chunk_size,
-            n_heads=n_heads_ge_decoder,
-            n_res_blocks=8,
+            # n_heads=n_heads_ge_decoder,
+            n_layers=4,
         )
 
         # Graph-level label predictor
@@ -215,36 +176,44 @@ class DeepTAN(ltn.LightningModule):
             self.output_dim,
             const.default.label_pred_hidden_dims,
             dropout,
-            n_heads=n_heads_label_pred,
+            # n_heads=n_heads_label_pred,
         )
 
         # Metrics and initialization
         self._init_metrics()
 
     def forward(self, batch: GData) -> Dict[str, Any]:
+        # logger.info("Starting forward pass...")
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(batch, "batch", torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device))
 
         # Initialize scale factors
-        self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
+        # self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
 
         # Embedding features
-        z, E_all, ids = self.amsgp(
+        z, ids = self.amsgp(
             node_names=batch.node_names,
             x=batch.x,
-            edge_attr=batch.edge_attr if self.guide_gat else None,
+            # edge_attr=batch.edge_attr if self.guide_gat else None,
             edge_index=batch.edge_index,
             batch=node_batch,
         )
+        # logger.info("AMSGP done")
 
         # Reconstruct node embeddings
-        recon_node_emb, pred_feat_values = self.ge_decoder(z, E_all)
+        recon_node_emb, pred_feat_values = self.ge_decoder(z, self.amsgp.node_embedding_layers.embed.weight)
+        # logger.info("GE Decoder done")
 
         # Graph-level label prediction
         pred_labels = self.g_label_predictor(z)
+        # logger.info("Graph Label Predictor done")
 
         # Node-level reconstruction loss
-        predicted_value_for_loss_nonzero, predicted_value_for_loss_zero = self.create_node_masks(batch.node_names, pred_feat_values, ids, self.device)
+        predicted_value_for_loss_nonzero, predicted_value_for_loss_zero = self.create_node_masks(
+            batch.node_names, pred_feat_values, ids, self.device
+        )
+        # logger.info("Node Reconstruction Loss Masks Created")
+        # logger.success("Training Step Done")
 
         return {
             "embedding": z,
@@ -269,20 +238,44 @@ class DeepTAN(ltn.LightningModule):
         return self(batch)
 
     def configure_optimizers(self):
-        optimizer = AdamW(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
-            optimizer,
-            T_0=5,
-            T_mult=1,
-            eta_min=1e-6,
+        optimizer = AdamW(
+            self.parameters(),
+            lr=self.lr,
+            weight_decay=1e-5,  # Add weight decay for regularization
+            betas=(0.9, 0.999),
+            eps=1e-8,
         )
+
+        # Improved learning rate scheduling with warm restart and plateau detection
+        # warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        #     optimizer,
+        #     start_factor=0.1,
+        #     total_iters=3  # 3 epochs warmup
+        # )
+
+        # cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        #     optimizer,
+        #     T_0=7,  # Restart every 7 epochs
+        #     T_mult=2,  # Double restart period each time
+        #     eta_min=1e-7,  # Minimum learning rate
+        # )
+
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.5,
+            patience=3,  # Reduce LR if no improvement for 3 epochs
+            min_lr=1e-7,
+        )
+
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
-                "scheduler": scheduler,
+                "scheduler": plateau_scheduler,
+                "monitor": const.dkey.title_val_loss,
                 "interval": "epoch",
                 "frequency": 1,
-                "monitor": const.dkey.title_val_loss,
+                "strict": True,
             },
         }
 
@@ -359,7 +352,7 @@ class DeepTAN(ltn.LightningModule):
         self._log_metrics(losses, stage)
 
         # del outputs
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
         return losses["loss"]
 
@@ -386,7 +379,9 @@ class DeepTAN(ltn.LightningModule):
                 }
             )
 
-            self.metrics_task_regr = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_regr.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
+            self.metrics_task_regr = torch.nn.ModuleDict(
+                {f"{k}_metrics": metrics_task_regr.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]}
+            )
 
         else:
             metrics_task_class = MetricCollection(
@@ -405,11 +400,17 @@ class DeepTAN(ltn.LightningModule):
                 }
             )
 
-            self.metrics_task_class = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_class.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
-            self.metrics_task_prob = torch.nn.ModuleDict({f"{k}_metrics": metrics_task_prob.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]})
+            self.metrics_task_class = torch.nn.ModuleDict(
+                {f"{k}_metrics": metrics_task_class.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]}
+            )
+            self.metrics_task_prob = torch.nn.ModuleDict(
+                {f"{k}_metrics": metrics_task_prob.clone(prefix=f"{k}/label_") for k in ["train", "val", "test"]}
+            )
 
         # Create metrics for all stages
-        self.metrics_common = torch.nn.ModuleDict({f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_") for k in ["train", "val", "test"]})
+        self.metrics_common = torch.nn.ModuleDict(
+            {f"{k}_metrics": metrics_common.clone(prefix=k + "/recon_") for k in ["train", "val", "test"]}
+        )
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
         losses = {}
@@ -496,7 +497,9 @@ class DeepTAN(ltn.LightningModule):
 
                 else:
                     # Calculate total loss with dynamic scaling
-                    total_loss = 0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
+                    total_loss = (
+                        0.5 * losses["recon"] + 0.5 * losses["label"] / (losses["label"] / self.loss_smooth).detach()
+                    )
 
                 self.loss_smooth = 0.1 * total_loss.detach() + 0.9 * self.loss_smooth
 
@@ -651,7 +654,9 @@ class DeepTANTune:
         self.existing_model_path = existing_model_path
 
         if focus not in [None, "recon", "label", "recon_and_freeze", "label_and_freeze"]:
-            raise ValueError("Invalid focus option. Choose from 'None', 'recon', 'label', 'recon_and_freeze', or 'label_and_freeze'.")
+            raise ValueError(
+                "Invalid focus option. Choose from 'None', 'recon', 'label', 'recon_and_freeze', or 'label_and_freeze'."
+            )
 
         self.freeze_label = False
         self.freeze_recon = False
@@ -722,7 +727,9 @@ class DeepTANTune:
         if self.path_label_onehot is not None:
             logger.info("\nPre-defined label onehot file found. Computing class weights...\n")
             return celltypes_class_weights(pl.read_parquet(self.path_label_onehot))
-        logger.info(f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n")
+        logger.info(
+            f"\nNo pre-defined label onehot file ( {self.path_label_onehot} ) found. Skipping class weights computation...\n"
+        )
         return None
 
     def create_model(self, trial_params: Dict[str, Any]) -> DeepTAN:
@@ -737,7 +744,7 @@ class DeepTANTune:
             node_emb_dim = _amsgp.node_embedding_layers.embedding_dim
             fusion_dims_node_emb = _amsgp.node_embedding_layers.fusion_dims
             n_heads_node_emb = _amsgp.node_embedding_layers.n_heads
-            n_heads_pooling = _amsgp.xgat_pool.num_heads
+            n_heads_pooling = _amsgp.xgat_pool1.heads
             n_hop = _amsgp.n_hop
         else:
             output_dim_g_emb = trial_params.get("output_dim_g_emb", self.args["output_dim_g_emb"])
@@ -758,7 +765,9 @@ class DeepTANTune:
             output_dim_g_emb=output_dim_g_emb,
             n_hop=n_hop,
             threshold_edge_exist=trial_params.get("threshold_edge_exist", self.args["threshold_edge_exist"]),
-            threshold_subgraph_overlap=trial_params.get("threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]),
+            threshold_subgraph_overlap=trial_params.get(
+                "threshold_subgraph_overlap", self.args["threshold_subgraph_overlap"]
+            ),
             n_heads_node_emb=n_heads_node_emb,
             n_heads_pooling=n_heads_pooling,
             n_heads_ge_decoder=trial_params.get("n_heads_ge_decoder", self.args["n_heads_ge_decoder"]),
@@ -794,7 +803,7 @@ class DeepTANTune:
             node_emb_dim = _amsgp.node_embedding_layers.embedding_dim
             fusion_dims_node_emb = _amsgp.node_embedding_layers.fusion_dims
             n_heads_node_emb = _amsgp.node_embedding_layers.n_heads
-            n_heads_pooling = _amsgp.xgat_pool.num_heads
+            n_heads_pooling = _amsgp.xgat_pool1.heads
             n_hop = _amsgp.n_hop
         else:
             output_dim_g_emb = self.args["output_dim_g_emb"]
@@ -847,7 +856,9 @@ class DeepTANTune:
         Load a checkpoint from the given path and extract its graph embedding and decoding module.
         """
         path_hparams = os.path.join(os.path.dirname(existing_model_path), "version_0", "hparams.yaml")
-        _model_pre = DeepTAN.load_from_checkpoint(existing_model_path, map_location=get_map_location(), hparams_file=path_hparams)
+        _model_pre = DeepTAN.load_from_checkpoint(
+            existing_model_path, map_location=get_map_location(), hparams_file=path_hparams
+        )
 
         # Extract AMSGP modules
         _model_amsgp = _model_pre.amsgp
@@ -855,13 +866,15 @@ class DeepTANTune:
 
         dict_node_names_former = _model_amsgp.node_embedding_layers.dict_node_names
         if set(dict_node_names_new.keys()) != set(dict_node_names_former.keys()):
-            logger.info("\nUpdating dict_node_names in NodeEmbedding")
+            logger.info("Updating dict_node_names in NodeEmbedding")
             new_nodes_to_append = set(dict_node_names_new.keys()) - set(dict_node_names_former.keys())
             n_node_former = len(dict_node_names_former)
             n_node_add = len(new_nodes_to_append)
             new_node_num = n_node_former + n_node_add
             dict_to_add = {node: n_node_former + i for i, node in enumerate(new_nodes_to_append)}
-            logger.info(f"The feature embedding module is extended from {n_node_former} to {new_node_num} with {n_node_add} new features.\n")
+            logger.info(
+                f"The feature embedding module is extended from {n_node_former} to {new_node_num} with {n_node_add} new features."
+            )
 
             # Update dict_node_names in NodeEmbedding
             dict_node_names_former.update(dict_to_add)
@@ -878,7 +891,7 @@ class DeepTANTune:
             _model_amsgp.node_embedding_layers.embed = new_embed
 
         else:
-            logger.info("\ndict_node_names in NodeEmbedding is the same")
+            logger.info("dict_node_names in NodeEmbedding is the same")
 
         return _model_amsgp, _model_ge_decoder
 
@@ -902,7 +915,7 @@ class DeepTANTune:
         """Optuna objective function for hyperparameter optimization."""
 
         time_delay = const.default.time_delay * random.uniform(0.3, 1.1)
-        logger.info(f"\nWaiting for {time_delay} seconds...\n")
+        logger.info(f"Waiting for {time_delay} seconds...\n")
         time.sleep(time_delay)
         logger.info(f"Starting trial number: {trial.number}\n")
 
@@ -919,7 +932,9 @@ class DeepTANTune:
                 "n_heads_pooling": trial.suggest_categorical("n_heads_pooling", [2, 4, 8]),
                 "n_heads_ge_decoder": trial.suggest_categorical("n_heads_ge_decoder", [2, 4, 8]),
                 "n_heads_label_pred": trial.suggest_categorical("n_heads_label_pred", [2, 4, 8]),
-                "fusion_dims_node_emb": trial.suggest_categorical("fusion_dims_node_emb", fusion_dims_node_emb_list_strings),
+                "fusion_dims_node_emb": trial.suggest_categorical(
+                    "fusion_dims_node_emb", fusion_dims_node_emb_list_strings
+                ),
                 "output_dim_g_emb": trial.suggest_categorical("output_dim_g_emb", [192, 256, 384]),
                 "n_hop": trial.suggest_int("n_hop", 1, 2),
             }
@@ -941,16 +956,16 @@ class DeepTANTune:
             )
 
             if val_loss is None:
-                logger.warning(f"\n\nThe validation loss for trial {trial.number} is None. Skipping trial.\n")
+                logger.warning(f"The validation loss for trial {trial.number} is None. Skipping trial.\n")
                 raise optuna.TrialPruned()
 
             return val_loss
 
         except torch.cuda.OutOfMemoryError:
-            logger.warning("\n\nOut of memory error, skipping trial\n")
+            logger.warning("Out of memory error, skipping trial\n")
             raise optuna.TrialPruned()
         except Exception as e:
-            logger.error(f"\n\nAn error occurred in trial {trial.number}: {e}\n")
+            logger.error(f"An error occurred in trial {trial.number}: {e}\n")
             raise optuna.TrialPruned()
 
     def optimize(self, n_trials: int = 100, n_jobs: int = 1):
