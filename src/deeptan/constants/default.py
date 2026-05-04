@@ -10,13 +10,12 @@ from numpy import ceil
 bs = 8
 accumulate_grad_batches = 4
 lr = 0.0002
-es = 5
+es = 10
 min_epoch = 3
-max_epoch = 50
+max_epoch = 100
 dropout = 0.2
 negative_slope = 0.2
-# Further reduced model dimensions for memory efficiency
-node_emb_dim = 96
+node_emb_dim = 128
 g_emb_dim = 192
 label_pred_hidden_dims = [1024, 256]
 fusion_dims_node_emb = [256, 128]
@@ -38,16 +37,12 @@ matmul_precision = "high"
 accelerator = "auto"
 devices = "auto"
 precision = "32-true"
-# precision = "16-mixed"
-# Enable gradient checkpointing to trade compute for memory
 gradient_clip_val = 1.0
 
 n_threads = int(getenv("NUM_THREADS", ceil(cpu_count() * 0.9)))
 
 time_format = "%Y%m%d%H%M%S"
 time_delay = 11.7
-# ckpt_fname_format = "best-model-{epoch:04d}-{val/loss:.4f}"
-# ckpt_fname_format = "best-model-{epoch:04d}"
 ckpt_fname_format = "best_model"
 optuna_db = "sqlite:///optuna.db"
 n_jobs = 1

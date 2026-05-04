@@ -101,30 +101,19 @@ class GetAdaptiveChunkSize:
         return int(np.prod(tensor_shape) * dtype.itemsize)
 
 
-# def get_map_location(map_loc: Optional[str] = None):
-#     if map_loc is None:
-#         if cuda.device_count() > 0:
-#             which_dev = find_usable_cuda_devices(1)
-#             if len(which_dev) == 0:
-#                 return "cpu"
-#             else:
-#                 return f"cuda:{which_dev[0]}"
-#         else:
-#             return "cpu"
-#     else:
-#         return map_loc
-
 def get_map_location(map_loc: Optional[str] = None):
     if map_loc is None:
-        # 强制使用GPU 1
-        if cuda.device_count() > 1:  # 确保有多块GPU
-            return "cuda:1"  # 指定使用GPU 1
-        elif cuda.device_count() == 1:
-            return "cuda:0"  # 只有一块GPU时使用GPU 0
+        if cuda.device_count() > 0:
+            which_dev = find_usable_cuda_devices(1)
+            if len(which_dev) == 0:
+                return "cpu"
+            else:
+                return f"cuda:{which_dev[0]}"
         else:
             return "cpu"
     else:
         return map_loc
+
 
 def time_string() -> str:
     _time_str = time.strftime(const.default.time_format, time.localtime())

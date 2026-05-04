@@ -132,13 +132,13 @@ class DeepTAN(ltn.LightningModule):
         focal_alpha = None
         if focal_alpha is None:
             if class_weights is not None:
-                self.focal_alpha = torch.tensor(class_weights)
+                self.focal_alpha = torch.tensor(class_weights, dtype=torch.float32)
                 # Smooth the class weights by adding average class weights and dividing by 2
                 self.focal_alpha = (self.focal_alpha + self.focal_alpha.mean()) / 2.0
             else:
-                self.focal_alpha = torch.tensor([1.0] * self.output_dim)
+                self.focal_alpha = torch.tensor([1.0] * self.output_dim, dtype=torch.float32)
         else:
-            self.focal_alpha = torch.tensor(focal_alpha)
+            self.focal_alpha = torch.tensor(focal_alpha, dtype=torch.float32)
         self.focal_gamma = 0.5
         self.current_epoch_work = 0
         self.current_epoch_tmp = 0
@@ -179,6 +179,7 @@ class DeepTAN(ltn.LightningModule):
             # n_heads=n_heads_label_pred,
         )
 
+        self.float()
         # Metrics and initialization
         self._init_metrics()
 
@@ -186,6 +187,10 @@ class DeepTAN(ltn.LightningModule):
         # logger.info("Starting forward pass...")
         # Extract batch information if available, otherwise initialize with zeros
         node_batch = getattr(batch, "batch", torch.zeros(batch.x.size(0), dtype=torch.long, device=self.device))
+        if batch.x.dtype != torch.float32:
+            batch.x = batch.x.float()
+        if batch.edge_index.dtype != torch.long:
+            batch.edge_index = batch.edge_index.long()
 
         # Initialize scale factors
         # self.scale_factors = torch.ones(2, dtype=torch.float32, device=self.device).softmax(dim=0)
@@ -414,13 +419,19 @@ class DeepTAN(ltn.LightningModule):
 
     def _compute_losses(self, outputs: Dict, batch: GData, stage: str) -> Dict:
         losses = {}
-
         node_true_val_for_loss = batch.x.squeeze(1)
+        if node_true_val_for_loss.dtype != torch.float32:
+            node_true_val_for_loss = node_true_val_for_loss.float()
+
 
         self.metrics_common[f"{stage}_metrics"].update(outputs["node_recon_for_loss"], node_true_val_for_loss)
 
         # Node reconstruction loss
         recon_loss = F.mse_loss(outputs["node_recon_for_loss"], node_true_val_for_loss)
+
+        zeros_target = torch.zeros_like(outputs["node_recon_for_loss_zeros"])
+        if zeros_target.dtype != torch.float32:
+            zeros_target = zeros_target.float()
 
         recon_loss_zeros = F.mse_loss(
             outputs["node_recon_for_loss_zeros"],
@@ -430,7 +441,7 @@ class DeepTAN(ltn.LightningModule):
         losses["recon_MSE"] = recon_loss
         losses["recon_zeros"] = recon_loss_zeros
 
-        losses["recon"] = recon_loss + recon_loss_zeros
+        losses["recon"] = recon_loss + recon_loss_zeros        
 
         # Graph-level label prediction loss
         if batch.y is None:
@@ -898,6 +909,7 @@ class DeepTANTune:
     def _train_on_args(self):
         """This function is used for training the model with the given arguments."""
         _model = self._init_model()
+        
 
         train_model(
             model=_model,
@@ -918,6 +930,7 @@ class DeepTANTune:
         logger.info(f"Waiting for {time_delay} seconds...\n")
         time.sleep(time_delay)
         logger.info(f"Starting trial number: {trial.number}\n")
+        
 
         try:
             fusion_dims_node_emb_lists_to_try = [[128, 64], [64, 32]]

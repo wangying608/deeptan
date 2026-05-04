@@ -1,2 +1,0 @@
-Method,Capability,fname,weighted_f1,macro_f1,micro_f1,auroc,auprc,accuracy,weighted_precision,weighted_recall,seed,seed_num,task,split,path
-DeepTAN,Labelling,preds+seed_42+multitask_diffpool+tst.h5,0.19183407870193606,0.19180185261122878,0.22723609991941982,NaN,0.21940788141814443,0.22723609991941982,0.21437561295539517,0.22723609991941982,seed_42,42,multitask_diffpool,tst,/mnt/hdd2/homext/wuch/xn2p/run/predict/deeptan/snrna_full/preds+seed_42+multitask_diffpool+tst.h5

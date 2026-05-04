@@ -9,8 +9,6 @@ import numpy as np
 import pacmap
 import polars as pl
 import scanpy as sc
-import pandas as pd
-import matplotlib.pyplot as plt
 import scipy
 from scib_metrics import kbet, silhouette_label
 from scib_metrics.nearest_neighbors import jax_approx_min_k
@@ -142,7 +140,7 @@ class MetricsDictMaker:
                 _path = os.path.join(self.true_data_dir, f"split_{_seed}_{i}.parquet")
                 self.xxx_data_df[f"seed_{_seed}_{_split}"] = pl.read_parquet(_path).select(feature_names_seed_xx).sort("obs_names")
                 xxx_data = self.xxx_data_df[f"seed_{_seed}_{_split}"].drop(["obs_names"]).to_numpy()
-                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)   ####log1p
+                self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["X"] = np.log1p(xxx_data)
 
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["obs_names"] = self.xxx_data_df[f"seed_{_seed}_{_split}"]["obs_names"].to_list()
                 self.metrics_dict["true"][f"seed_{_seed}_{_split}"]["feature_names"] = feature_names_seed_xx[1:]
@@ -269,7 +267,7 @@ class MetricsDictMaker:
         self.metrics_dict["summary_clustering"] = _tmp.join(self.ident, on="fname", how="left")
 
     def compute_all_metrics(self):
-        """Computes all metrics for the predictions"""
+        """Computes all metrics for the predictions."""
 
         # For reconstruction
         print("\nComputing metrics for recon...")
@@ -396,7 +394,8 @@ class MetricsDictMaker:
         obs_names_pred_str = [i.decode("utf-8") for i in obs_names_pred]
         sorted_indices = [idx for idx, name in sorted(enumerate(obs_names_pred_str), key=lambda x: x[1])]
         return sorted_indices
-  
+
+
 class RegressionMetricsCalculator:
     r"""
     Optimized class to compute metrics between two 2D numpy arrays with minimized code duplication.
@@ -531,6 +530,7 @@ class MulticlassMetricsCalculator:
         # Convert predicted probabilities to predicted labels
         self._pred_labels = np.argmax(pred_probs, axis=1)
         self._true = np.argmax(self._true_df, axis=1)
+
         # Find unique labels to avoid errors in confusion matrix
         self._unique_labels = np.unique(np.concatenate((self._true, self._pred_labels)))
         self._unique_labels.sort()
@@ -562,6 +562,10 @@ class MulticlassMetricsCalculator:
             raise ValueError("True labels must be a 1-dimensional array.")
         if len(self._pred_probs.shape) != 2:
             raise ValueError("Predicted probabilities must be a 2-dimensional array.")
+        # if self._true.shape[0] != self._pred_probs.shape[0]:
+        #     raise ValueError("True labels and predicted probabilities must have the same number of samples.")
+        # if self._pred_probs.shape[1] != self._num_classes:
+        #     raise ValueError("Number of columns in predicted probabilities must match the number of classes.")
         if not np.allclose(self._pred_probs.sum(axis=1), 1.0, atol=1e-3):
             raise ValueError("Predicted probabilities must be softmax normalized (rows should sum to 1)")
 

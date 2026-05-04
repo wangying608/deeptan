@@ -27,7 +27,7 @@ def read_csv_celltypes2onehot(csv_path):
     df.columns = ["bc", "ct"]
 
     # One-hot encode the 'ct' column
-    df_one_hot = df.to_dummies(columns=["ct"])
+    df_one_hot = df_one_hot = df.to_dummies(columns=["ct"])
 
     # Add a new column "ct_unknown" which all values are 0 (type: u8)
     col_unk = pl.Series("ct_unknown", [0] * len(df_one_hot), dtype=pl.UInt8)
@@ -59,7 +59,7 @@ def read_h5ad_celltypes2onehot(h5ad_path, celltype_key="Celltype"):
 
 def celltypes_class_weights(df_onehot: pl.DataFrame) -> List[float]:
     r"""
-    Compute class weights for weighted cross entropy loss
+    Compute class weights for weighted cross entropy loss.
     """
     class_weights = df_onehot.select(pl.exclude("bc")).sum().to_numpy().flatten()
     class_weights[-1] = class_weights.mean()
@@ -393,7 +393,7 @@ class DeepTANDataModule(LightningDataModule):
         edge_attr_threshold: float = 0.0,
         specify_features: Union[None, str, List[str]] = None,
         if_log1p: bool = True,
-        min_features: int = 10,
+        min_features: int = 50,
     ):
         super().__init__()
         if files.keys() != {"trn", "val", "tst"}:

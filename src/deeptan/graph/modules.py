@@ -11,9 +11,11 @@ from torch_geometric.data import Data as GData
 from torch_geometric.nn import GATv2Conv, SAGPooling
 from torch_geometric.utils import k_hop_subgraph, subgraph, to_undirected
 from torch.utils.checkpoint import checkpoint
+import torch.nn.functional as F 
 
 import deeptan.constants as const
 from deeptan.utils.uni import GetAdaptiveChunkSize
+from torch_scatter import scatter_add
 
 
 class AMSGP(torch.nn.Module):
@@ -105,13 +107,15 @@ class AMSGP(torch.nn.Module):
             start_idx += count
 
         for i, (node_indices, graph_node_names) in enumerate(zip(node_indices_list, node_names_splits)):
+            # logger.debug(f"Batch {i}: {len(node_indices)} nodes")
+            assert (node_indices >= 0).all()
+            assert node_indices.max().item() < x.size(0)
             if node_indices.numel() == 0:
-                logger.warning("Empty batch detected!")
+                # logger.warning("Empty batch detected!")
                 continue
-
             # Extract subgraph for this batch
             sub_x = x[node_indices]
-            sub_edge_index, _ = subgraph(node_indices, edge_index, relabel_nodes=True)
+            sub_edge_index, _ = subgraph(node_indices, edge_index, relabel_nodes=True, num_nodes=x.size(0))
 
             if sub_edge_index.numel() == 0:
                 logger.warning("Empty subgraph detected!")
@@ -133,31 +137,33 @@ class AMSGP(torch.nn.Module):
 
         h = torch.cat(all_h, dim=0)
         ids = torch.cat(all_ids, dim=0)
-
-        #
+        
         graph_embs = []
         self._device = x.device
 
         for node_indices in node_indices_list:
             if node_indices.numel() == 0:
-                logger.warning("Empty batch detected!")
+                # logger.warning("Empty batch detected!")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
-            sub_edge_index, _ = subgraph(node_indices, edge_index, relabel_nodes=True)
+            sub_edge_index, _ = subgraph(node_indices, edge_index, relabel_nodes=True, num_nodes=x.size(0))
 
             # Validate subgraph edge indices
             if sub_edge_index.numel() == 0:
-                logger.warning("Empty subgraph detected!")
+                # logger.warning("Empty subgraph detected!")
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
                 continue
 
             # Compute dynamic centrality
-            h_masked = h[node_indices]
+            h_masked = h[node_indices] # No grad needed beyond here
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(h_masked, sub_edge_index)
 
             # Generate multiscale subgraphs
             subgraphs = self._generate_multiscale_subgraphs(filtered_edge_index, centrality, h_masked)
+            
+            if len(subgraphs) == 0:
+                logger.warning(f"No subgraphs generated for graph with nodes and {edge_index.size(1)} edges.")
 
             # Create graph embeddings
             if subgraphs:
@@ -166,62 +172,85 @@ class AMSGP(torch.nn.Module):
             else:
                 # Process empty subgraph case
                 graph_embs.append(torch.zeros(self.output_dim_g_emb, device=self._device))
-
+        result = torch.stack(graph_embs)
         # Stack all graph embeddings
-        return torch.stack(graph_embs), ids
+        return result, ids
 
+    @torch.no_grad()
     def _calculate_dynamic_centrality(self, h, edge_index):
-        row, col = edge_index
-        h_row = h[row]
-        h_col = h[col]
+        row, col = edge_index  # [E], [E]
+        num_edges = row.size(0)
+        num_nodes = h.size(0)
 
-        num_edges = h_row.shape[0]
-        num_nodes = h.shape[0]
+        if num_edges == 0:
+            # Return zero centrality and empty edge index
+            device = h.device
+            filtered_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+            centrality = torch.zeros(num_nodes, dtype=h.dtype, device=device)
+            return filtered_edge_index, centrality
 
-        # Calculate graph density for adaptive threshold
+        # === Step 1: Graph Density Adaptive Threshold ===
         max_possible_edges = num_nodes * (num_nodes - 1) // 2
         graph_density = num_edges / max(max_possible_edges, 1)
-
-        # Adaptive threshold based on graph density
-        # Denser graphs need higher thresholds to avoid over-connectivity
         adaptive_threshold = self.thre_edge_exist * (1 + 2 * graph_density)
 
-        if num_edges <= 1000:
-            sim_ = (h_row * h_col).sum(dim=1).abs()
-        else:
-            chunk_size = self.adap_chunk_size_mul_subg.calc(
-                tensor_shape=(num_edges, edge_index.shape[1], h.shape[1]),
-                dim=0,
-                dtype=h.dtype,
-            )
-            chunk_size = max(16, chunk_size)
+        # === Step 2: Chunked Similarity Computation with Streaming Mask ===
+        chunk_size = self.adap_chunk_size_mul_subg.calc(
+            tensor_shape=(num_edges, h.shape[1]),
+            dim=0,
+            dtype=h.dtype
+        )
+        chunk_size = max(16, min(chunk_size, 512))
 
-            sim_chunks = []
-            for i in range(0, num_edges, chunk_size):
-                end = min(i + chunk_size, num_edges)
-                h_row_chunk = h_row[i:end]
-                h_col_chunk = h_col[i:end]
-                sim_chunk = (h_row_chunk * h_col_chunk).sum(dim=1).abs()
-                sim_chunks.append(sim_chunk)
+        device = h.device
+        filtered_rows = []
+        filtered_cols = []
+        filtered_weights = []
 
-            sim_ = torch.cat(sim_chunks, dim=0)
+        for start in range(0, num_edges, chunk_size):
+            end = min(start + chunk_size, num_edges)
+            r_chunk = row[start:end]
+            c_chunk = col[start:end]
 
-        min_sim_ = sim_.min()
-        max_sim_ = sim_.max()
-        if max_sim_ - min_sim_ > 1e-6:
-            sim_.sub_(min_sim_).div_(max_sim_ - min_sim_)
-        else:
-            sim_.clamp_(min=0, max=1)
+            h_r = h[r_chunk]  # [C, D]
+            h_c = h[c_chunk]  # [C, D]
+            sim = torch.sum(h_r * h_c, dim=1).abs()  # [C]
+            if adaptive_threshold > sim.max():
+                adaptive_threshold = sim.quantile(0.5)  # top 50%
 
-        # Use adaptive threshold instead of fixed threshold
-        mask = sim_ > adaptive_threshold
-        filtered_edge = edge_index[:, mask]
-        filtered_weight = sim_[mask]
+            mask = sim > adaptive_threshold
+            if mask.any():
+                filtered_rows.append(r_chunk[mask])
+                filtered_cols.append(c_chunk[mask])
+                filtered_weights.append(sim[mask])
 
-        centrality = torch.zeros(h.size(0), device=h.device)
-        centrality.scatter_add_(0, filtered_edge[0], filtered_weight)
-        centrality.scatter_add_(0, filtered_edge[1], filtered_weight)
-        return filtered_edge, centrality
+            del h_r, h_c, sim, mask
+
+        # Concatenate only valid edges
+        if not filtered_rows:
+            filtered_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+            centrality = torch.zeros(num_nodes, dtype=h.dtype, device=device)
+            return filtered_edge_index, centrality
+
+        try:
+            filtered_row = torch.cat(filtered_rows, dim=0)
+            filtered_col = torch.cat(filtered_cols, dim=0)
+            filtered_weight = torch.cat(filtered_weights, dim=0)
+            filtered_edge_index = torch.stack([filtered_row, filtered_col], dim=0)
+        except RuntimeError as e:
+            logger.warning(f"Failed to concatenate filtered edges: {e}")
+            filtered_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
+            centrality = torch.zeros(num_nodes, dtype=h.dtype, device=device)
+            return filtered_edge_index, centrality
+
+        # Centrality accumulation
+        centrality = torch.zeros(num_nodes, dtype=h.dtype, device=device)
+        if filtered_weight.numel() > 0:
+            # Scatter both directions
+            scatter_add(filtered_weight, filtered_row, out=centrality, dim=0)
+            scatter_add(filtered_weight, filtered_col, out=centrality, dim=0)
+
+        return filtered_edge_index, centrality
 
     def _generate_multiscale_subgraphs(
         self,
@@ -229,89 +258,88 @@ class AMSGP(torch.nn.Module):
         centrality: torch.Tensor,
         h: torch.Tensor,
     ) -> List[GData]:
-        """Generate hierarchical subgraphs using centrality histogram bins.
-
-        基于节点中心性的多尺度子图生成算法，通过分层处理和子图合并策略构建层次化子图结构。
-
-        This method generates multiscale subgraphs by dividing nodes into bins based on their centrality.
-        It processes nodes in descending order of centrality and merges subgraphs with significant overlap.
-        Subgraphs are created and stored in a pool, and the method ensures that all nodes are covered.
-
-        根据Freedman-Diaconis规则将不同中心性的节点分组，按节点中心性从高到低的顺序逐个作为中心节点生成k跳子图，
-        收集到覆盖全部节点的多尺度子图，合并重叠程度超过指定阈值的子图，最终返回按节点数降序排列的子图列表。
-        生成的子图在后续的图嵌入过程中扮演重要角色，帮助模型更好地理解图的全局结构。
-
-        Args:
-            edge_index: The edge index tensor representing the graph edges.
-            centrality: The centrality scores of the nodes.
-            h: The node embeddings.
-
-        Returns:
-            A list of subgraphs sorted by the number of nodes in descending order.
-        """
         device = h.device
         num_nodes = h.size(0)
 
-        # Step 1: Compute FD bins
+        if num_nodes == 0:
+            return []
+
+        # Compute FD bins
         _, edges = self.hist_fd(centrality)
         num_bins = len(edges) - 1
         covered_nodes = torch.zeros(num_nodes, dtype=torch.bool, device=device)
 
-        # Step 2: Initialize subgraph pool
-        subgraph_masks = []
+        subgraph_masks = []   # Store final masks only
         subgraph_centers = []
 
-        # Step 3: Process each bin in descending order of centrality
+        adj_csr = None  # Will be built lazily
+
         for bin_idx in reversed(range(num_bins)):
-            bin_mask = self._generate_bin_mask(centrality, edges, bin_idx)
-            current_nodes = torch.where(bin_mask)[0]
-            n_current = current_nodes.numel()
-            if n_current == 0:
+            if covered_nodes.all():
+                break
+
+            bin_mask = (centrality >= edges[bin_idx]) & (centrality <= edges[bin_idx + 1])
+            center_candidates = torch.where(bin_mask)[0]
+            if center_candidates.numel() == 0:
                 continue
 
-            chunk_size = self.adap_chunk_size_mul_subg.calc(
-                tensor_shape=(n_current, edge_index.shape[1], h.shape[1]),
-                dim=0,
-                dtype=h.dtype,
-            )
+            chunk_size = max(1, 512 // (self.n_hop + 1))
+            for start in range(0, len(center_candidates), chunk_size):
+                batch_centers = center_candidates[start:start+chunk_size]
 
-            # Step 4: Batch process nodes
-            for chunk in current_nodes.split(chunk_size):
-                # Get k-hop subgraphs for this batch of nodes
-                subsets, subg_edge_indices = self._batch_k_hop_subgraph(chunk, self.n_hop, edge_index, num_nodes)
+                if adj_csr is None and edge_index.numel() > 0:
+                    row, col = edge_index
+                    if row.numel() > 0:
+                        adj = torch.sparse_coo_tensor(
+                            torch.stack([row, col]), torch.ones_like(row, dtype=h.dtype),
+                            size=(num_nodes, num_nodes)
+                        ).coalesce().to_sparse_csr()
+                        adj_csr = adj
 
-                for subset, center_node in zip(subsets, chunk.tolist()):
-                    if subset.numel() < 2:
+                if adj_csr is None:
+                    continue  
+
+                node_masks = self._batch_k_hop_subgraph(
+                    batch_centers, self.n_hop, edge_index, num_nodes
+                )  # [B, N]
+
+                for i, center_node in enumerate(batch_centers.tolist()):
+                    mask = node_masks[i]  # [N]
+                    if mask.sum() < 2:
                         continue
 
-                    new_mask = torch.zeros(num_nodes, dtype=torch.bool, device=device)
-                    new_mask[subset] = True
-
-                    # Step 5: Vectorized overlap detection
+                    # Overlap detection
                     overlapping_indices = []
                     if subgraph_masks:
-                        existing_masks = torch.stack(subgraph_masks)
-                        intersections = (existing_masks & new_mask).sum(dim=1)
-                        min_sizes = torch.min(
-                            existing_masks.sum(dim=1), torch.full_like(intersections, new_mask.sum().item())
-                        )
-                        overlaps = intersections / (min_sizes + 1e-6)
-                        overlapping_indices = (overlaps > self.thre_sg_overlap).nonzero().squeeze(1).tolist()
+                        existing_stacked = torch.stack(subgraph_masks)  # [M, N]
+                        intersection = (existing_stacked & mask).sum(dim=1)
+                        min_sizes = torch.min(existing_stacked.sum(dim=1), mask.sum())
+                        overlaps = intersection / (min_sizes + 1e-8)
+                        overlapping_indices = (overlaps > self.thre_sg_overlap).nonzero(as_tuple=False).view(-1).tolist()
 
-                    # Step 6: Merge or add
-                    if overlapping_indices.__len__() > 0:
-                        merged_mask = new_mask.clone()
-                        for idx in sorted(overlapping_indices, reverse=True):
-                            merged_mask |= subgraph_masks[idx]
-                            del subgraph_masks[idx], subgraph_centers[idx]
-                        subgraph_masks.append(merged_mask)
-                        subgraph_centers.append(center_node)
-                    else:
-                        subgraph_masks.append(new_mask)
-                        subgraph_centers.append(center_node)
+                    # Collect masks to merge
+                    merged_mask = mask.clone()
+                    masks_to_merge = []
+                    indices_to_remove = sorted(overlapping_indices, reverse=True)  
 
-                    # Step 7: Update coverage
-                    covered_nodes |= new_mask
+                    # Validate indices before accessing
+                    valid_indices = [idx for idx in indices_to_remove if 0 <= idx < len(subgraph_masks)]
+                    for idx in valid_indices:
+                        masks_to_merge.append(subgraph_masks[idx])
+
+                    # Remove invalid ones safely
+                    for idx in reversed(range(len(subgraph_masks))):
+                        if idx in valid_indices:
+                            del subgraph_masks[idx]
+                            del subgraph_centers[idx]
+
+                    # Merge all overlapping regions into one
+                    for m in masks_to_merge:
+                        merged_mask |= m
+
+                    subgraph_masks.append(merged_mask)
+                    subgraph_centers.append(center_node)
+                    covered_nodes |= merged_mask
 
                     if covered_nodes.all():
                         break
@@ -320,29 +348,40 @@ class AMSGP(torch.nn.Module):
             if covered_nodes.all():
                 break
 
-        # Step 8: Convert to GData objects
-        subgraph_data = []
-        for mask, center in zip(subgraph_masks, subgraph_centers):
-            node_count = mask.sum().item()
-            subgraph_data.append((node_count, mask, center))
+        # Build GData objects
+        subgraphs = []
+        valid_pairs = [(m, c) for m, c in zip(subgraph_masks, subgraph_centers) if m.sum() > 1]
 
-        # Sort by node count descending
-        subgraph_data.sort(key=lambda x: x[0], reverse=True)
+        for mask, center in valid_pairs:
+            subset_nodes = torch.where(mask)[0]
+            if subset_nodes.numel() == 0:
+                continue
 
-        # Step 9: Create GData objects in sorted order
-        subgraphs = [
-            GData(
-                x=h[mask],
-                edge_index=self._fast_edge_index(edge_index, mask),
-                center_node=center,
-                node_idx=torch.where(mask)[0],
-                mask=mask,
-            )
-            for _, mask, center in subgraph_data
-        ]
+            try:
+                sub_edge_index, _ = subgraph(
+                    subset=subset_nodes,
+                    edge_index=edge_index,
+                    relabel_nodes=True,
+                    num_nodes=num_nodes
+                )
+                sub_x = h[subset_nodes]
+                gdata = GData(
+                    x=sub_x,
+                    edge_index=sub_edge_index,
+                    center_node=center,
+                    node_idx=subset_nodes,
+                    mask=mask
+                )
+                subgraphs.append(gdata)
+            except Exception as e:
+                logger.warning(f"Failed to build subgraph around node {center}: {e}")
+                continue
+
+        # Sort by size descending
+        subgraphs.sort(key=lambda g: g.num_nodes, reverse=True)
 
         return subgraphs
-
+    
     @staticmethod
     @torch.jit.script
     def _generate_bin_mask(centrality: torch.Tensor, edges: torch.Tensor, bin_idx: int) -> torch.Tensor:
@@ -352,23 +391,45 @@ class AMSGP(torch.nn.Module):
     def _fast_edge_index(edge_index: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
         sub_edge_index, _ = subgraph(mask, edge_index, relabel_nodes=True)
         return sub_edge_index
-
+    
     @staticmethod
     def _batch_k_hop_subgraph(
         nodes: torch.Tensor, num_hops: int, edge_index: torch.Tensor, num_nodes: int
-    ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-        """Custom implementation of batch k-hop subgraph extraction."""
-        nodes_cpu = nodes.cpu().numpy().tolist()
-        subsets = []
-        edge_indices = []
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Batched k-hop subgraph extraction using vectorized BFS via sparse matrix multiplication.
+        Returns:
+            - node_masks: [len(nodes), num_nodes], bool tensor indicating membership
+            - edge_indices_list not returned directly; use later masking
+        """
+        device = edge_index.device
+        row, col = edge_index
 
-        for _node in nodes_cpu:
-            subset, sub_edge_index, _, _ = k_hop_subgraph(
-                node_idx=_node, num_hops=num_hops, edge_index=edge_index, num_nodes=num_nodes, relabel_nodes=True
-            )
-            subsets.append(subset)
-            edge_indices.append(sub_edge_index)
-        return subsets, edge_indices
+        # Build adjacency matrix: sparse (num_nodes, num_nodes)
+        adj = torch.sparse_coo_tensor(
+            indices=torch.stack([row, col]),
+            values=torch.ones(row.size(0), device=device),
+            size=(num_nodes, num_nodes)
+        ).coalesce()
+
+        # Convert to CSR for faster matmul
+        adj_csr = adj.to_sparse_csr()
+
+        # Initialize mask: one-hot for each seed node
+        node_masks = torch.zeros((nodes.size(0), num_nodes), dtype=torch.bool, device=device)
+        node_masks.scatter_(1, nodes.unsqueeze(-1), True)
+
+        current_mask = node_masks.float()
+        for _ in range(num_hops):
+            # Sparse-Dense matmul: propagate neighbors
+            next_mask_vals = torch.matmul(adj_csr, current_mask.t()).t().bool()
+            new_neighbors = next_mask_vals & (~node_masks)
+            if not new_neighbors.any():
+                break
+            node_masks |= next_mask_vals
+            current_mask = new_neighbors.float()
+
+        return node_masks      
 
     @staticmethod
     def hist_fd(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -397,70 +458,65 @@ class AMSGP(torch.nn.Module):
         hist = torch.histc(tensor.cpu(), bins=num_bins, min=min_cpu, max=max_cpu)
         return hist.to(tensor.device), edges
 
-    def _create_graph_embedding(self, subgraphs):
-        num_subgraphs = len(subgraphs)
-        if num_subgraphs == 0:
+    def _create_graph_embedding(self, subgraphs: List[GData]):
+        if not subgraphs:
+            logger.warning("❌ No subgraphs provided to create graph embedding.")
             return torch.zeros(self.output_dim_g_emb, device=self._device)
 
-        # Filter out empty subgraphs
-        subgraphs = [g for g in subgraphs if g.x.numel() > 0]
-        num_subgraphs = len(subgraphs)
-        if num_subgraphs == 0:
-            logger.warning("All subgraphs were empty, returning zero embeddings.")
+        # Filter valid non-empty subgraphs
+        valid_subgraphs = [g for g in subgraphs if hasattr(g, 'x') and g.x.numel() > 0]
+        if not valid_subgraphs:
+            logger.warning("❌ All subgraphs are empty after filtering.")
             return torch.zeros(self.output_dim_g_emb, device=self._device)
 
-        embs = torch.cat([self._process_subgraph(g) for g in subgraphs])
+        try:
+            embs = torch.stack([self._process_subgraph(g)[0] for g in valid_subgraphs])  # [S, D]
+        except Exception as e:
+            logger.error(f"💥 Error processing subgraphs: {e}")
+            return torch.zeros(self.output_dim_g_emb, device=self._device)
 
-        # Build super graph and perform global pooling
-        super_nodes_edge_index = to_undirected(torch.combinations(torch.arange(num_subgraphs, device=embs.device)).t())
-        global_emb = self.global_xgat_pool1(embs, super_nodes_edge_index)
-        _outputs = self.global_sagpool1(global_emb, super_nodes_edge_index)
-        global_emb = _outputs[0]
+        num_subgraphs = embs.size(0)
+        if num_subgraphs == 1:
+            # Can't form edge_index with single node → skip pooling
+            global_emb = self.global_xgat_pool1(embs, torch.empty(2, 0, dtype=torch.long, device=embs.device))
+            return global_emb.squeeze(0)
 
-        return global_emb.squeeze(0)
+        # Create fully connected super-node graph
+        super_edge_index = to_undirected(torch.combinations(torch.arange(num_subgraphs, device=embs.device), r=2).t())
+
+        try:
+            global_emb = self.global_xgat_pool1(embs, super_edge_index)
+            pooled = self.global_sagpool1(global_emb, super_edge_index)
+            return pooled[0].squeeze(0)
+        except Exception as e:
+            logger.error(f"Global pooling failed: {e}")
+            return torch.mean(embs, dim=0)  # Fallback: mean pooling
+
 
     def _process_subgraph(self, subgraph):
         hx = self.sagpool1(subgraph.x, subgraph.edge_index)
         return hx[0]
 
-
 class NodeEmbedding(nn.Module):
-    r"""
-    Embedding nodes in a graph like embedding words in a sentence.
-    """
-
     def __init__(
         self,
         embedding_dim: int,
         fusion_dims: List[int],
         dict_node_names: Dict[str, int],
         n_heads: int,
-        dropout: float = const.default.dropout,
+        dropout: float = 0.1,
     ):
-        r"""
-        Embedding nodes in a graph like embedding words in a sentence.
-
-        Args:
-            embedding_dim: Dimension of the embedding.
-            fusion_dims: Dimensions for the fusion (fusing observation value and inherent feature) layers.
-            dict_node_names: Dictionary mapping node names to indices.
-            n_heads: Number of attention heads.
-            dropout: Dropout rate.
-        """
         super().__init__()
         self.embedding_dim = embedding_dim
-        self.fusion_dims = fusion_dims
         self.dict_node_names = dict_node_names
-        self.n_heads = n_heads
 
-        self.embed = nn.Embedding(len(dict_node_names), embedding_dim, scale_grad_by_freq=False, sparse=True)
-
-        # Embedding features
+        self.embed = nn.Embedding(len(dict_node_names), embedding_dim)
         self.feature_proj = nn.Linear(1, embedding_dim)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=embedding_dim, num_heads=n_heads, dropout=dropout, batch_first=True
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(embedding_dim * 2, embedding_dim),
+            nn.SiLU(),
+            nn.Dropout(dropout),
         )
-        self.fusion_norm = nn.LayerNorm(embedding_dim)
 
         self._layers = nn.ModuleList(
             [
@@ -475,41 +531,28 @@ class NodeEmbedding(nn.Module):
         )
 
         self.norm = nn.LayerNorm(fusion_dims[-1])
+        self.float()
 
-    def forward(
-        self,
-        node_names,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, node_names, x, edge_index):
         if isinstance(node_names[0], list):
             node_names = [n for sublist in node_names for n in sublist]
 
-        # Initial embeddings
-        ids = torch.tensor(
-            [self.dict_node_names[n] for n in node_names],
-            dtype=torch.long,
-            device=x.device,
-        )
-
-        # Get node embeddings
+        ids = torch.tensor([self.dict_node_names[n] for n in node_names], device=x.device)
         node_embeddings = self.embed(ids)
+        
+        x = x.float()  # float32
+        x_proj = self.feature_proj(x.unsqueeze(-1)).squeeze(1)
 
-        # Concatenate and fuse features
-        x_proj = self.feature_proj(x.unsqueeze(-1))
-        node_emb = node_embeddings.unsqueeze(1)
-        # Cross attention
-        fused, _ = self.cross_attn(x_proj, node_emb, node_emb)
-        fused = self.fusion_norm(fused.squeeze(1) + node_embeddings)
+        # Simple splicing and fusion
+        fused = torch.cat([node_embeddings, x_proj], dim=-1)
+        fused = self.fusion_mlp(fused)
 
-        # Multi-scale processing
-        for _layer in self._layers:
-            fused = _layer(fused, edge_index)
+        for layer in self._layers:
+            fused = layer(fused, edge_index)
+
         fused = self.norm(fused)
-
         return fused, ids
-
-
+        
 class GE_Decoder(nn.Module):
     r"""
     Efficient Graph Embedding Decoder without attention mechanisms.
@@ -557,13 +600,13 @@ class GE_Decoder(nn.Module):
         batch_size = z.size(0)
         num_all_nodes = E_all.size(0)
 
-        # chunk_size = self.adap_chunk_size.calc(
-        #     tensor_shape=(num_all_nodes, batch_size, self.z_dim + self.h_dim, self.h_dim),
-        #     dim=0,
-        #     dtype=z.dtype,
-        # )
+        chunk_size = self.adap_chunk_size.calc(
+            tensor_shape=(num_all_nodes, batch_size, self.z_dim + self.h_dim, self.h_dim),
+            dim=0,
+            dtype=z.dtype,
+        )
+        chunk_size = max(16, min(chunk_size, 128))
         # logger.info(f"Using chunk size: {chunk_size}")
-        chunk_size = 16
 
         refined_features = torch.zeros(batch_size, num_all_nodes, self.h_dim, device=z.device)
         reconstructed_features = torch.zeros(batch_size, num_all_nodes, self.output_dim, device=z.device)
@@ -586,7 +629,6 @@ class GE_Decoder(nn.Module):
 
             reconstructed = self.final_projection(processed)
             reconstructed_features[:, i:end_idx] = reconstructed
-
         return refined_features, reconstructed_features
 
     def _build_mlp(self, input_dim: int, hidden_dim: int, n_layers: int, dropout: float) -> nn.Module:
@@ -602,7 +644,6 @@ class GE_Decoder(nn.Module):
         layers.append(nn.Linear(hidden_dim, input_dim))
         return nn.Sequential(*layers)
 
-
 class GLabelPredictor(nn.Module):
     r"""
     Graph-level label predictor.
@@ -617,7 +658,7 @@ class GLabelPredictor(nn.Module):
             layers += [
                 nn.Linear(in_dim, out_dim),
                 nn.SiLU(),
-                nn.LayerNorm(out_dim),  # Use LayerNorm instead of BatchNorm1d
+                nn.LayerNorm(out_dim), 
                 nn.Dropout(dropout),
             ]
             in_dim = out_dim
