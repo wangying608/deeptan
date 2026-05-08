@@ -10,9 +10,9 @@ from numpy import ceil
 bs = 8
 accumulate_grad_batches = 4
 lr = 0.0002
-es = 10
+es = 5
 min_epoch = 3
-max_epoch = 100
+max_epoch = 50
 dropout = 0.2
 negative_slope = 0.2
 node_emb_dim = 128

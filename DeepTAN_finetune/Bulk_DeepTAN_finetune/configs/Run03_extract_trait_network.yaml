@@ -1,0 +1,99 @@
+# ==============================================================================
+# Bulk Trait-aware Latent Network Extraction Config | single-run version
+# ==============================================================================
+# Purpose:
+#   Extract a trait-aware latent gene/feature association network from one
+#   BulkExpand-DeepTAN model after bulk fine-tuning.
+#
+# Expected pipeline:
+#   1. Run01 converts user-defined raw files into a LitData directory:
+#        litdata_dir/
+#          expanded_metadata.pkl
+#          trn/
+#          val/
+#          tst/
+#
+#   2. Run02 fine-tunes the bulk model and saves a checkpoint.
+#
+#   3. This script reads litdata_dir + finetuned_ckpt and writes:
+#        output_dir/trait_network/
+#          bulk_trait_edge_table.parquet
+#          gene_node_summary.csv
+#          bulk_trait_metadata.yaml
+#          mean_embeddings_expanded_pretrained.npy
+#          mean_embeddings_finetuned.npy
+#          raw_signals/
+#
+# Recommended command:
+#   python src/bulk_trait_network_extract_single.py \
+#       --config configs/bulk_trait_network_single.yaml
+#
+# Optional overrides:
+#   python src/bulk_trait_network_extract_single.py \
+#       --config configs/bulk_trait_network_single.yaml \
+#       --litdata_dir /path/to/litdata \
+#       --finetuned_ckpt /path/to/best_model.ckpt \
+#       --output_dir /path/to/network_output
+# ==============================================================================
+
+# ── Local DeepTAN source directory ─────────────────────────────────────────────
+# This directory must make deeptan.graph.model.DeepTAN importable.
+local_deeptan_src: "/path/to/deeptan-dev/src"
+
+# ── scRNA pretrained model checkpoint ─────────────────────────────────────────
+# This should be the same pretrained checkpoint used before bulk fine-tuning.
+pretrained_ckpt: "/path/to/pretrained/best_model.ckpt"
+
+# ── Fine-tuning module used to reconstruct TraitBulkDeepTAN ───────────────────
+# The module must contain the TraitBulkDeepTAN class used in Run02.
+# If you use the optimized single-run Run02 file, keep the default module name.
+finetune_module_dir: "/path/to/project/src"
+finetune_module_name: "run_02_trait_aware_bulk_finetune_single"
+finetune_class_name: "TraitBulkDeepTAN"
+
+# ── Single-run input paths ────────────────────────────────────────────────────
+# Run01 output directory. It must directly contain expanded_metadata.pkl and
+# trn/val/tst subdirectories.
+litdata_dir: "/path/to/litdata"
+
+# Run02 fine-tuned checkpoint. Explicitly setting this is safest and avoids
+# selecting the wrong checkpoint during automatic search.
+finetuned_ckpt: "/path/to/finetune_output/best_model.ckpt"
+
+# Optional: if finetuned_ckpt is empty, the extractor can search this directory
+# for finetune_metadata.pkl or the checkpoint filename with the lowest val_loss.
+finetune_output_dir: ""
+
+# ── Output ────────────────────────────────────────────────────────────────────
+# Extraction results will be saved to output_dir/trait_network/.
+output_dir: "/path/to/network_output"
+
+# Human-readable identifier written to metadata only. It does not affect paths.
+run_id: "FT16_bulk_trait_network"
+
+# Random seed used only for deterministic baseline reconstruction. This is not
+# a data split seed.
+seed: 42
+
+# ── Extraction data scope ─────────────────────────────────────────────────────
+# Use the same samples used in fine-tuning by default.
+extract_splits:
+  - trn
+  - val
+  - tst
+
+# ── Network extraction behavior ───────────────────────────────────────────────
+edge_weight_method: "cosine_similarity"
+abort_if_node_encoder_identical: true
+save_baseline_sample_embeddings: true
+save_finetuned_sample_embeddings: true
+
+# Set to a small integer such as 2 for a smoke test; use null for full extraction.
+max_batches: null
+
+# ── Hardware / loading ────────────────────────────────────────────────────────
+accelerator: "gpu"
+devices: 1
+precision: "32-true"
+batch_size: 32
+n_workers: 8

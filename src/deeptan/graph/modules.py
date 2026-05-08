@@ -118,10 +118,22 @@ class AMSGP(torch.nn.Module):
             sub_edge_index, _ = subgraph(node_indices, edge_index, relabel_nodes=True, num_nodes=x.size(0))
 
             if sub_edge_index.numel() == 0:
-                logger.warning("Empty subgraph detected!")
+                # logger.warning("Empty subgraph detected! Using fallback node embedding.")
+                ids_sub = torch.tensor(
+                    [self.node_embedding_layers.dict_node_names[n] for n in graph_node_names],
+                    device=x.device,
+                    dtype=torch.long,
+                )
+                node_embeddings = self.node_embedding_layers.embed(ids_sub)
+                x_proj = self.node_embedding_layers.feature_proj(sub_x.unsqueeze(-1)).squeeze(1)
+                fused = torch.cat([node_embeddings, x_proj], dim=-1)
+                fused = self.node_embedding_layers.fusion_mlp(fused)
+                h_sub = self.node_embedding_layers.norm(fused)
+
+                all_h.append(h_sub)
+                all_ids.append(ids_sub)
                 continue
 
-            # Process this subgraph with NodeEmbedding using gradient checkpointing
             def node_embedding_forward(names, x_data, edge_idx):
                 return self.node_embedding_layers(names, x_data, edge_idx)
 
@@ -156,7 +168,7 @@ class AMSGP(torch.nn.Module):
                 continue
 
             # Compute dynamic centrality
-            h_masked = h[node_indices] # No grad needed beyond here
+            h_masked = h[node_indices] 
             filtered_edge_index, centrality = self._calculate_dynamic_centrality(h_masked, sub_edge_index)
 
             # Generate multiscale subgraphs
@@ -178,23 +190,20 @@ class AMSGP(torch.nn.Module):
 
     @torch.no_grad()
     def _calculate_dynamic_centrality(self, h, edge_index):
-        row, col = edge_index  # [E], [E]
+        row, col = edge_index 
         num_edges = row.size(0)
         num_nodes = h.size(0)
 
         if num_edges == 0:
-            # Return zero centrality and empty edge index
             device = h.device
             filtered_edge_index = torch.empty((2, 0), dtype=torch.long, device=device)
             centrality = torch.zeros(num_nodes, dtype=h.dtype, device=device)
             return filtered_edge_index, centrality
 
-        # === Step 1: Graph Density Adaptive Threshold ===
         max_possible_edges = num_nodes * (num_nodes - 1) // 2
         graph_density = num_edges / max(max_possible_edges, 1)
         adaptive_threshold = self.thre_edge_exist * (1 + 2 * graph_density)
 
-        # === Step 2: Chunked Similarity Computation with Streaming Mask ===
         chunk_size = self.adap_chunk_size_mul_subg.calc(
             tensor_shape=(num_edges, h.shape[1]),
             dim=0,
@@ -216,7 +225,7 @@ class AMSGP(torch.nn.Module):
             h_c = h[c_chunk]  # [C, D]
             sim = torch.sum(h_r * h_c, dim=1).abs()  # [C]
             if adaptive_threshold > sim.max():
-                adaptive_threshold = sim.quantile(0.5)  # top 50%
+                adaptive_threshold = sim.quantile(0.5)  
 
             mask = sim > adaptive_threshold
             if mask.any():
@@ -301,17 +310,17 @@ class AMSGP(torch.nn.Module):
 
                 node_masks = self._batch_k_hop_subgraph(
                     batch_centers, self.n_hop, edge_index, num_nodes
-                )  # [B, N]
+                )  
 
                 for i, center_node in enumerate(batch_centers.tolist()):
-                    mask = node_masks[i]  # [N]
+                    mask = node_masks[i]  
                     if mask.sum() < 2:
                         continue
 
                     # Overlap detection
                     overlapping_indices = []
                     if subgraph_masks:
-                        existing_stacked = torch.stack(subgraph_masks)  # [M, N]
+                        existing_stacked = torch.stack(subgraph_masks)  
                         intersection = (existing_stacked & mask).sum(dim=1)
                         min_sizes = torch.min(existing_stacked.sum(dim=1), mask.sum())
                         overlaps = intersection / (min_sizes + 1e-8)
