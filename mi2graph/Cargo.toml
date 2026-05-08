@@ -1,0 +1,48 @@
+[package]
+name = "mi2graph"
+authors = ["Chenhua Wu <chanhuawu@outlook.com>"]
+version = "0.3.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Generate MIC relations between features with dynamic feature filtering for graph initialization"
+readme = "README.md"
+repository = "https://github.com/WuChenh/mi2graph"
+homepage = "https://github.com/WuChenh/mi2graph"
+keywords = ["bioinformatics", "machine-learning"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+chrono = "0.4.38"
+clap = "4.5.7"
+indicatif = { version = "0.17.11", features = [
+    "unicode-width",
+    "futures",
+    "improved_unicode",
+    "in_memory",
+    "rayon",
+    "tokio",
+    "unicode-segmentation",
+    "vt100",
+] }
+ndarray = "0.15.6"
+ndarray-npy = "0.8.1"
+ndarray-rand = "0.14.0"
+polars = { version = "0.44.2", features = [
+    "lazy",
+    "ndarray",
+    "strings",
+    "parquet",
+    "decompress",
+] }
+rayon = "1.10.0"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+opt-level = 3
+
+[profile.dev]
+debug = true
+lto = "fat"
+opt-level = 3
