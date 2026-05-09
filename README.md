@@ -2,8 +2,8 @@
 
 # DeepTAN
 
-[![PyPI version](https://img.shields.io/pypi/v/deeptan.svg)](https://pypi.org/project/deeptan/)
-[![PyPI Downloads](https://static.pepy.tech/badge/deeptan)](https://pepy.tech/projects/deeptan)
+[![PyPI version](https://img.shields.io/pypi/v/deeptan-network.svg)](https://pypi.org/project/deeptan-network/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/deeptan-network)](https://pypi.org/project/deeptan-network/)
 
 </div>
 
@@ -127,11 +127,11 @@ You can run the conversion directly with `run_04_litdata.py`:
 
 ```bash
 python run_04_litdata.py \
-  --in_obs /path/to/your_train_guide_graph.parquet \
   --trn_npz /path/to/your_train_guide_graph.npz \
   --val_parquet /path/to/your_validation_expression.parquet \
   --tst_parquet /path/to/your_test_expression.parquet \
   --labels /path/to/your_label.parquet \
+  --in_obs /path/to/your_train_guide_graph.parquet \
   --output_dir /path/to/your_output_dir \
   --n_workers 10
 ```
@@ -479,6 +479,7 @@ python run_04_litdata.py \
   --val_parquet /path/to/your_validation_expression.parquet \
   --tst_parquet /path/to/your_test_expression.parquet \
   --labels /path/to/your_label.parquet \
+  --in_obs /path/to/your_train_guide_graph.parquet \
   --output_dir /path/to/your_output_dir \
   --n_workers 10
 ```
