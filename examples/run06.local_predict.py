@@ -11,13 +11,13 @@ task_name = "multitask"
 ckpt_name = os.path.join("xxxxxxxxxxx", "best_model.ckpt")  # Path to the best model checkpoint obtained from training
 
 batch_size = 8
-splits = [const.dkey.abbr_test]
+splits = [const.dkey.abbr_test] # test set
 
 logs_dir = os.path.join(DATA_HOME, "run", "logs")  # Model checkpoint directory
-output_dir = os.path.join(DATA_HOME, "run", "predict", "deeptan")
-data_dir = os.path.join(DATA_HOME, "data", "optimized_data")
-ckpt_path = os.path.join(logs_dir, dataset, task_name, ckpt_name)
-dataset_dir = os.path.join(data_dir, dataset)
+output_dir = os.path.join(DATA_HOME, "run", "predict", "deeptan")  # Directory where prediction outputs will be saved for the DeepTan model
+data_dir = os.path.join(DATA_HOME, "data", "optimized_data")  # Directory containing the optimized datasets
+ckpt_path = os.path.join(logs_dir, dataset, task_name, ckpt_name) # Full path to a specific model checkpoint file, combining dataset name, task name, and checkpoint name
+dataset_dir = os.path.join(data_dir, dataset)  # Full path to the directory containing a specific dataset
 
 
 if __name__ == "__main__":
