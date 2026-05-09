@@ -1,0 +1,105 @@
+# ==============================================================================
+# Trait-aware BulkExpand-DeepTAN Fine-tuning Config | single-run bulk FT16
+# ==============================================================================
+# This config is used by Run02_Bulk_Type_finetune.py.
+# It assumes Run01 has already generated a LitData directory with this structure:
+#
+#   dataset_root/
+#   ├── trn/
+#   ├── val/
+#   ├── tst/
+#   ├── expanded_metadata.pkl
+#   └── qc_report.json
+#
+# Important:
+#   - data_id is a human-readable run identifier.
+#   - seed is the training random seed; it is not a data-split seed.
+# ==============================================================================
+
+local_deeptan_src: ""
+
+pretrained_ckpt: "/path/to/pretrained/best_model.ckpt"
+
+# Run01 output directory. This directory directly contains trn/val/tst and metadata files.
+dataset_root: "/path/to/output/litdata"
+
+# Fine-tuning output directory. Checkpoints, metrics, predictions and TensorBoard logs are written here.
+output_dir: "/path/to/output/finetune"
+
+run_name: "FT16_bulk"
+data_id: "FT16_bulk_run"
+
+# Training random seed.
+seed: 42
+
+accelerator: "gpu"
+devices: 1
+precision: "16-mixed"
+
+batch_size: 32
+n_workers: 12
+skip_decoder_when_unused: true
+
+eval_compute_recon: true
+num_sanity_val_steps: 0
+check_val_every_n_epoch: 1
+
+max_epochs: 90
+min_epochs: 10
+es_patience: 12
+
+gradient_clip_val: 1.0
+accumulate_grad_batches: 1
+
+base_lr: 3.0e-5
+weight_decay: 1.0e-5
+warmup_epochs: 3
+
+scheduler: "cosine_warm_restarts"
+cosine_T0: 12
+cosine_T_mult: 1
+plateau_patience: 5
+plateau_factor: 0.5
+min_lr: 1.0e-7
+
+lr_multipliers:
+  old_embedding_effective: 0.03
+  new_embedding_effective: 1.0
+  feature_proj: 0.10
+  fusion_mlp: 0.10
+  gat_layers: 0.20
+  pooling: 0.20
+  ge_decoder: 1.00
+  trait_predictor: 1.00
+
+loss:
+  lambda_reg: 1.0
+  lambda_recon: 0.70
+  lambda_anchor: 0.02
+  lambda_old_embedding_anchor: 0.02
+  lambda_new_smoothness: 0.01
+  use_zero_penalty: false
+  lambda_zero: 0.0
+
+task_balance:
+  strategy: "cycle"
+  warmup_recon_epochs: 3
+  cycle: ["recon", "regress", "joint"]
+
+  recon_focus_reg_weight: 0.0
+  recon_focus_recon_weight: 1.0
+
+  regress_focus_reg_weight: 1.0
+  regress_focus_recon_weight: 0.0
+
+  joint_reg_weight: 1.0
+  joint_recon_weight: 1.0
+
+  regularization_in_all_phases: true
+
+stages:
+  new_assimilation_epochs: 3
+  old_embedding_scale_stage1: 0.0
+  new_embedding_scale_stage1: 1.0
+  old_embedding_scale_after: 0.03
+  new_embedding_scale_after: 1.0

@@ -16,7 +16,7 @@ User-defined tissue scRNA files
         + scRNA-pretrained DeepTAN checkpoint
                     │
                     ▼
-Run01  Build Tissue-Type DeepTAN LitData
+Run01  Build Tissue_Type DeepTAN LitData
                     │
                     ▼
 Run02  Fine-tune DeepTAN on the user tissue dataset
@@ -34,17 +34,17 @@ This pipeline is designed for **tissue-specific model adaptation and network-lev
 ```text
 Tissue_DeepTAN_finetune/
 ├── configs/
-│   ├── Run02_Tissue-Type_finetune.yaml
+│   ├── Run02_Tissue_Type_finetune.yaml
 │   └── Run03_extract_network.yaml
 │
 ├── scripts/
-│   ├── Run01_build_Tissue-Type_LitData.sh
-│   ├── Run02_Tissue-Type_finetune.sh
+│   ├── Run01_build_Tissue_Type_LitData.sh
+│   ├── Run02_Tissue_Type_finetune.sh
 │   └── Run03_extract_network.sh
 │
 ├── src/
-│   ├── Run01_build_Tissue-Type_LitData.py
-│   ├── Run02_Tissue-Type_finetune.py
+│   ├── Run01_build_Tissue_Type_LitData.py
+│   ├── Run02_Tissue_Type_finetune.py
 │   └── Run03_extract_network.py
 │
 └── README.md
@@ -54,13 +54,13 @@ Tissue_DeepTAN_finetune/
 
 | File | Purpose | Typical user action |
 |---|---|---|
-| `configs/Run02_Tissue-Type_finetune.yaml` | Configuration for tissue-specific fine-tuning | Edit checkpoint, LitData, output, and training parameters |
+| `configs/Run02_Tissue_Type_finetune.yaml` | Configuration for tissue-specific fine-tuning | Edit checkpoint, LitData, output, and training parameters |
 | `configs/Run03_extract_network.yaml` | Configuration for tissue-specific network extraction | Edit pretrained checkpoint, fine-tuned checkpoint, LitData, and output paths |
-| `scripts/Run01_build_Tissue-Type_LitData.sh` | Shell wrapper for data formatting | Edit user input paths and run |
-| `scripts/Run02_Tissue-Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
+| `scripts/Run01_build_Tissue_Type_LitData.sh` | Shell wrapper for data formatting | Edit user input paths and run |
+| `scripts/Run02_Tissue_Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
 | `scripts/Run03_extract_network.sh` | Shell wrapper for network extraction | Point to the Run03 config and run |
-| `src/Run01_build_Tissue-Type_LitData.py` | Main LitData-construction program | Usually no modification needed |
-| `src/Run02_Tissue-Type_finetune.py` | Main tissue-specific fine-tuning program | Usually no modification needed |
+| `src/Run01_build_Tissue_Type_LitData.py` | Main LitData-construction program | Usually no modification needed |
+| `src/Run02_Tissue_Type_finetune.py` | Main tissue-specific fine-tuning program | Usually no modification needed |
 | `src/Run03_extract_network.py` | Main tissue-specific network-extraction program | Usually no modification needed |
 
 ---
@@ -173,7 +173,7 @@ This structure is recommended but not required. The scripts accept custom paths.
 
 ---
 
-## 5. Run01: build Tissue-Type DeepTAN LitData
+## 5. Run01: build Tissue_Type DeepTAN LitData
 
 Run01 converts user-provided tissue scRNA expression files into DeepTAN-compatible LitData. It reuses the graph skeleton and node vocabulary from the scRNA-pretrained model resources.
 
@@ -182,7 +182,7 @@ Run01 converts user-provided tissue scRNA expression files into DeepTAN-compatib
 Edit:
 
 ```bash
-scripts/Run01_build_Tissue-Type_LitData.sh
+scripts/Run01_build_Tissue_Type_LitData.sh
 ```
 
 Typical fields to modify:
@@ -190,7 +190,7 @@ Typical fields to modify:
 ```bash
 DEEPTAN_SRC="/path/to/deeptan-dev/src"
 
-RUN01_SCRIPT="/path/to/Tissue_DeepTAN_finetune/src/Run01_build_Tissue-Type_LitData.py"
+RUN01_SCRIPT="/path/to/Tissue_DeepTAN_finetune/src/Run01_build_Tissue_Type_LitData.py"
 
 PRETRAINED_TRN_NPZ="/path/to/my_tissue_project/pretrained/pretrained_trn.npz"
 PRETRAINED_PKL="/path/to/my_tissue_project/pretrained/others2save.pkl"
@@ -213,7 +213,7 @@ Use only one label source unless you intentionally want to override the default 
 ### 5.2 Run
 
 ```bash
-bash scripts/Run01_build_Tissue-Type_LitData.sh
+bash scripts/Run01_build_Tissue_Type_LitData.sh
 ```
 
 ### 5.3 Expected output
@@ -252,7 +252,7 @@ Run02 adapts the scRNA-pretrained DeepTAN model to a user-defined tissue dataset
 Edit:
 
 ```bash
-configs/Run02_Tissue-Type_finetune.yaml
+configs/Run02_Tissue_Type_finetune.yaml
 ```
 
 A typical single-run configuration:
@@ -316,20 +316,20 @@ seed: 42
 Using the wrapper:
 
 ```bash
-bash scripts/Run02_Tissue-Type_finetune.sh configs/Run02_Tissue-Type_finetune.yaml
+bash scripts/Run02_Tissue_Type_finetune.sh configs/Run02_Tissue_Type_finetune.yaml
 ```
 
 or directly:
 
 ```bash
-python src/Run02_Tissue-Type_finetune.py \
-  --config configs/Run02_Tissue-Type_finetune.yaml
+python src/Run02_Tissue_Type_finetune.py \
+  --config configs/Run02_Tissue_Type_finetune.yaml
 ```
 
 Optional:
 
 ```bash
-bash scripts/Run02_Tissue-Type_finetune.sh configs/Run02_Tissue-Type_finetune.yaml --skip_tsa
+bash scripts/Run02_Tissue_Type_finetune.sh configs/Run02_Tissue_Type_finetune.yaml --skip_tsa
 ```
 
 ### 6.3 Expected output
@@ -453,7 +453,7 @@ output_dir: "/path/to/my_tissue_project/tissue_network"
 simple_output: true
 
 finetune_module_dir: "/path/to/Tissue_DeepTAN_finetune/src"
-finetune_module_name: "Run02_Tissue-Type_finetune"
+finetune_module_name: "Run02_Tissue_Type_finetune"
 finetune_class_name: "DeepTANFineTune"
 
 accelerator: "gpu"
@@ -599,11 +599,11 @@ Use `w_ft` when you want the fine-tuned tissue-specific network itself. Use `del
 ## 12. Minimal command summary
 
 ```bash
-# Run01: build Tissue-Type LitData
-bash scripts/Run01_build_Tissue-Type_LitData.sh
+# Run01: build Tissue_Type LitData
+bash scripts/Run01_build_Tissue_Type_LitData.sh
 
 # Run02: fine-tune DeepTAN on the tissue dataset
-bash scripts/Run02_Tissue-Type_finetune.sh configs/Run02_Tissue-Type_finetune.yaml
+bash scripts/Run02_Tissue_Type_finetune.sh configs/Run02_Tissue_Type_finetune.yaml
 
 # Run03: extract tissue-specific latent network
 bash scripts/Run03_extract_network.sh configs/Run03_extract_network.yaml

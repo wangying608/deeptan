@@ -50,7 +50,7 @@ set -euo pipefail
 
 # Local DeepTAN source checkout.
 # Leave empty if DeepTAN is already installed in the active Python environment.
-DEEPTAN_SRC="/path/to/deeptan-dev/src"
+DEEPTAN_SRC=""
 
 # Directory containing the Run02 fine-tuning module.
 # Leave empty if the module is already importable from PYTHONPATH or provided

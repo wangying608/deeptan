@@ -1,0 +1,140 @@
+# ==============================================================================
+# Run02 Tissue-Specific DeepTAN Fine-Tuning Configuration
+# ==============================================================================
+#
+# Pipeline position:
+#   Run01: user-defined tissue scRNA files -> LitData
+#   Run02: LitData -> tissue-specific fine-tuned DeepTAN checkpoint
+#   Run03: LitData + fine-tuned checkpoint -> tissue-specific latent gene network
+#
+# Usage:
+#   python src/Run02_Tissue_finetune.py \
+#       --config configs/Run02_Tissue_finetune.yaml
+#
+# Optional:
+#   python src/Run02_Tissue_finetune.py \
+#       --config configs/Run02_Tissue_finetune.yaml \
+#       --tissue ExampleTissue
+#
+# Notes:
+#   - This config is written for a user-facing single-run workflow.
+#   - The LitData path should point directly to the Run01 output directory.
+#   - The training seed controls reproducibility; it is not a data split ID.
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# Required paths
+# ------------------------------------------------------------------------------
+
+# scRNA-pretrained DeepTAN checkpoint.
+pretrained_ckpt: "/path/to/pretrained/best_model.ckpt"
+
+# Kept for compatibility with the original code path.
+# The current fine-tuning workflow loads graph data from LitData.
+nmic_npz: "data/NMIC.npz"
+
+# Output directory for checkpoints, TensorBoard logs, metadata, and TSA outputs.
+output_dir: "/path/to/tissue_finetune_output"
+
+
+# ------------------------------------------------------------------------------
+# Optional pretrained label table for TSA baseline weight slicing
+# ------------------------------------------------------------------------------
+
+# Optional. If provided, this should be the pretraining-stage celltype_onehot.parquet.
+# It allows TSA baseline evaluation to slice the pretrained classifier by class name.
+# Leave empty if unavailable.
+pretrained_labels_parquet: ""
+
+
+# ------------------------------------------------------------------------------
+# Tissue LitData configuration
+# ------------------------------------------------------------------------------
+
+# The key name is a user-defined tissue/run name.
+# litdata should point directly to the Run01 output directory containing:
+#   trn/
+#   val/
+#   tst/
+#   litdata_others2save.pkl
+#   gene_cv_weights.csv
+#   celltype_onehot.parquet
+#
+# cv_weights and class_weights_parquet are optional. If omitted, the script
+# attempts to find them inside the LitData directory.
+tissues:
+  ExampleTissue:
+    litdata: "/path/to/tissue_litdata"
+    # cv_weights: "/path/to/tissue_litdata/gene_cv_weights.csv"
+    # class_weights_parquet: "/path/to/tissue_litdata/celltype_onehot.parquet"
+
+
+# Training order. For standard single-run use, keep one entry.
+tissue_order:
+  - ExampleTissue
+
+
+# ------------------------------------------------------------------------------
+# Optimization hyperparameters
+# ------------------------------------------------------------------------------
+
+base_lr: 3.0e-5
+
+lr_multipliers:
+  embed: 0.0
+  feature_proj: 0.1
+  fusion_mlp: 0.1
+  gat_layers: 0.2
+  pooling: 0.2
+  ge_decoder: 0.3
+  g_label_predictor: 1.0
+
+weight_decay: 1.0e-5
+warmup_epochs: 3
+max_epochs: 99
+min_epochs: 12
+es_patience: 15
+accumulate_grad_batches: 1
+gradient_clip_val: 1.0
+
+
+# ------------------------------------------------------------------------------
+# Loss configuration
+# ------------------------------------------------------------------------------
+
+lambda_anchor: 0.02
+focal_gamma: 2.0
+loss_zero_coeff: 0.5
+
+
+# ------------------------------------------------------------------------------
+# Learning-rate scheduler
+# ------------------------------------------------------------------------------
+
+scheduler: "cosine_warm_restarts"
+cosine_T0: 15
+cosine_T_mult: 1
+
+plateau_patience: 5
+plateau_factor: 0.5
+min_lr: 1.0e-7
+
+
+# ------------------------------------------------------------------------------
+# Hardware
+# ------------------------------------------------------------------------------
+
+accelerator: "gpu"
+devices: 1
+precision: "16-mixed"
+n_workers: 8
+batch_size: 32
+
+
+# ------------------------------------------------------------------------------
+# Reproducibility
+# ------------------------------------------------------------------------------
+
+# Training random seed. This is not a data split identifier.
+seed: 42

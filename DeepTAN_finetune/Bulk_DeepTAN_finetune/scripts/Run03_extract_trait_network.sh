@@ -25,7 +25,7 @@ set -euo pipefail
 
 CONFIG_FILE="${1:-configs/bulk_trait_network_single.yaml}"
 PY_SCRIPT="${PY_SCRIPT:-src/bulk_trait_network_extract_single.py}"
-LOG_DIR="${LOG_DIR:-logs/run03_extract_network}"
+LOG_DIR=""
 mkdir -p "${LOG_DIR}"
 LOG_FILE="${LOG_DIR}/extract_trait_network_$(date +%Y%m%d_%H%M%S).log"
 

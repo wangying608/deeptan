@@ -1,30 +1,30 @@
 # Cell-DeepTAN Fine-tuning
 
-> **A practical workflow for adapting an scRNA-pretrained DeepTAN model to user-defined cell-type scRNA datasets and extracting cell-specific latent gene networks.**  
-> This repository provides a complete pipeline for **data formatting → cell-type fine-tuning → cell-specific network extraction**.
+> **A practical workflow for adapting an scRNA-pretrained DeepTAN model to user-defined Cell_Type scRNA datasets and extracting cell-specific latent gene networks.**  
+> This repository provides a complete pipeline for **data formatting → Cell_Type fine-tuning → cell-specific network extraction**.
 
 ---
 
 ## 1. Overview
 
-`Cell_DeepTAN_finetune` is organized as a user-facing workflow. Users provide their own cell-type scRNA expression files and an scRNA-pretrained DeepTAN checkpoint. The pipeline converts the data into DeepTAN-compatible LitData, fine-tunes the pretrained model in a reconstruction-focused manner, and extracts a cell-specific latent gene network.
+`Cell_DeepTAN_finetune` is organized as a user-facing workflow. Users provide their own Cell_Type scRNA expression files and an scRNA-pretrained DeepTAN checkpoint. The pipeline converts the data into DeepTAN-compatible LitData, fine-tunes the pretrained model in a reconstruction-focused manner, and extracts a cell-specific latent gene network.
 
 ```text
-User-defined cell-type scRNA files
+User-defined Cell_Type scRNA files
         + scRNA-pretrained graph resources
         + scRNA-pretrained DeepTAN checkpoint
                     │
                     ▼
-Run01  Build Cell-Type DeepTAN LitData
+Run01  Build Cell_Type DeepTAN LitData
                     │
                     ▼
-Run02  Fine-tune DeepTAN on the user cell-type dataset
+Run02  Fine-tune DeepTAN on the user Cell_Type dataset
                     │
                     ▼
 Run03  Extract a cell-specific network
 ```
 
-This pipeline is designed for **cell-type-specific model adaptation and network-level biological interpretation**. In the default configuration, cell-type fine-tuning uses `recon_only: true`, meaning that the model focuses on gene-expression reconstruction rather than classification.
+This pipeline is designed for **Cell_Type-specific model adaptation and network-level biological interpretation**. In the default configuration, Cell_Type fine-tuning uses `recon_only: true`, meaning that the model focuses on gene-expression reconstruction rather than classification.
 
 ---
 
@@ -33,17 +33,17 @@ This pipeline is designed for **cell-type-specific model adaptation and network-
 ```text
 Cell_DeepTAN_finetune/
 ├── configs/
-│   ├── Run02_Cell-Type_finetune.yaml
+│   ├── Run02_Cell_Type_finetune.yaml
 │   └── Run03_extract_network.yaml
 │
 ├── scripts/
-│   ├── Run01_build_Cell-Type_LitData.sh
-│   ├── Run02_Cell-Type_finetune.sh
+│   ├── Run01_build_Cell_Type_LitData.sh
+│   ├── Run02_Cell_Type_finetune.sh
 │   └── Run03_extract_network.sh
 │
 ├── src/
-│   ├── Run01_build_Cell-Type_LitData.py
-│   ├── Run02_Cell-Type_finetune.py
+│   ├── Run01_build_Cell_Type_LitData.py
+│   ├── Run02_Cell_Type_finetune.py
 │   └── Run03_extract_network.py
 │
 └── README.md
@@ -53,13 +53,13 @@ Cell_DeepTAN_finetune/
 
 | File | Purpose | Typical user action |
 |---|---|---|
-| `configs/Run02_Cell-Type_finetune.yaml` | Configuration for cell-type fine-tuning | Edit checkpoint, LitData, output, and training parameters |
+| `configs/Run02_Cell_Type_finetune.yaml` | Configuration for Cell_Type fine-tuning | Edit checkpoint, LitData, output, and training parameters |
 | `configs/Run03_extract_network.yaml` | Configuration for cell-specific network extraction | Edit pretrained checkpoint, fine-tuned checkpoint, LitData, and output paths |
-| `scripts/Run01_build_Cell-Type_LitData.sh` | Shell wrapper for data formatting | Edit user input paths and run |
-| `scripts/Run02_Cell-Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
+| `scripts/Run01_build_Cell_Type_LitData.sh` | Shell wrapper for data formatting | Edit user input paths and run |
+| `scripts/Run02_Cell_Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
 | `scripts/Run03_extract_network.sh` | Shell wrapper for network extraction | Point to the Run03 config and run |
-| `src/Run01_build_Cell-Type_LitData.py` | Main LitData-construction program | Usually no modification needed |
-| `src/Run02_Cell-Type_finetune.py` | Main cell-type fine-tuning program | Usually no modification needed |
+| `src/Run01_build_Cell_Type_LitData.py` | Main LitData-construction program | Usually no modification needed |
+| `src/Run02_Cell_Type_finetune.py` | Main Cell_Type fine-tuning program | Usually no modification needed |
 | `src/Run03_extract_network.py` | Main cell-specific network-extraction program | Usually no modification needed |
 
 ---
@@ -115,7 +115,7 @@ The pipeline uses **user-defined file names and paths**. Users do not need to fo
 
 ### 4.2 Optional label files
 
-Cell-type fine-tuning usually runs with:
+Cell_Type fine-tuning usually runs with:
 
 ```yaml
 recon_only: true
@@ -126,7 +126,7 @@ In this mode, classification is not the objective. Labels are therefore optional
 | Label input mode | Description |
 |---|---|
 | `LABELS_PARQUET` | Existing one-hot label parquet |
-| `CELLTYPE_COL` | A cell-type column already present in the expression parquet files |
+| `CELLTYPE_COL` | A Cell_Type column already present in the expression parquet files |
 | `CELLTYPE_CSV` | External annotation CSV containing cell IDs and labels |
 
 ### 4.3 Expected expression table format
@@ -176,7 +176,7 @@ This structure is recommended but not required. The scripts accept custom paths.
 
 ---
 
-## 5. Run01: build Cell-Type DeepTAN LitData
+## 5. Run01: build Cell_Type DeepTAN LitData
 
 Run01 converts user-provided scRNA expression files into DeepTAN-compatible LitData. It reuses the graph skeleton and node vocabulary from the scRNA-pretrained model resources.
 
@@ -185,7 +185,7 @@ Run01 converts user-provided scRNA expression files into DeepTAN-compatible LitD
 Edit:
 
 ```bash
-scripts/Run01_build_Cell-Type_LitData.sh
+scripts/Run01_build_Cell_Type_LitData.sh
 ```
 
 Typical fields to modify:
@@ -193,7 +193,7 @@ Typical fields to modify:
 ```bash
 DEEPTAN_SRC="/path/to/deeptan-dev/src"
 
-RUN01_SCRIPT="/path/to/Cell_DeepTAN_finetune/src/Run01_build_Cell-Type_LitData.py"
+RUN01_SCRIPT="/path/to/Cell_DeepTAN_finetune/src/Run01_build_Cell_Type_LitData.py"
 
 PRETRAINED_TRN_NPZ="/path/to/my_cell_project/pretrained/pretrained_trn.npz"
 PRETRAINED_PKL="/path/to/my_cell_project/pretrained/others2save.pkl"
@@ -214,7 +214,7 @@ LITDATA_DIR="/path/to/my_cell_project/litdata"
 ### 5.2 Run
 
 ```bash
-bash scripts/Run01_build_Cell-Type_LitData.sh
+bash scripts/Run01_build_Cell_Type_LitData.sh
 ```
 
 ### 5.3 Expected output
@@ -238,22 +238,22 @@ litdata/
 | `litdata_others2save.pkl` | Main metadata file required by Run02 |
 | `litdata_others2save.json` | Human-readable metadata summary |
 | `gene_cv_weights.csv` | Gene-level CV weights used for reconstruction loss weighting |
-| `celltype_onehot.parquet` | Optional one-hot cell-type label table |
+| `celltype_onehot.parquet` | Optional one-hot Cell_Type label table |
 
 Before training, confirm that `trn/`, `val/`, `tst/`, and `litdata_others2save.pkl` exist.
 
 ---
 
-## 6. Run02: fine-tune DeepTAN on a cell-type dataset
+## 6. Run02: fine-tune DeepTAN on a Cell_Type dataset
 
-Run02 adapts the scRNA-pretrained DeepTAN model to a user-defined cell-type dataset.
+Run02 adapts the scRNA-pretrained DeepTAN model to a user-defined Cell_Type dataset.
 
 ### 6.1 Configure fine-tuning
 
 Edit:
 
 ```bash
-configs/Run02_Cell-Type_finetune.yaml
+configs/Run02_Cell_Type_finetune.yaml
 ```
 
 A typical single-run configuration:
@@ -317,20 +317,20 @@ seed: 42
 Using the wrapper:
 
 ```bash
-bash scripts/Run02_Cell-Type_finetune.sh configs/Run02_Cell-Type_finetune.yaml
+bash scripts/Run02_Cell_Type_finetune.sh configs/Run02_Cell_Type_finetune.yaml
 ```
 
 or directly:
 
 ```bash
-python src/Run02_Cell-Type_finetune.py \
-  --config configs/Run02_Cell-Type_finetune.yaml
+python src/Run02_Cell_Type_finetune.py \
+  --config configs/Run02_Cell_Type_finetune.yaml
 ```
 
 Optional:
 
 ```bash
-bash scripts/Run02_Cell-Type_finetune.sh configs/Run02_Cell-Type_finetune.yaml --skip_tsa
+bash scripts/Run02_Cell_Type_finetune.sh configs/Run02_Cell_Type_finetune.yaml --skip_tsa
 ```
 
 ### 6.3 Expected output
@@ -350,9 +350,9 @@ The exact checkpoint name may include epoch and validation loss.
 
 ---
 
-## 7. Cell-type fine-tuning objective
+## 7. Cell_Type fine-tuning objective
 
-In the recommended cell-type workflow:
+In the recommended Cell_Type workflow:
 
 ```yaml
 recon_only: true
@@ -377,7 +377,7 @@ The classification branch is retained for checkpoint compatibility but is not us
 
 ### 7.1 Why recon-only?
 
-For cell-type-specific fine-tuning, a dataset often contains one target cell type or one focused cell-group subset. In that setting, classification is usually not the meaningful endpoint. Reconstruction-focused adaptation is used to adjust the pretrained representation to the target cell-type expression distribution.
+For Cell_Type-specific fine-tuning, a dataset often contains one target cell type or one focused cell-group subset. In that setting, classification is usually not the meaningful endpoint. Reconstruction-focused adaptation is used to adjust the pretrained representation to the target Cell_Type expression distribution.
 
 ---
 
@@ -389,7 +389,7 @@ For cell-type-specific fine-tuning, a dataset often contains one target cell typ
 recon_only: true
 ```
 
-Recommended default for cell-type fine-tuning. It disables classification-loss optimization and avoids spending epochs on label-focused phases.
+Recommended default for Cell_Type fine-tuning. It disables classification-loss optimization and avoids spending epochs on label-focused phases.
 
 ### `ge_decoder`
 
@@ -462,7 +462,7 @@ output_dir: "/path/to/my_cell_project/cell_network"
 simple_output: true
 
 finetune_module_dir: "/path/to/Cell_DeepTAN_finetune/src"
-finetune_module_name: "Run02_Cell-Type_finetune"
+finetune_module_name: "Run02_Cell_Type_finetune"
 finetune_class_name: "DeepTANFineTune"
 
 accelerator: "gpu"
@@ -534,8 +534,8 @@ Suggested usage:
 | Goal | Recommended signal |
 |---|---|
 | Build the fine-tuned cell-specific network | `w_ft` |
-| Identify cell-type adaptation effects | `delta_w` or `abs(delta_w)` |
-| Prioritize cell-type-specific candidate genes | combine module membership, hub degree, `delta_w`, and biological prior knowledge |
+| Identify Cell_Type adaptation effects | `delta_w` or `abs(delta_w)` |
+| Prioritize Cell_Type-specific candidate genes | combine module membership, hub degree, `delta_w`, and biological prior knowledge |
 | Visualize cell-level states | use `cell_embeddings_finetuned.npy` |
 
 ---
@@ -587,7 +587,7 @@ No. The GitHub-facing workflow uses explicit user-defined paths. Your files can 
 
 ### Q3. Why is `recon_only: true` recommended?
 
-For cell-type-specific adaptation, classification is usually not the main endpoint. Reconstruction-focused fine-tuning adapts the pretrained representation to the target cell-type expression distribution.
+For Cell_Type-specific adaptation, classification is usually not the main endpoint. Reconstruction-focused fine-tuning adapts the pretrained representation to the target Cell_Type expression distribution.
 
 ### Q4. Do I need labels?
 
@@ -606,11 +606,11 @@ Run03 checks whether the fine-tuned GAT weights differ from the pretrained weigh
 ## 12. Minimal command summary
 
 ```bash
-# Run01: build Cell-Type LitData
-bash scripts/Run01_build_Cell-Type_LitData.sh
+# Run01: build Cell_Type LitData
+bash scripts/Run01_build_Cell_Type_LitData.sh
 
-# Run02: fine-tune DeepTAN on the cell-type dataset
-bash scripts/Run02_Cell-Type_finetune.sh configs/Run02_Cell-Type_finetune.yaml
+# Run02: fine-tune DeepTAN on the Cell_Type dataset
+bash scripts/Run02_Cell_Type_finetune.sh configs/Run02_Cell_Type_finetune.yaml
 
 # Run03: extract cell-specific latent network
 bash scripts/Run03_extract_network.sh configs/Run03_extract_network.yaml

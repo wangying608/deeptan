@@ -1,4 +1,4 @@
-# Bulk-DeepTAN Fine-tuning
+# Bulk_DeepTAN Fine-tuning
 
 > **A practical workflow for adapting scRNA-pretrained DeepTAN to user-defined bulk omics datasets and extracting trait-aware gene networks.**  
 > This repository provides a complete pipeline for **data formatting → model fine-tuning → network extraction → downstream analysis**.
@@ -15,7 +15,7 @@ User-defined bulk omics files
         + scRNA-pretrained DeepTAN checkpoint
                     │
                     ▼
-Run01  Build Bulk-DeepTAN LitData
+Run01  Build Bulk_DeepTAN LitData
                     │
                     ▼
 Run02  Fine-tune DeepTAN on the user bulk dataset
@@ -36,18 +36,18 @@ The pipeline is intended for studies where prediction is not the endpoint. Its m
 ```text
 Bulk_DeepTAN_finetune/
 ├── configs/
-│   ├── Run02_Bulk-Type_finetune.yaml
+│   ├── Run02_Bulk_Type_finetune.yaml
 │   └── Run03_extract_trait_network.yaml
 │
 ├── scripts/
-│   ├── Run01_build_Bulk-DeepTAN_LitData.sh
-│   ├── Run02_Bulk-Type_finetune.sh
+│   ├── Run01_build_Bulk_DeepTAN_LitData.sh
+│   ├── Run02_Bulk_Type_finetune.sh
 │   ├── Run03_extract_trait_network.sh
 │   └── Run04_downstream.sh
 │
 ├── src/
-│   ├── Run01_build_Bulk-DeepTAN_LitData.py
-│   ├── Run02_Bulk-Type_finetune.py
+│   ├── Run01_build_Bulk_DeepTAN_LitData.py
+│   ├── Run02_Bulk_Type_finetune.py
 │   ├── Run03_extract_trait_network.py
 │   └── Run04_downstream.py
 │
@@ -58,14 +58,14 @@ Bulk_DeepTAN_finetune/
 
 | File | Purpose | Typical user action |
 |---|---|---|
-| `configs/Run02_Bulk-Type_finetune.yaml` | Configuration for bulk fine-tuning | Edit model paths, data paths, and training parameters |
+| `configs/Run02_Bulk_Type_finetune.yaml` | Configuration for bulk fine-tuning | Edit model paths, data paths, and training parameters |
 | `configs/Run03_extract_trait_network.yaml` | Configuration for network extraction | Edit checkpoint, LitData, and output paths |
-| `scripts/Run01_build_Bulk-DeepTAN_LitData.sh` | Shell wrapper for data formatting | Edit user file paths and run |
-| `scripts/Run02_Bulk-Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
+| `scripts/Run01_build_Bulk_DeepTAN_LitData.sh` | Shell wrapper for data formatting | Edit user file paths and run |
+| `scripts/Run02_Bulk_Type_finetune.sh` | Shell wrapper for fine-tuning | Point to the Run02 config and run |
 | `scripts/Run03_extract_trait_network.sh` | Shell wrapper for network extraction | Point to the Run03 config and run |
 | `scripts/Run04_downstream.sh` | Shell wrapper for downstream analysis | Edit network input and output paths |
-| `src/Run01_build_Bulk-DeepTAN_LitData.py` | Main data-construction program | Usually no modification needed |
-| `src/Run02_Bulk-Type_finetune.py` | Main fine-tuning program | Usually no modification needed |
+| `src/Run01_build_Bulk_DeepTAN_LitData.py` | Main data-construction program | Usually no modification needed |
+| `src/Run02_Bulk_Type_finetune.py` | Main fine-tuning program | Usually no modification needed |
 | `src/Run03_extract_trait_network.py` | Main network-extraction program | Usually no modification needed |
 | `src/Run04_downstream.py` | Main downstream-analysis program | Usually no modification needed |
 
@@ -163,7 +163,7 @@ This structure is not mandatory. The scripts accept custom paths.
 
 ---
 
-## 5. Run01: build Bulk-DeepTAN LitData
+## 5. Run01: build Bulk_DeepTAN LitData
 
 Run01 converts user files into the graph-structured LitData format consumed by DeepTAN.
 
@@ -172,7 +172,7 @@ Run01 converts user files into the graph-structured LitData format consumed by D
 Edit:
 
 ```bash
-scripts/Run01_build_Bulk-DeepTAN_LitData.sh
+scripts/Run01_build_Bulk_DeepTAN_LitData.sh
 ```
 
 Point the script to your input files, for example:
@@ -194,7 +194,7 @@ OUTPUT_DIR=/path/to/my_bulk_project/litdata
 ### 5.2 Run
 
 ```bash
-bash scripts/Run01_build_Bulk-DeepTAN_LitData.sh
+bash scripts/Run01_build_Bulk_DeepTAN_LitData.sh
 ```
 
 ### 5.3 Expected output
@@ -239,13 +239,13 @@ Run02 adapts the scRNA-pretrained DeepTAN model to the user bulk dataset.
 Edit:
 
 ```bash
-configs/Run02_Bulk-Type_finetune.yaml
+configs/Run02_Bulk_Type_finetune.yaml
 ```
 
 A typical configuration:
 
 ```yaml
-local_deeptan_src: "/path/to/deeptan-dev/src"
+local_deeptan_src: " "
 pretrained_ckpt: "/path/to/my_bulk_project/pretrained/best_model.ckpt"
 
 dataset_root: "/path/to/my_bulk_project/litdata"
@@ -294,14 +294,14 @@ If your version of the script supports processing multiple named runs, define th
 Using the wrapper:
 
 ```bash
-bash scripts/Run02_Bulk-Type_finetune.sh
+bash scripts/Run02_Bulk_Type_finetune.sh
 ```
 
 or directly:
 
 ```bash
-python src/Run02_Bulk-Type_finetune.py \
-  --config configs/Run02_Bulk-Type_finetune.yaml
+python src/Run02_Bulk_Type_finetune.py \
+  --config configs/Run02_Bulk_Type_finetune.yaml
 ```
 
 ### 6.3 Expected output
@@ -708,11 +708,11 @@ zero-penalty setting
 
 ```bash
 # Run01: build LitData
-bash scripts/Run01_build_Bulk-DeepTAN_LitData.sh
+bash scripts/Run01_build_Bulk_DeepTAN_LitData.sh
 
 # Run02: fine-tune DeepTAN on bulk data
-python src/Run02_Bulk-Type_finetune.py \
-  --config configs/Run02_Bulk-Type_finetune.yaml
+python src/Run02_Bulk_Type_finetune.py \
+  --config configs/Run02_Bulk_Type_finetune.yaml
 
 # Run03: extract trait-aware latent network
 python src/Run03_extract_trait_network.py \

@@ -81,7 +81,7 @@ simple_output: true
 finetune_module_dir: "/path/to/project/src"
 
 # Python module name of the Run02 fine-tuning script, without ".py".
-finetune_module_name: "run_02_cell_finetune_userfriendly"
+finetune_module_name: "Run02_Cell_Type_finetune"
 
 # LightningModule class name used in Run02.
 finetune_class_name: "DeepTANFineTune"
