@@ -45,7 +45,7 @@ After building guide graphs with `mi2graph`, the next step is to optimize the da
 
 We provide a data optimization script:
 
-- run_04_litdata.py
+- [x] run_04_litdata.py
 
 #### Why use litdata format?
 
@@ -158,8 +158,8 @@ A typical output directory looks like:
 Where:
 
 - train/, val/, test/ are litdata-optimized datasets,
-- litdata_others2save.* store metadata needed later,
-- label_class_onehot.parquet stores copied label information.
+- `litdata_others2save.*` store metadata needed later,
+- `label_class_onehot.parquet` stores copied label information.
 
 
 ### 3. Train or fine-tune DeepTAN
@@ -392,8 +392,8 @@ A typical prediction output directory looks like:
         ├── preds+multitask+test.pkl
         └── preds+multitask+test.h5
 ```
-- .pkl stores serialized prediction results for Python-based downstream analysis;
-- .h5 stores prediction results in HDF5 format.
+- `.pkl` stores serialized prediction results for Python-based downstream analysis;
+- `.h5` stores prediction results in HDF5 format.
 
 #### 4.5 Evaluation
 
@@ -430,9 +430,9 @@ For example, the label preprocessing notebook for one-hot conversion is shown be
 
 If your raw data is stored in h5ad format, you can first convert it into `.parquet` format, and then split it into:
 
-  - training set
-  - validation set
-  - test set
+- [ ]  training set
+- [ ]  validation set
+- [ ]  test set
 
 You can also generate multiple random splits for repeated experiments or cross-validation.
 
@@ -535,8 +535,8 @@ For details about the fine-tuning workflow and state-specific network constructi
 
 #### 7.1 Keep metadata files
 Do not remove the generated metadata files:
-- litdata_others2save.json
-- litdata_others2save.pkl
+- [x] `litdata_others2save.json`
+- [x] `litdata_others2save.pkl`
 They contain structural information required by later stages.
 
 #### 7.2 Label consistency
@@ -545,24 +545,24 @@ If you use classification or multitask settings, ensure that the label parquet f
 #### 7.3 GPU memory tuning
 For large datasets, the shell training script shows several useful environment variables for memory optimization, such as:
 
-- PYTORCH_CUDA_ALLOC_CONF
-- TOTAL_VRAM
-- TORCH_CUDNN_V8_API_ENABLED
-- TORCHINDUCTOR_FREEZING
+- [ ] PYTORCH_CUDA_ALLOC_CONF
+- [ ] TOTAL_VRAM
+- [ ] TORCH_CUDNN_V8_API_ENABLED
+- [ ] TORCHINDUCTOR_FREEZING
 
 You may need to adjust:
 
-- batch size,
-- chunk size,
-- gradient accumulation,
-- number of workers,
+- [ ] batch size,
+- [ ] chunk size,
+- [ ] gradient accumulation,
+- [ ] number of workers,
 depending on your hardware.
 
 ### 8. Questions and feedback
 
 If you encounter any problems when using DeepTAN, or if you have questions about installation, data preparation, model training, prediction, or evaluation, please feel free to open an issue in this repository.
 
-When reporting an issue, it would be helpful to include:
+📝 When reporting an issue, it would be helpful to include:
 
 - a brief description of the problem;
 - the command or script you used;
@@ -570,6 +570,6 @@ When reporting an issue, it would be helpful to include:
 - your running environment, such as Python version, PyTorch version, CUDA version, and operating system;
 - a minimal example or relevant file structure, if possible.
 
-We welcome bug reports, feature requests, documentation suggestions, and general feedback.
+🙌 We welcome bug reports, feature requests, documentation suggestions, and general feedback.
 
-Thank you for your interest in DeepTAN!
+**Thank you for your interest in DeepTAN!** 
