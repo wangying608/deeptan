@@ -19,6 +19,7 @@ snRNA/
 
 - This dataset contains 89,654 cell samples.
 - The pretrained model learned from this dataset can be further fine-tuned for downstream biological state-specific network construction.
+**Note**: The ath_pretrain.h5ad dataset (~214 MB) is not included in this repository because it exceeds GitHub's 100 MB file size limit. Users can download the raw data using the accession number provided in Supplemental Table 1 of our manuscript.
 
 ## 2. `tissue_finetune/`
 
